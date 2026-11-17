@@ -176,6 +176,8 @@ private:
     bool col = false;  // drawn in colour
     bool ok = false;   // usable as a neighbour: locked, in colour, burst on the PLL's predicted phase
     uint64_t epoch = 0;
+    double phase = 0;  // c_phase and c_mag after this line's burst: it is drawn after the next line's
+    float mag = 0;
   };
   static constexpr float kCombFull = 0.08f, kCombNone = 0.25f;  // luma mismatch, of black-to-white
   static constexpr float kCombMaxErr = 0.35f;  // rad: a burst further off means the stream jumped
@@ -489,7 +491,7 @@ private:
     if (locked_line) measure_levels(ls);
     bool pal_v = false;
     const bool col = o.colour && locked_line && burst(ls, pal_v);
-    draw_line(ls, k, col, pal_v, false, false);
+    draw_line(ls, k, col, pal_v, false, false, c_phase, c_mag);
   }
 
   // NTSC comb: line k is measured now (levels, burst) and the previous one, k - 1, is drawn, combed with
@@ -506,28 +508,30 @@ private:
       bool pal_v = false;
       cur.col = o.colour && locked_line && burst(ls, pal_v);
       cur.ok = cur.col && burst_e < kCombMaxErr;
+      cur.phase = c_phase;
+      cur.mag = c_mag;
     }
     const CombLine &m = comb_mid;
     if (m.field == cur_field && m.k == k - 1 && m.k >= 0 && m.k < std_->active) {
       const auto pair = [&](const CombLine &x, int64_t dk) {
         return m.ok && x.ok && x.field == m.field && x.k == m.k + dk && x.epoch == m.epoch;
       };
-      draw_line(m.ls, m.k, m.col, false, pair(comb_up, -1), pair(cur, 1));
+      draw_line(m.ls, m.k, m.col, false, pair(comb_up, -1), pair(cur, 1), m.phase, m.mag);
     }
     comb_up = comb_mid;
     comb_mid = cur;
   }
 
   // up / dn: comb this line's chroma with the line above / below (see comb_line)
-  void draw_line(double ls, int64_t k, bool col, bool pal_v, bool up, bool dn) {
+  void draw_line(double ls, int64_t k, bool col, bool pal_v, bool up, bool dn, double phase, float mag) {
     uint32_t *row = reinterpret_cast<uint32_t *>((cur_field == 0 ? fieldA : fieldB).data()) + static_cast<size_t>(k) * o.width;
     const double a0 = std_->a0_us * 1e-6 * fs, aw = std_->aw_us * 1e-6 * fs;
     const float white = blank + 2.5f * (blank - tip);
     const float yscale = 1.f / (white - blank);
     // chroma -> U/V in luma units: the burst is 20/92.5 (NTSC) or 0.15/0.7 (PAL) of black-to-white, and
     // demodulated chroma comes out as -(U + jV)/2 against a burst of +1/2 (see fpv_sim.py's composite())
-    const float k_uv = 0.215f / std::max(c_mag, 1e-6f);
-    const cf rot = std::polar(1.f, static_cast<float>(-c_phase));
+    const float k_uv = 0.215f / std::max(mag, 1e-6f);
+    const cf rot = std::polar(1.f, static_cast<float>(-phase));
     const double cdel = 0.21e-6 * fs;  // chroma filter delay minus luma filter delay
     const bool pal = std_ == &kPal;
     // the comb's neighbours sit one line period T (Ti whole samples and Tf more) away, turned onto this
@@ -603,7 +607,7 @@ private:
           if (x & 1) c = c * (1 - 0.5f * (comb_m[h] + comb_m[h + 1])) - 0.5f * (comb_o[h] + comb_o[h + 1]);
           else c = c * (1 - comb_m[h]) - comb_o[h];
         }
-        c *= rot * k_uv;
+        c = c * rot * k_uv;
         float u = -c.real(), v = -c.imag();
         if (pal) {
           if (pal_v) v = -v;
