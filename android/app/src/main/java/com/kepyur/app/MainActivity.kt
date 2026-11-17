@@ -2,6 +2,7 @@ package com.kepyur.app
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.AlertDialog
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -30,6 +31,7 @@ import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.Switch
 import android.widget.TextView
 import org.json.JSONObject
 import java.util.concurrent.Executors
@@ -82,6 +84,7 @@ class MainActivity : Activity() {
         usb = getSystemService(USB_SERVICE) as UsbManager
         mode = intent?.getStringExtra("mode") ?: "normal"
         Native.init(getExternalFilesDir(null)!!.absolutePath + "/kepyur.log")
+        Native.setComb(prefs().getBoolean("comb", false))  // the native Radio lives for the whole process
         Native.log("start, mode=$mode, ${Build.MANUFACTURER} ${Build.MODEL} Android ${Build.VERSION.RELEASE}")
         buildUi()
         val f = IntentFilter().apply {
@@ -413,7 +416,14 @@ class MainActivity : Activity() {
             setPadding(dpi(14f), dpi(4f), dpi(14f), dpi(8f))
             text = "Pilots"
         }
-        panel.addView(panelHeader)
+        val header = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        header.addView(panelHeader, LinearLayout.LayoutParams(0, -2, 1f))
+        header.addView(TextView(this).apply {
+            text = "⚙"; textSize = 22f; setTextColor(Color.rgb(200, 200, 200))
+            setPadding(dpi(14f), 0, dpi(14f), dpi(4f))
+            setOnClickListener { showSettings() }
+        })
+        panel.addView(header)
         pilotRows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         panel.addView(ScrollView(this).apply { addView(pilotRows) }, LinearLayout.LayoutParams(-1, 0, 1f))
         val buttons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(dpi(8f), 0, dpi(8f), 0) }
@@ -454,6 +464,33 @@ class MainActivity : Activity() {
         root.addOnLayoutChangeListener { _, _, _, r, _, _, _, oldR, _ -> if (r != oldR) layoutPanel() }
         setContentView(root)
         setState(State.NO_ADAPTER)
+    }
+
+    private fun prefs() = getSharedPreferences("settings", MODE_PRIVATE)
+
+    private fun showSettings() {
+        val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(24f), dpi(12f), dpi(24f), 0) }
+        body.addView(Switch(this).apply {
+            text = "NTSC colour filter"; textSize = 17f
+            isChecked = prefs().getBoolean("comb", false)
+            setOnCheckedChangeListener { _, on ->
+                prefs().edit().putBoolean("comb", on).apply()
+                Native.setComb(on)
+                Native.log("settings: comb ${if (on) "on" else "off"}")
+                if (watchingHz > 0 && state == State.RUNNING) Native.watch(watchingHz)  // rebuilds the decoder
+            }
+        })
+        body.addView(TextView(this).apply {
+            text = "Fewer rainbow fringes on fine detail and OSD text. NTSC cameras only. Uses more CPU."
+            textSize = 13f; setTextColor(Color.rgb(170, 170, 170))
+            setPadding(0, dpi(4f), dpi(48f), 0)
+        })
+        AlertDialog.Builder(this)
+            .setTitle("Settings")
+            .setView(body)
+            .setPositiveButton("Done", null)
+            .setOnDismissListener { hideSystemBars() }
+            .show()
     }
 
     private fun layoutPanel() {
