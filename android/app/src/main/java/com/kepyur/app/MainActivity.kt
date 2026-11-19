@@ -33,6 +33,7 @@ import kotlin.math.roundToInt
  */
 class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     private val ui = Handler(Looper.getMainLooper())
+    private val engine = Engine.get()
     private lateinit var settings: Settings
     private lateinit var link: UsbLink
 
@@ -63,14 +64,14 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         settings = Settings(this)
-        Native.init(getExternalFilesDir(null)!!.absolutePath + "/kepyur.log")
-        Native.log("start, ${Build.MANUFACTURER} ${Build.MODEL} Android ${Build.VERSION.RELEASE}")
+        engine.init(getExternalFilesDir(null)!!.absolutePath + "/kepyur.log")
+        engine.log("start, ${Build.MANUFACTURER} ${Build.MODEL} Android ${Build.VERSION.RELEASE}")
         applyPicture()
         applySignal()
         applyView()
-        Native.setBackdrop(true, true)
+        engine.setBackdrop(true, true)
         buildUi()
-        link = UsbLink(this, this)
+        link = UsbLink(this, engine, this)
         handleIntent(intent)
         link.start()
     }
@@ -90,14 +91,14 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         }
         if (i.hasExtra("gain")) {
             val g = i.getFloatExtra("gain", -1f).toDouble()
-            Native.setGain(g)
-            Native.log("debug: gain ${if (g < 0) "AGC" else "$g dB"}")
+            engine.setGain(g)
+            engine.log("debug: gain ${if (g < 0) "AGC" else "$g dB"}")
             retune()
         }
         if (i.hasExtra("record")) {
             val secs = i.getFloatExtra("record", 3f).toDouble()
             val name = "rec-" + java.text.SimpleDateFormat("HHmmss", java.util.Locale.US).format(java.util.Date())
-            Native.record(secs, getExternalFilesDir(null)!!.absolutePath + "/" + name)
+            engine.record(secs, getExternalFilesDir(null)!!.absolutePath + "/" + name)
         }
     }
 
@@ -125,7 +126,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         ui.removeCallbacks(poll)
         // nobody is watching: no reason to keep two cores decoding
         if (link.state == UsbLink.State.RUNNING && !testRunning) {
-            Native.idle()
+            engine.idle()
             mode = "idle"
         }
         super.onStop()
@@ -147,22 +148,22 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
 
     // ---------------------------------------------------------------------------------------- settings -> native
     private fun applyPicture() {
-        Native.setPicture(settings.lumaComb, settings.lumaComb && settings.cleanOsd, settings.smoothLines, settings.sparkleRepair)
-        Native.setComb(settings.colourComb)
+        engine.setPicture(settings.lumaComb, settings.lumaComb && settings.cleanOsd, settings.smoothLines, settings.sparkleRepair)
+        engine.setComb(settings.colourComb)
     }
 
     /** True when something changed that only a new tune applies. */
     private fun applySignal(): Boolean {
         // only when it changed: setting the rate also forgets that 40 had to fall back to 20
         val rate = if (settings.rate40) 1 else 2
-        if (rate != appliedRate) Native.setWatchRate(rate)
+        if (rate != appliedRate) engine.setWatchRate(rate)
         appliedRate = rate
-        Native.setDiversity(settings.diversity)
-        return Native.setOffsetTuning(settings.offsetTune)
+        engine.setDiversity(settings.diversity)
+        return engine.setOffsetTuning(settings.offsetTune)
     }
 
     private fun applyView() =
-        Native.setView(settings.aspect, settings.fit, settings.scale, settings.goggles, settings.eyeShift)
+        engine.setView(settings.aspect, settings.fit, settings.scale, settings.goggles, settings.eyeShift)
 
     /** The frequency for the chosen channel: where a scan measured its transmitter, if it found one, else the nominal one. */
     private fun channelHz(): Double {
@@ -177,7 +178,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         val hz = channelHz()
         if (hz <= 0) return
         noVideoFound = false
-        Native.watch(hz, fresh)
+        engine.watch(hz, fresh)
         mode = "watch"
     }
 
@@ -192,7 +193,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     override fun onScan() {
         if (link.state != UsbLink.State.RUNNING || testRunning) return
         noVideoFound = false
-        Native.scan(channelHz())
+        engine.scan(channelHz())
         mode = "scan"
         refresh()
     }
@@ -210,7 +211,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     }
 
     /** A view slider is being dragged: the picture sharp under it, so the change can be judged. */
-    override fun onPeek(on: Boolean) = Native.setBackdrop(!on, false)
+    override fun onPeek(on: Boolean) = engine.setBackdrop(!on, false)
 
     override fun onStatusAction() = link.retryNow()
 
@@ -231,7 +232,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         lastDropped = 0
         when {
             testRequested -> startTest()
-            !foreground -> { Native.idle(); mode = "idle" }
+            !foreground -> { engine.idle(); mode = "idle" }
             settings.channelMhz > 0 -> tune(fresh = true)
             else -> onScan()   // first run: find something to show
         }
@@ -251,15 +252,15 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         val t = testPlan.removeFirstOrNull()
         if (t == null) {
             testRunning = false
-            Native.log("usbtest: all done: ${testResults.joinToString(" | ")}")
-            Native.log("usbtest: now decoding for the rest of the session")
+            engine.log("usbtest: all done: ${testResults.joinToString(" | ")}")
+            engine.log("usbtest: now decoding for the rest of the session")
             applySignal()
             if (settings.channelMhz > 0) tune(fresh = true) else onScan()
             return
         }
         testRunning = true
-        Native.log("usbtest: rate_sel ${t.first} for ${t.second} s")
-        Native.streamTest(t.first, t.second)
+        engine.log("usbtest: rate_sel ${t.first} for ${t.second} s")
+        engine.streamTest(t.first, t.second)
         mode = "test"
     }
 
@@ -293,9 +294,9 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     private fun radioState(): MenuState {
         // a number the native side could not print as JSON (nan, inf) must not take the app down with it
         val s = try {
-            JSONObject(Native.status())
+            JSONObject(engine.status())
         } catch (e: org.json.JSONException) {
-            if (!statusBroken) Native.log("status: unreadable ($e)")
+            if (!statusBroken) engine.log("status: unreadable ($e)")
             statusBroken = true
             return MenuState(Tone.BUSY, "Working", radioReady = !testRunning, found = found)
         }
@@ -395,7 +396,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         try {
             surface.setFrameRate(rate, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)
         } catch (e: Exception) {
-            Native.log("setFrameRate: $e")
+            engine.log("setFrameRate: $e")
         }
     }
 
@@ -409,10 +410,10 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         video.holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(h: SurfaceHolder) {
                 frameRateFor = ""
-                Native.setSurface(h.surface)
+                engine.setSurface(h.surface)
             }
-            override fun surfaceChanged(h: SurfaceHolder, f: Int, w: Int, ht: Int) = Native.redraw()
-            override fun surfaceDestroyed(h: SurfaceHolder) = Native.setSurface(null)
+            override fun surfaceChanged(h: SurfaceHolder, f: Int, w: Int, ht: Int) = engine.redraw()
+            override fun surfaceDestroyed(h: SurfaceHolder) = engine.setSurface(null)
         })
         root.addView(video, FrameLayout.LayoutParams(-1, -1))
 
@@ -459,7 +460,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         hint.animate().cancel()
         hint.alpha = 0f
         hint.visibility = View.GONE
-        Native.setBackdrop(true, false)
+        engine.setBackdrop(true, false)
         refresh()
         menu.animate().cancel()
         menu.visibility = View.VISIBLE
@@ -471,7 +472,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     private fun closeMenu() {
         if (!menuOpen) return
         menuOpen = false
-        Native.setBackdrop(false, false)
+        engine.setBackdrop(false, false)
         menu.animate().cancel()
         menu.animate().alpha(0f).translationY(dp(10f)).setDuration(200).setInterpolator(DecelerateInterpolator(1.5f))
             .withEndAction { menu.visibility = View.GONE }.start()

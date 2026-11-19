@@ -23,7 +23,7 @@ import java.util.concurrent.Executors
  * All of it runs on the main thread except the native calls that block (open, close, the USB 3 switch), which
  * go through one worker thread, in order.
  */
-class UsbLink(private val ctx: Context, private val events: Events) {
+class UsbLink(private val ctx: Context, private val engine: Engine, private val events: Events) {
     interface Events {
         /** [state] or [message] changed. */
         fun onLinkChanged()
@@ -149,7 +149,7 @@ class UsbLink(private val ctx: Context, private val events: Events) {
         conn = c
         val fd = c.fileDescriptor
         val gen = ++generation
-        Native.log("adapter ${d.deviceName} ${"%04x:%04x".format(d.vendorId, d.productId)} fd=$fd")
+        engine.log("adapter ${d.deviceName} ${"%04x:%04x".format(d.vendorId, d.productId)} fd=$fd")
         set(State.OPENING)
         // bring-up cannot be interrupted from here, but pulling the plug ends it: say so if it drags on
         ui.postDelayed({
@@ -158,7 +158,7 @@ class UsbLink(private val ctx: Context, private val events: Events) {
         }, SLOW_OPEN_MS)
         val trySwitch = switchRequests < MAX_SWITCH_REQUESTS
         worker.execute {
-            val sw = if (trySwitch) Native.usb3Switch(fd) else "skipped"
+            val sw = if (trySwitch) engine.usb3Switch(fd) else "skipped"
             if (sw.startsWith("requested")) {
                 // the adapter drops off the bus and comes back as SuperSpeed: a new device, a new permission
                 ui.post {
@@ -174,8 +174,8 @@ class UsbLink(private val ctx: Context, private val events: Events) {
                 }
                 return@execute
             }
-            val err = Native.open(fd)
-            val fast = err.isEmpty() && Native.superspeed()
+            val err = engine.open(fd)
+            val fast = err.isEmpty() && engine.superspeed()
             ui.post {
                 if (gen != generation) return@post   // unplugged meanwhile: the close queued behind us tidies up
                 switchDeadline = 0
@@ -215,7 +215,7 @@ class UsbLink(private val ctx: Context, private val events: Events) {
 
     /** Close what there is, say what went wrong, and try again shortly. */
     private fun failLater(msg: String) {
-        Native.log("link: $msg (failure ${failures + 1})")
+        engine.log("link: $msg (failure ${failures + 1})")
         giveUpAdapter()
         failures++
         set(State.WAITING, msg)
@@ -229,7 +229,7 @@ class UsbLink(private val ctx: Context, private val events: Events) {
         val c = conn
         conn = null
         worker.execute {
-            Native.close()
+            engine.close()
             c?.close()
         }
     }
@@ -271,14 +271,14 @@ class UsbLink(private val ctx: Context, private val events: Events) {
             when (i.action) {
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                     val switching = SystemClock.elapsedRealtime() < switchDeadline
-                    Native.log("adapter detached${if (switching) " (USB 3 switch)" else ""}")
+                    engine.log("adapter detached${if (switching) " (USB 3 switch)" else ""}")
                     ui.removeCallbacks(retry)
                     giveUpAdapter()
                     failures = 0
                     if (switching) set(State.SWITCHING) else { switchRequests = 0; set(State.NO_ADAPTER) }
                 }
                 UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
-                    Native.log("adapter attached")
+                    engine.log("adapter attached")
                     if (state != State.RUNNING && state != State.OPENING) connect(force = true)
                 }
             }
@@ -288,7 +288,7 @@ class UsbLink(private val ctx: Context, private val events: Events) {
     private val permReceiver = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent) {
             val ok = i.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
-            Native.log("usb permission ${if (ok) "granted" else "denied"}")
+            engine.log("usb permission ${if (ok) "granted" else "denied"}")
             if (state != State.PERMISSION) return
             if (ok) connect(force = true) else set(State.DENIED)
         }

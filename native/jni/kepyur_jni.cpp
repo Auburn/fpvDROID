@@ -340,6 +340,8 @@ std::string jstring_of(JNIEnv *env, jstring s) {
 }
 }  // namespace
 
+// Native is a Kotlin object: these are its instance methods, and the second argument is that one instance
+// (unused), whatever its type is spelled as.
 extern "C" {
 
 JNIEXPORT void JNICALL Java_com_kepyur_app_Native_init(JNIEnv *env, jclass, jstring log_path) {
