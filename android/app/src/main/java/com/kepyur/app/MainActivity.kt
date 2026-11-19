@@ -399,6 +399,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         if (link.state != UsbLink.State.RUNNING) return linkState()
         val was = mode
         mode = s.optString("mode")
+        val radioMode = mode   // what the radio says it is doing; `mode` may move on below (the end of a stream test tunes)
         val v = s.optJSONObject("video")
         val locked = v?.optBoolean("locked") ?: false
         val watchHz = s.num("watch_hz")
@@ -436,20 +437,21 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         // found the radio watching. The ones a scan or a stream test left behind (up to its last moments, after
         // the last refresh that saw it), or that came in while nothing was refreshed (the app in the background:
         // the adapter streams on for a while), say nothing about the picture now: the count is then only taken
-        // note of.
+        // note of. So is whatever comes in before the first refresh of a watch (up to a poll's length, the
+        // retune into it included): a phone that is not keeping up goes on losing blocks after that.
         val now = android.os.SystemClock.elapsedRealtime()
         val late = s.optLong("stream_dropped")
         val queued = s.optLong("dropped") + s.optLong("decode_dropped")
         val dropped = late + queued   // lost anywhere on the way, for the figures on the Signal tab
         val load = maxOf(s.num("dsp_load"), s.num("decode_load"))
-        val followed = mode == "watch" && lastLateWatching && late >= lastLate && now - lastLateAt <= LATE_GAP_MS
+        val followed = radioMode == "watch" && lastLateWatching && late >= lastLate && now - lastLateAt <= LATE_GAP_MS
         if (!followed) lateMarks.clear()
         else if (late > lastLate) lateMarks.addLast(now to late - lastLate)
         while (lateMarks.isNotEmpty() && now - lateMarks.first().first > LATE_WINDOW_MS) lateMarks.removeFirst()
         val lateBurst = followed && late > lastLate && lateMarks.sumOf { it.second } >= LATE_BLOCKS
         lastLate = late
         lastLateAt = now
-        lastLateWatching = mode == "watch"
+        lastLateWatching = radioMode == "watch"
         if (mode == "watch" && (queued > lastDropped || load > 0.95 || lateBurst)) overloadedUntil = now + 5000
         lastDropped = queued
         val overloaded = mode == "watch" && now < overloadedUntil

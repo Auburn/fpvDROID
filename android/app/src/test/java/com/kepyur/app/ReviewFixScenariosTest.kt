@@ -833,4 +833,39 @@ class ReviewFixScenariosTest : AppHarness() {
         advance(500)
         assertEquals(MainActivity.OVERLOAD_ADVICE, detail)
     }
+
+    /**
+     * And for a stream test: the refresh that sees the last test done starts the watch itself, in the same pass.
+     * The radio was not watching at that refresh, so what comes in before the next one is not the watch's.
+     */
+    @Test
+    fun lateUsbBlocksOfTheRetuneAfterAStreamTestAreNotHeldAgainstTheWatch() {
+        saveChannel(5760, 'F')
+        plug(adapter(), broadcast = false)
+        launch(android.content.Intent(app, MainActivity::class.java).putExtra("mode", "usbtest"))
+        advance(500)
+        fake.finishStreamTest(40.0)
+        advance(2500)
+        fake.finishStreamTest(20.0)
+        toNextPoll()   // reads idle with the test done: the next test, or none left and the watch
+        assertEquals("watch", fake.mode)
+        fake.streamDropped = 3   // the retune into the watch
+        toNextPoll()
+        advance(300)
+        assertNotEquals("blocks from before the watch's first refresh", MainActivity.OVERLOAD_ADVICE, detail)
+        fake.streamDropped = 6   // the watch's own
+        advance(500)
+        assertEquals(MainActivity.OVERLOAD_ADVICE, detail)
+    }
+
+    /** One ms at a time until the status has been read once more (a refresh). */
+    private fun toNextPoll() {
+        val n = fake.statusCalls
+        var steps = 0
+        while (fake.statusCalls == n) {
+            looper.idleFor(Duration.ofMillis(1))
+            settle()
+            if (++steps > 2000) fail("no status poll in 2 s")
+        }
+    }
 }
