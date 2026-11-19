@@ -10,11 +10,19 @@ apply() {  # submodule dir, patch, a file in it and a piece of text the patch ad
   # git must look for a repository in $dir and no further up: where $dir is a plain directory inside some other
   # repository (vendored, or unpacked from an archive in a checkout), git apply takes the patch's paths as
   # relative to that repository's top, skips every one and reports success, the reverse check included.
-  local git=(env GIT_CEILING_DIRECTORIES="$(dirname "$dir")" git -C "$dir")
-  if "${git[@]}" apply --reverse --check "$patch" 2>/dev/null; then
+  local git=(env GIT_CEILING_DIRECTORIES="$(dirname "$dir")" git -C "$dir") into=()
+  # A .git in $dir that leads to no repository (a copy of a checkout made without the top .git directory): git
+  # refuses to work there. From the directory above, with no repository in sight from it, git apply is the same
+  # plain patch tool and never looks at that file.
+  if [ -e "$dir/.git" ] && ! "${git[@]}" rev-parse --git-dir >/dev/null 2>&1; then
+    local above; above=$(dirname "$dir")
+    git=(env GIT_CEILING_DIRECTORIES="$(dirname "$above")" git -C "$above")
+    into=(--directory="$(basename "$dir")")
+  fi
+  if "${git[@]}" apply "${into[@]}" --reverse --check "$patch" 2>/dev/null; then
     echo "already applied: $(basename "$patch")"
-  elif "${git[@]}" apply --check "$patch" 2>/dev/null; then
-    "${git[@]}" apply "$patch"
+  elif "${git[@]}" apply "${into[@]}" --check "$patch" 2>/dev/null; then
+    "${git[@]}" apply "${into[@]}" "$patch"
     echo "applied $(basename "$patch") to $dir"
   else
     echo "error: $(basename "$patch") neither applies to nor is already in $dir (at commit" \

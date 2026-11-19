@@ -20,7 +20,9 @@ submodule pin moved without the patch). To build wifi-sdr some other way, run `s
 `.gitmodules` has `ignore = dirty` for wifi-sdr, so the patched working trees do not show in `git status`.
 
 Both work on the sources as plain directories too (no submodule metadata: an archive, or kepyur copied into
-another repository), and both check after the fact that a line each patch adds is really in the tree. A patch
+another repository), and on a copy of a checkout made without its top `.git` directory, whose submodules still
+have a `.git` file that now leads nowhere. Both check after the fact that a line each patch adds is really in
+the tree. A patch
 that adds or removes that line needs the marker in `patches.cmake` and `apply-patches.sh` changed with it.
 
 ## Regenerating one

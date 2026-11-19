@@ -24,10 +24,23 @@ function(kp_apply_patch dir patch marker_file marker)
   if(grc EQUAL 0 AND IS_DIRECTORY "${gitdir}")
     file(LOCK "${gitdir}/kepyur-patch.lock" GUARD FUNCTION TIMEOUT 120)
   endif()
+  # A .git in ${dir} that leads to no repository: a copy of a checkout made without the top .git directory (a
+  # build context that leaves it out, an unpacked backup) still has the submodule's .git file, and git refuses
+  # to do anything there. From the directory above, with no repository in sight from it, git apply is the same
+  # plain patch tool and never looks at that file.
+  set(into "")
+  if(NOT grc EQUAL 0 AND EXISTS "${dir}/.git")
+    get_filename_component(leaf ${dir} NAME)
+    get_filename_component(above2 ${above} DIRECTORY)
+    set(git ${CMAKE_COMMAND} -E env GIT_CEILING_DIRECTORIES=${above2} ${GIT_EXECUTABLE} -C ${above})
+    set(into --directory=${leaf})
+  endif()
   # already applied: the patch reverses cleanly
-  execute_process(COMMAND ${git} apply --reverse --check ${patch} RESULT_VARIABLE rev OUTPUT_QUIET ERROR_QUIET)
+  execute_process(COMMAND ${git} apply ${into} --reverse --check ${patch}
+                  RESULT_VARIABLE rev OUTPUT_QUIET ERROR_QUIET)
   if(NOT rev EQUAL 0)
-    execute_process(COMMAND ${git} apply --check ${patch} RESULT_VARIABLE fwd OUTPUT_QUIET ERROR_VARIABLE fwd_err)
+    execute_process(COMMAND ${git} apply ${into} --check ${patch}
+                    RESULT_VARIABLE fwd OUTPUT_QUIET ERROR_VARIABLE fwd_err)
     if(NOT fwd EQUAL 0)
       execute_process(COMMAND ${git} rev-parse --short HEAD
                       OUTPUT_VARIABLE head OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
@@ -35,7 +48,7 @@ function(kp_apply_patch dir patch marker_file marker)
                           "submodule pin and the patch are out of step. Regenerate the patch against this commit "
                           "(patches/README.md) or check the submodule out at the commit it was made for.\n${fwd_err}")
     endif()
-    execute_process(COMMAND ${git} apply ${patch} RESULT_VARIABLE rc ERROR_VARIABLE err)
+    execute_process(COMMAND ${git} apply ${into} ${patch} RESULT_VARIABLE rc ERROR_VARIABLE err)
     if(NOT rc EQUAL 0)
       message(FATAL_ERROR "patch ${name}: git apply failed in ${dir}:\n${err}")
     endif()
