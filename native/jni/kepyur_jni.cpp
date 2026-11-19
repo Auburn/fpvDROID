@@ -136,6 +136,41 @@ private:
   static constexpr double kStaleSeconds = 1.2;   // no frame for this long: the picture is not live any more ...
   static constexpr float kFadeSeconds = 0.5f;    // ... and fades to black over this
 
+  // EGL sorts the configs that match by colour depth, deepest first, so the first one is 10-bit wherever the
+  // driver has such a config. The picture is 8-bit, and its buffer format then follows the phone, with a 2-bit
+  // alpha the compositor may not put on an overlay. Take plain 8-bit colour with nothing else (opaque if there
+  // is such a config); only a driver that has none gets its first choice.
+  static EGLConfig pick_config(EGLDisplay dpy) {
+    const EGLint attr[] = {EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
+                           EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_NONE};
+    EGLint n = 0;
+    if (!eglChooseConfig(dpy, attr, nullptr, 0, &n) || n < 1) return nullptr;
+    std::vector<EGLConfig> all(n);
+    if (!eglChooseConfig(dpy, attr, all.data(), n, &n) || n < 1) return nullptr;
+    const auto get = [dpy](EGLConfig c, EGLint a) {
+      EGLint v = -1;
+      eglGetConfigAttrib(dpy, c, a, &v);
+      return v;
+    };
+    EGLConfig best = all[0];
+    int best_rank = 2;  // 0: alpha 0, 1: alpha 8, 2: the driver's first choice
+    for (EGLint i = 0; i < n && best_rank > 0; i++) {
+      const EGLConfig c = all[i];
+      if (get(c, EGL_RED_SIZE) != 8 || get(c, EGL_GREEN_SIZE) != 8 || get(c, EGL_BLUE_SIZE) != 8 ||
+          get(c, EGL_DEPTH_SIZE) != 0 || get(c, EGL_STENCIL_SIZE) != 0 || get(c, EGL_SAMPLE_BUFFERS) != 0 ||
+          get(c, EGL_SAMPLES) > 0)
+        continue;
+      const EGLint a = get(c, EGL_ALPHA_SIZE);
+      const int rank = a == 0 ? 0 : a == 8 ? 1 : 2;
+      if (rank < best_rank) best = c, best_rank = rank;
+    }
+    KP_LOGI("screen: EGL config R%d G%d B%d A%d, depth %d, stencil %d, samples %d, native visual 0x%x%s",
+            get(best, EGL_RED_SIZE), get(best, EGL_GREEN_SIZE), get(best, EGL_BLUE_SIZE), get(best, EGL_ALPHA_SIZE),
+            get(best, EGL_DEPTH_SIZE), get(best, EGL_STENCIL_SIZE), get(best, EGL_SAMPLES),
+            get(best, EGL_NATIVE_VISUAL_ID), best_rank == 2 ? " (no plain 8-bit one: the driver's first)" : "");
+    return best;
+  }
+
   bool egl_up() {
     if (_dpy != EGL_NO_DISPLAY) return _ctx != EGL_NO_CONTEXT;
     _dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
@@ -143,10 +178,8 @@ private:
       KP_LOGE("screen: no EGL display (0x%x)", eglGetError());
       return false;
     }
-    const EGLint attr[] = {EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
-                           EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_NONE};
-    EGLint n = 0;
-    if (!eglChooseConfig(_dpy, attr, &_cfg, 1, &n) || n < 1) {
+    _cfg = pick_config(_dpy);
+    if (!_cfg) {
       KP_LOGE("screen: no OpenGL ES 3 config (0x%x)", eglGetError());
       return false;
     }
@@ -332,7 +365,10 @@ private:
 
 std::unique_ptr<Screen> g_screen;
 std::unique_ptr<Radio> g_radio;
-std::mutex g_api;  // serialises open/close against the other calls
+// Keeps an open and a close from overlapping. Only the worker that opens and closes takes it: the mode calls (scan,
+// watch, idle, streamTest) come from the main thread, which must never wait out a radio bring-up, and they need
+// no more than the radio's own lock (each only sets the mode; an open or close in progress sets it again when done).
+std::mutex g_api;
 
 // ---- test picture ----
 // The screen side of the app without an adapter (the "testcard" extra): the test card as if it were decoded
@@ -373,16 +409,20 @@ std::string jstring_of(JNIEnv *env, jstring s) {
 // (unused), whatever its type is spelled as.
 extern "C" {
 
+// Every new activity calls this on its main thread, possibly while an earlier one's radio is still being opened
+// (seconds, or for ever if the adapter hangs): so not under g_api, and the screen and radio are made only once.
 JNIEXPORT void JNICALL Java_com_kepyur_app_Native_init(JNIEnv *env, jclass, jstring log_path) {
-  std::lock_guard<std::mutex> l(g_api);
   const std::string p = jstring_of(env, log_path);
   {
     std::lock_guard<std::mutex> lk(g_log_m);
     if (!g_log) g_log = std::fopen(p.c_str(), "a");
   }
   set_log_sink(file_sink);
-  if (!g_screen) g_screen = std::make_unique<Screen>();
-  if (!g_radio) g_radio = std::make_unique<Radio>([](const Frame &f) { g_screen->post(f); });
+  static std::once_flag made;
+  std::call_once(made, [] {
+    g_screen = std::make_unique<Screen>();
+    g_radio = std::make_unique<Radio>([](const Frame &f) { g_screen->post(f); });
+  });
   KP_LOGI("kepyur native ready");
 }
 
@@ -417,25 +457,21 @@ JNIEXPORT jboolean JNICALL Java_com_kepyur_app_Native_superspeed(JNIEnv *, jclas
 }
 
 JNIEXPORT void JNICALL Java_com_kepyur_app_Native_scan(JNIEnv *, jclass, jdouble prefer_hz) {
-  std::lock_guard<std::mutex> l(g_api);
   if (g_radio && g_radio->is_open()) g_radio->scan(prefer_hz);
   if (g_screen) g_screen->clear();
 }
 
 // fresh: another channel (the old picture goes at once), not the same one again after a settings change
 JNIEXPORT void JNICALL Java_com_kepyur_app_Native_watch(JNIEnv *, jclass, jdouble hz, jboolean fresh) {
-  std::lock_guard<std::mutex> l(g_api);
   if (g_radio && g_radio->is_open()) g_radio->watch(hz);
   if (fresh && g_screen) g_screen->clear();
 }
 
 JNIEXPORT void JNICALL Java_com_kepyur_app_Native_idle(JNIEnv *, jclass) {
-  std::lock_guard<std::mutex> l(g_api);
   if (g_radio && g_radio->is_open()) g_radio->idle();
 }
 
 JNIEXPORT void JNICALL Java_com_kepyur_app_Native_streamTest(JNIEnv *, jclass, jint rate_sel, jdouble seconds) {
-  std::lock_guard<std::mutex> l(g_api);
   if (g_radio && g_radio->is_open()) g_radio->stream_test(rate_sel, seconds);
 }
 
