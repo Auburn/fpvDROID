@@ -14,6 +14,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "combine.h"
@@ -66,10 +67,12 @@ public:
   // NTSC chroma comb (DecoderOpts::comb), taken at the next watch(): fewer rainbows on fine detail and OSD
   // text, ~15 % more decode CPU. Off by default. Android: Native.setComb (the "comb" debug extra).
   void set_comb(bool on);
-  // Off-centre tuning (watch only): the hardware centre on the 5 MHz grid ~6 MHz (40 MS/s) / ~4 MHz (20 MS/s) to
-  // one side of the pilot, so the video never sits on the chip's DC point: its DC filter eats whatever brightness
-  // lands there and rings when the picture moves off it (stripes at the left edge, ghost outlines). Off by
-  // default; taken at the next watch(). True when it changed (call watch() again to retune now).
+  // Off-centre tuning (watch only): the hardware centre on the 5 MHz grid ~6 MHz to one side of the pilot at
+  // 40 MS/s, so the video never sits on the chip's DC point: its DC filter eats whatever brightness lands there
+  // and rings when the picture moves off it (stripes at the left edge, ghost outlines). At 20 MS/s it changes
+  // nothing: the stream is only +-10 MHz wide, the video has to stay in its middle, and the centre stays the
+  // grid point nearest the pilot (at most 2.5 MHz from it). Off by default; taken at the next watch(). True when
+  // it changed (call watch() again to retune now).
   bool set_offset_tuning(bool on);
   // The hardware centre off-centre tuning picks for a pilot at hz, streaming at fs.
   static double offset_centre(double hz, double fs);
@@ -78,7 +81,7 @@ public:
   void set_combine(bool on);
   struct ComboStatus {
     bool on = false;
-    Combiner::Stats s;  // the last second
+    Combiner::Stats s;  // the last second; the time offset between the paths as of its end
   };
   ComboStatus combine_status();
   // Debug: save the next `seconds` of watched IQ as PREFIX.cs16 + PREFIX.json (kp_replay reads them), and path B
@@ -103,6 +106,8 @@ private:
   void tune(double hz, int rate_sel, bool watching = false);
   void handle_watch(Bank &b);
   bool watch_fault(double hz);
+  bool watch_drops(double hz);
+  void fall_back(double hz);
   void measure_snr(const std::vector<cf> &iq, double fs, double shift_hz);
   void record_bank(const Bank &b);
   void handle_scan(Bank &b);
@@ -167,6 +172,10 @@ private:
   std::shared_ptr<FrontEnd> _fe;
   uint32_t _fe_gen = ~0u;
   std::deque<int64_t> _watch_faults;  // ms of the stream restarts seen in this watch at 40 MS/s
+  // the receiver's count of banks its stream dropped mid-run, read every kDropPollMs of this watch at 40 MS/s
+  std::deque<std::pair<int64_t, uint64_t>> _drop_marks;  // (ms, count), the last kFallbackWindowMs of them
+  int64_t _drop_poll_ms = 0;
+  uint64_t _watch_seq = 0;  // the last bank this watch took (with _fe_gen: does the next one follow on from it?)
   // live SNR of the watched carrier: a spectrum of kPsdSpan of IQ every kSnrEveryMs
   std::unique_ptr<Psd> _snr_psd;
   size_t _snr_have = 0, _snr_need = 0;
@@ -186,6 +195,8 @@ private:
   size_t _step = 0;
   int _settle = 0;
   uint64_t _cap_last_seq = 0;
+  uint32_t _cap_gen = 0;
+  int _cap_restarts = 0;  // of this step's capture, after a gap
   std::vector<std::complex<int16_t>> _cap;
   size_t _cap_need = 0;
   double _cap_centre = 0;

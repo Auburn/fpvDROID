@@ -2,11 +2,12 @@
 
 Changes to `third_party/wifi-sdr` and its `external/devourer` that are not (yet) upstream. They come from
 [Play RX](https://github.com/scerstt/PlayRX) (GPL-2.0, like kepyur), a Windows receiver built on kepyur, and
-were regenerated against the submodule commits this repository pins.
+were regenerated against the submodule commits this repository pins. The wifi-sdr patch also carries one
+addition of kepyur's own, on top of Play RX's content, which is otherwise as Play RX has it.
 
 | Patch | Applies in | What it carries |
 |---|---|---|
-| `wifi-sdr-0001-playrx-stream.patch` | `third_party/wifi-sdr` | `RxSettings::centre` (put the hardware centre beside the pilot, off the chip's DC point; `shift_hz` stays `freq - centre`); late or short banks in the first few of a run dropped instead of restarting the stream (behind a USB hub the first bank ships late every time); mid-run, an occasional late or overrun bank dropped instead of a restart (a burst still ends the run); `request_usb3(..., force)`; `WSDR_URB_DEPTH` and `WSDR_FW_TABLE_OFLD` overrides, the firmware table offload on by default only on Windows |
+| `wifi-sdr-0001-playrx-stream.patch` | `third_party/wifi-sdr` | `RxSettings::centre` (put the hardware centre beside the pilot, off the chip's DC point; `shift_hz` stays `freq - centre`); late or short banks in the first few of a run dropped instead of restarting the stream (behind a USB hub the first bank ships late every time); mid-run, an occasional late or overrun bank dropped instead of a restart (a burst still ends the run); `request_usb3(..., force)`; `WSDR_URB_DEPTH` and `WSDR_FW_TABLE_OFLD` overrides, the firmware table offload on by default only on Windows. **kepyur's addition** (comments marked `kepyur:`): the banks a run drops are reported while it runs, in `RxStatus::mid_drops` and `RxStatus::start_late_skips` (through `StreamCfg::on_drop`), and `BankMeta::seq` steps over them. Without it nothing above the stream could tell that banks were missing: a run that keeps dropping one now and then never ends, so never returns its `StreamStats` |
 | `devourer-0001-playrx-usb.patch` | `third_party/wifi-sdr/external/devourer` | control reads retried with a back-off; a circuit breaker that fails every control transfer at once after 8 failures in a row (or one NO_DEVICE), instead of minutes of retries on a vanished adapter; on Windows only: synchronous EP0 writes and retried writes |
 
 The `#ifdef _WIN32` parts are inert on Android, Linux and the web build.
@@ -17,6 +18,10 @@ The build applies them: `native/CMakeLists.txt` and `web/CMakeLists.txt` include
 which applies each patch unless it is already in, and stops the configure if one neither applies nor is in (the
 submodule pin moved without the patch). To build wifi-sdr some other way, run `scripts/apply-patches.sh` first.
 `.gitmodules` has `ignore = dirty` for wifi-sdr, so the patched working trees do not show in `git status`.
+
+Both work on the sources as plain directories too (no submodule metadata: an archive, or kepyur copied into
+another repository), and both check after the fact that a line each patch adds is really in the tree. A patch
+that adds or removes that line needs the marker in `patches.cmake` and `apply-patches.sh` changed with it.
 
 ## Regenerating one
 
