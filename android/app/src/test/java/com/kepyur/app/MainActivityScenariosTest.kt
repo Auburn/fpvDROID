@@ -253,6 +253,24 @@ class MainActivityScenariosTest : AppHarness() {
     }
 
     @Test
+    fun tuningBesideTheChannelIsGreyedOutFromTheStartWhenTheSavedRateIs20() {
+        Settings(app).apply { rate40 = false; save() }
+        running()
+        showTab("Signal")
+        val toggle = control("Tune beside the channel")
+        val row = toggle.parent as SettingRow
+        assertFalse("not offered at 20", toggle.isEnabled)
+        assertFalse("nor is the row that works it", row.isEnabled)
+        val words = views(row).filterIsInstance<android.widget.TextView>()
+        assertTrue("it says why", words.any { it.text.toString().endsWith("Needs sample rate 40") })
+        assertTrue("greyed out", words.isNotEmpty() && words.all { it.alpha == 0.4f })
+
+        pick(control("Sample rate") as Segmented, 0, 2)
+        assertTrue("offered at 40", toggle.isEnabled)
+        assertTrue(row.isEnabled)
+    }
+
+    @Test
     fun gainByHandIsAppliedWhenTheSliderIsLetGoAndAutomaticAgainAfter() {
         running()
         showTab("Signal")

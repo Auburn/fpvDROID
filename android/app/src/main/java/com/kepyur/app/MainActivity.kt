@@ -66,9 +66,10 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     private var noVideoFound = false       // the last scan came back empty
     private var lastDropped = 0L
     private var overloadedUntil = 0L
-    // blocks the adapter's stream gave up on (collected too late): the count at the last poll, and for each poll of
-    // the last LATE_WINDOW_MS when it was and what the count was before it (see refresh())
+    // blocks the adapter's stream gave up on (collected too late): the count at the last refresh and when that
+    // was, and for each rise seen while watching in the last LATE_WINDOW_MS, when and by how many (see refresh())
     private var lastLate = 0L
+    private var lastLateAt = 0L
     private val lateMarks = ArrayDeque<Pair<Long, Long>>()
     private var frameRateFor = ""
     private var appliedRate = 0
@@ -427,17 +428,22 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         // Is the phone keeping up? A block lost in the queue behind the USB link or before the decoder, or a thread
         // with no time to spare, says no at once. A block the adapter's stream itself gave up on (collected too
         // late) does not: any phone stalls for a moment now and then, a few times a minute. LATE_BLOCKS of them
-        // within LATE_WINDOW_MS do.
+        // seen within LATE_WINDOW_MS do (a block counts from the refresh that first shows it, up to a poll late).
+        // Only those of a watch that this screen has been following count. The ones a scan or a stream test left
+        // behind, or that came in while nothing was refreshed (the app in the background: the adapter streams on
+        // for a while), say nothing about the picture now: the count is then only taken note of.
         val now = android.os.SystemClock.elapsedRealtime()
         val late = s.optLong("stream_dropped")
         val queued = s.optLong("dropped") + s.optLong("decode_dropped")
         val dropped = late + queued   // lost anywhere on the way, for the figures on the Signal tab
         val load = maxOf(s.num("dsp_load"), s.num("decode_load"))
-        if (late < lastLate) lateMarks.clear()   // the count started over
-        lateMarks.addLast(now to minOf(lastLate, late))
-        while (now - lateMarks.first().first > LATE_WINDOW_MS) lateMarks.removeFirst()
-        val lateBurst = late > lastLate && late - lateMarks.first().second >= LATE_BLOCKS
+        val followed = mode == "watch" && late >= lastLate && now - lastLateAt <= LATE_GAP_MS
+        if (!followed) lateMarks.clear()
+        else if (late > lastLate) lateMarks.addLast(now to late - lastLate)
+        while (lateMarks.isNotEmpty() && now - lateMarks.first().first > LATE_WINDOW_MS) lateMarks.removeFirst()
+        val lateBurst = followed && late > lastLate && lateMarks.sumOf { it.second } >= LATE_BLOCKS
         lastLate = late
+        lastLateAt = now
         if (mode == "watch" && (queued > lastDropped || load > 0.95 || lateBurst)) overloadedUntil = now + 5000
         lastDropped = queued
         val overloaded = mode == "watch" && now < overloadedUntil
@@ -627,6 +633,8 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         const val BACKGROUND_CLOSE_MS = 30000L
         const val LATE_BLOCKS = 3
         const val LATE_WINDOW_MS = 5000L
+        /** No refresh for longer than this (the poll runs every 250 ms): the late blocks counted meanwhile are not this watch's. */
+        const val LATE_GAP_MS = 2000L
         const val OVERLOAD_ADVICE =
             "The phone is not keeping up. Turn off Clean OSD edges, Colour comb or Diversity, or use sample rate 20."
 

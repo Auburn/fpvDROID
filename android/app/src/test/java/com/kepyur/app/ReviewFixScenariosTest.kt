@@ -737,4 +737,77 @@ class ReviewFixScenariosTest : AppHarness() {
         advance(500)
         assertEquals(MainActivity.OVERLOAD_ADVICE, detail)
     }
+
+    @Test
+    fun threeLateUsbBlocksCountTogetherOnlyWithinTheWindow() {
+        running()
+        advance(6000)
+        // three seen within about four seconds: the link is not being served in time
+        fake.streamDropped = 1; advance(2000)
+        fake.streamDropped = 2; advance(2000)
+        assertNotEquals(MainActivity.OVERLOAD_ADVICE, detail)
+        fake.streamDropped = 3; advance(500)
+        assertEquals(MainActivity.OVERLOAD_ADVICE, detail)
+
+        // the same three spread over six seconds are not
+        advance(10_000)
+        assertNotEquals(MainActivity.OVERLOAD_ADVICE, detail)
+        fake.streamDropped = 4; advance(3000)
+        fake.streamDropped = 5; advance(3000)
+        fake.streamDropped = 6; advance(500)
+        assertNotEquals(MainActivity.OVERLOAD_ADVICE, detail)
+
+        // and one every three seconds, for a minute, never is
+        advance(10_000)
+        for (i in 7L..26L) {
+            fake.streamDropped = i; advance(3000)
+            assertNotEquals("at $i", MainActivity.OVERLOAD_ADVICE, detail)
+        }
+    }
+
+    @Test
+    fun lateUsbBlocksFromTheBackgroundAreNotCountedOnReturn() {
+        running()
+        advance(6000)
+        assertEquals("watch", fake.mode)
+        // in the background nothing is refreshed, and the adapter streams on for a while
+        controller.pause().stop()
+        settle()
+        advance(5000); fake.streamDropped = 1
+        advance(8000); fake.streamDropped = 2
+        advance(8000); fake.streamDropped = 3
+        advance(2000)
+        controller.restart().resume()
+        settle()
+        advance(300)
+        assertEquals("watch", fake.mode)
+        assertNotEquals("three late blocks in 23 s unseen", MainActivity.OVERLOAD_ADVICE, detail)
+
+        // back on screen, the count goes on from where it now stands
+        advance(3000)
+        fake.streamDropped = 4; advance(500)
+        assertNotEquals(MainActivity.OVERLOAD_ADVICE, detail)
+        fake.streamDropped = 6; advance(500)
+        assertEquals("three seen within the window", MainActivity.OVERLOAD_ADVICE, detail)
+    }
+
+    @Test
+    fun lateUsbBlocksOfAScanAreNotHeldAgainstTheWatchAfterIt() {
+        running()
+        advance(6000)
+        showTab("Channel")
+        click(pill("Scan"))
+        settle()
+        assertEquals("scan", fake.mode)
+        advance(1000)
+        fake.streamDropped = 2   // a scan retunes all the time: late blocks there are its own
+        advance(1000)
+        assertNotEquals(MainActivity.OVERLOAD_ADVICE, detail)
+        fake.finishScan(listOf(FakeEngine.Pilot(5760.0, "F2", 31.0)))
+        advance(600)
+        assertEquals("watch", fake.mode)
+        fake.streamDropped = 3   // the first one of the watch
+        advance(500)
+        assertNotEquals("one late block in this watch", MainActivity.OVERLOAD_ADVICE, detail)
+    }
 }

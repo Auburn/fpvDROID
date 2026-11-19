@@ -43,7 +43,10 @@ a **MENU** button (bottom centre) for three seconds; Back does the same.
 
 The status at the top left says what the adapter is doing. Nothing there needs attention unless it says so:
 a radio that does not start, or stops delivering samples, is closed and started again by itself, on the
-channel it was on. When the picture goes away for such a reason while the menu is closed (the adapter
+channel it was on. While watching it also says when the phone is not keeping up, and what to switch off: when
+a block of samples is lost in the app's own queues, when a processing thread has no time to spare, or when
+the adapter's stream gives up on three blocks within about five seconds (one now and then is normal and is
+only counted, under Signal). When the picture goes away for such a reason while the menu is closed (the adapter
 unplugged, the radio being started again), the menu opens by itself to say so, and closes again when the
 picture is back unless it was touched meanwhile. After 30 s in the background the adapter is let go; it is
 opened and tuned again when the app returns.

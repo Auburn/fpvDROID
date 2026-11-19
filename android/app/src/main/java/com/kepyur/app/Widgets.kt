@@ -559,6 +559,7 @@ class SettingRow(ctx: Context, title: String, detail: String, val control: View)
 
     /** Greyed out, with the control dead (a setting that needs another one on). */
     fun setAvailable(on: Boolean) {
+        isEnabled = on   // the row too: it works a switch, and a screen reader must not offer a dead row as an action
         control.isEnabled = on
         titleView.alpha = if (on) 1f else 0.4f
         detailView.alpha = if (on) 1f else 0.4f
