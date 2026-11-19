@@ -144,6 +144,23 @@ class MenuScreenshotTest {
     @Test @Config(qualifiers = SMALL)
     fun smallPicture() = shoot("small_picture", 2, live, 1600, 720, tuned)
 
+    /** A short screen and a status that needs two lines: the tabs and Close menu must still all be there. */
+    @Test @Config(qualifiers = SMALL)
+    fun smallNoAdapter() = shoot("small_noadapter", 0, MenuState(
+        tone = Tone.IDLE, headline = "No adapter", detail = "Plug the Wi-Fi adapter into the phone's USB port."), 1600, 720)
+
+    @Test @Config(qualifiers = SMALL)
+    fun smallError() = shoot("small_error", 1, MenuState(
+        tone = Tone.WARN, headline = "Trying again",
+        detail = "The radio stopped: no samples for 4 seconds. If this goes on, unplug the adapter and plug it in again.",
+        action = "Try now"), 1600, 720)
+
+    /** Narrower still: the same screen with a camera cutout taking 68 dp of its width. */
+    @Test @Config(qualifiers = "w732dp-h360dp-land-xhdpi")
+    fun narrowView() = shoot("narrow_view", 1, MenuState(
+        tone = Tone.IDLE, headline = "No adapter", detail = "Plug the Wi-Fi adapter into the phone's USB port."), 1464, 720,
+        { goggles = true })
+
     // ---------------------------------------------------------------- tablet, 2560 x 1600 at 320 dpi
     @Test @Config(qualifiers = TABLET)
     fun tabletChannel() = shoot("tablet_channel", 0, live, 2560, 1600, tuned)

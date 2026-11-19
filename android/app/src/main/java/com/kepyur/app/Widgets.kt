@@ -275,7 +275,7 @@ class Slider(
         box.set(minOf(from, x), cy - t, maxOf(from, x), cy + t)
         c.drawRoundRect(box, t, t, paint)
         paint.color = Skin.TEXT_3
-        c.drawCircle(xOf(detent), cy + dp(9f), dp(1.5f), paint)
+        c.drawCircle(xOf(detent), cy + dp(14f), dp(1.5f), paint)   // clear of the thumb when the value sits on it
         paint.color = Color.WHITE
         c.drawCircle(x, cy, dp(9f), paint)
     }

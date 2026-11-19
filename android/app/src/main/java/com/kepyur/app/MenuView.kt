@@ -78,6 +78,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     private var peekAnim: ValueAnimator? = null
 
     // rail
+    private val wordmark = label(ctx, "KEPYUR", 11f, Skin.TEXT_3, medium = true).apply { letterSpacing = 0.32f }
     private val dot = View(ctx)
     private val headline = label(ctx, "", 16f, Skin.TEXT, medium = true)
     private val detail = label(ctx, "", 12.5f, Skin.TEXT_2)
@@ -156,6 +157,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         lp.width = min(MeasureSpec.getSize(w), dpi(1010f))
         lp.height = min(MeasureSpec.getSize(h), dpi(470f))
         val cardHeight = lp.height - group.paddingTop - group.paddingBottom
+        fitRail(cardHeight)
         val tileHeight = ((cardHeight - dpi(CHANNEL_PAGE_REST)) / 2).coerceIn(dpi(56f), dpi(84f))
         for (r in tileRows) r.layoutParams.height = tileHeight
         super.onMeasure(w, h)
@@ -163,9 +165,11 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
 
     // ------------------------------------------------------------------------------------------ rail
     private fun buildRail(): View {
+        // Close menu is always there, at the bottom; what is above it gives way on a short screen (onMeasure
+        // trims the status and the tabs to fit) and, should even that not be enough, scrolls.
+        val whole = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
         val rail = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-        rail.addView(label(context, "KEPYUR", 11f, Skin.TEXT_3, medium = true).apply { letterSpacing = 0.32f },
-            LinearLayout.LayoutParams(-2, -2).apply { marginStart = dpi(14f); topMargin = dpi(4f) })
+        rail.addView(wordmark, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dpi(14f); topMargin = dpi(4f) })
 
         val status = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -196,10 +200,33 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
             tabViews += t
             rail.addView(t, LinearLayout.LayoutParams(-1, dpi(42f)).apply { topMargin = if (i == 0) dpi(6f) else dpi(2f) })
         }
-        rail.addView(View(context), LinearLayout.LayoutParams(-1, 0, 1f))
-        rail.addView(PillButton(context, "Close menu", primary = true).apply { setOnClickListener { on.onClose() } },
+        val above = ScrollView(context).apply {
+            isVerticalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+            addView(rail, ViewGroup.LayoutParams(-1, -2))
+        }
+        whole.addView(above, LinearLayout.LayoutParams(-1, 0, 1f))
+        whole.addView(PillButton(context, "Close menu", primary = true).apply { setOnClickListener { on.onClose() } },
             LinearLayout.LayoutParams(-1, dpi(46f)).apply { topMargin = dpi(8f) })
-        return rail
+        return whole
+    }
+
+    /**
+     * The rail on a screen [height] px tall inside its padding: lower tabs when it is short, and the status
+     * message cut to the lines there is room for, so that the tabs and Close menu always fit.
+     */
+    private fun fitRail(height: Int) {
+        val short = height < dpi(380f)
+        // a problem with something to tap, on a short screen: its message is worth more than the name of the app
+        val tight = short && state.action != null
+        wordmark.visibility = if (tight) View.GONE else View.VISIBLE
+        val tab = dpi(if (tight) 36f else if (short) 38f else 42f)
+        for (t in tabViews) if (t.layoutParams.height != tab) t.layoutParams.height = tab
+        // the wordmark, the headline with the status block's padding, the tabs with their gaps, the button
+        val rest = (if (tight) 0 else dpi(18f)) + dpi(46f) + dpi(12f) + 4 * tab + dpi(54f)
+        val forAction = if (state.action != null) dpi(23f) else 0
+        val lines = ((height - rest - forAction - dpi(6f)) / dpi(17f)).coerceIn(1, 4)
+        if (detail.maxLines != lines) detail.maxLines = lines
     }
 
     fun showTab(index: Int, animate: Boolean = true) {
@@ -501,7 +528,11 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         if (detail.text.toString() != st.detail) detail.text = st.detail
         detail.visibility = if (st.detail.isEmpty()) View.GONE else View.VISIBLE
         action.text = st.action ?: ""
-        action.visibility = if (st.action == null) View.GONE else View.VISIBLE
+        val actionShown = if (st.action == null) View.GONE else View.VISIBLE
+        if (action.visibility != actionShown) {
+            action.visibility = actionShown
+            requestLayout()   // the room for the message changes with it (fitRail)
+        }
 
         scanButton.isEnabled = st.radioReady && !st.scanning
         scanButton.text = if (st.scanning) "Scanning" else "Scan"

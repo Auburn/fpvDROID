@@ -1,5 +1,6 @@
 package com.kepyur.app
 
+import android.annotation.SuppressLint
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -24,7 +25,8 @@ import java.util.concurrent.Executors
  * All of it runs on the main thread except the native calls that block (open, close, the USB 3 switch), which
  * go through one worker thread, in order.
  */
-class UsbLink(private val ctx: Context, private val engine: Engine, private val events: Events) {
+class UsbLink(context: Context, private val engine: Engine, private val events: Events) {
+    private val ctx: Context = context.applicationContext   // receivers and the USB service outlive no activity
     interface Events {
         /** [state] or [message] changed. */
         fun onLinkChanged()
@@ -57,6 +59,8 @@ class UsbLink(private val ctx: Context, private val engine: Engine, private val 
 
     /** Bumped whenever the adapter in hand is given up: what an open in flight finds when it lands tells it to stand down. */
     private var generation = 0
+    /** This link, to the process-wide [holder]: a token, so that nothing static holds on to an activity. */
+    private val me = Any()
     private var failures = 0
     private var runningSince = 0L
     /** The device a permission request is out for (no second request, and no second dialog, while it is). */
@@ -68,6 +72,9 @@ class UsbLink(private val ctx: Context, private val engine: Engine, private val 
     private var banksMovedAt = 0L
     private var checkedAt = 0L
 
+    // Before Android 13 a receiver registered in code is open to any sender, whatever is asked for. So these
+    // broadcasts are taken as a nudge only: UsbManager itself is asked what is plugged in and what is permitted.
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
     fun start() {
         if (started) return
         started = true
@@ -192,7 +199,7 @@ class UsbLink(private val ctx: Context, private val engine: Engine, private val 
                 }
                 return@execute
             }
-            holder = this   // from here on the native radio is ours to close
+            holder = me   // from here on the native radio is ours to close
             val err = engine.open(fd)
             val fast = err.isEmpty() && engine.superspeed()
             ui.post {
@@ -258,7 +265,7 @@ class UsbLink(private val ctx: Context, private val engine: Engine, private val 
         val c = conn
         conn = null
         worker.execute {
-            if (holder === this) {
+            if (holder === me) {
                 engine.close()
                 holder = null
             }
@@ -306,6 +313,9 @@ class UsbLink(private val ctx: Context, private val engine: Engine, private val 
             if (d == null || !ours(d)) return
             when (i.action) {
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
+                    // really gone? (a detach nobody sent would otherwise take the adapter away for good; if this
+                    // one is real and the list is merely behind, the radio dying brings us back here anyway)
+                    if (usb.deviceList.values.any { it.deviceName == d.deviceName }) return
                     val switching = SystemClock.elapsedRealtime() < switchDeadline
                     engine.log("adapter detached${if (switching) " (USB 3 switch)" else ""}")
                     ui.removeCallbacks(retry)
@@ -338,8 +348,8 @@ class UsbLink(private val ctx: Context, private val engine: Engine, private val 
          */
         private val worker: ExecutorService =
             Executors.newSingleThreadExecutor { r -> Thread(r, "kepyur-usb").apply { isDaemon = true } }
-        /** The link whose radio the native side has open, if any (touched on the worker only). */
-        private var holder: UsbLink? = null
+        /** The token ([me]) of the link whose radio the native side has open, if any (touched on the worker only). */
+        private var holder: Any? = null
 
         const val FIRST_RETRY_MS = 2500L
         const val RETRY_MS = 5000L

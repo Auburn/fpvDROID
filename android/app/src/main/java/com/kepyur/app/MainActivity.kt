@@ -308,7 +308,12 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
      */
     private fun JSONObject.num(key: String, or: Double = 0.0): Double = optDouble(key, or).let { if (it.isFinite()) it else or }
 
-    private fun linkState(): MenuState = when (link.state) {
+    private fun linkState(): MenuState = linkHeadline().let { st ->
+        // the rail may have to cut a long message short on a small screen: the Signal tab shows all of it
+        if (st.tone == Tone.WARN || st.tone == Tone.ERROR) st.copy(stats = st.detail) else st
+    }
+
+    private fun linkHeadline(): MenuState = when (link.state) {
         UsbLink.State.NO_ADAPTER -> MenuState(Tone.IDLE, "No adapter", "Plug the Wi-Fi adapter into the phone's USB port.")
         UsbLink.State.PERMISSION -> MenuState(Tone.BUSY, "Waiting for permission", "Allow Kepyur to use the adapter.")
         UsbLink.State.DENIED -> MenuState(Tone.WARN, "Permission needed", "Kepyur cannot use the adapter without it.", "Ask again")
@@ -510,10 +515,24 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
             .withEndAction { menu.visibility = View.GONE }.start()
     }
 
+    /**
+     * The whole display, bars hidden, and laid out under a camera cutout too: the picture and the MENU button
+     * are centred on the screen itself (goggles need the two pictures either side of its middle), and the menu
+     * keeps clear of the cutout by its own padding.
+     */
     private fun hideSystemBars() {
-        window.insetsController?.let {
-            it.hide(WindowInsets.Type.systemBars())
-            it.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        if (Build.VERSION.SDK_INT >= 30) {
+            window.setDecorFitsSystemWindows(false)
+            window.insetsController?.let {
+                it.hide(WindowInsets.Type.systemBars())
+                it.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            }
+        } else {   // Android 10: the flags that came before the insets controller
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+                View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
         }
     }
 
