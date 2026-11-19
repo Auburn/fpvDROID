@@ -66,10 +66,12 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     private var noVideoFound = false       // the last scan came back empty
     private var lastDropped = 0L
     private var overloadedUntil = 0L
-    // blocks the adapter's stream gave up on (collected too late): the count at the last refresh and when that
-    // was, and for each rise seen while watching in the last LATE_WINDOW_MS, when and by how many (see refresh())
+    // blocks the adapter's stream gave up on (collected too late): the count at the last refresh, when that was
+    // and whether the radio was watching then, and for each rise seen while watching in the last LATE_WINDOW_MS,
+    // when and by how many (see refresh())
     private var lastLate = 0L
     private var lastLateAt = 0L
+    private var lastLateWatching = false
     private val lateMarks = ArrayDeque<Pair<Long, Long>>()
     private var frameRateFor = ""
     private var appliedRate = 0
@@ -303,6 +305,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         applySignal()
         lastDropped = 0
         lastLate = 0
+        lastLateWatching = false
         lateMarks.clear()
         if (menuAuto) closeMenu()   // it only came up to say the picture was away
         when {
@@ -429,21 +432,24 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         // with no time to spare, says no at once. A block the adapter's stream itself gave up on (collected too
         // late) does not: any phone stalls for a moment now and then, a few times a minute. LATE_BLOCKS of them
         // seen within LATE_WINDOW_MS do (a block counts from the refresh that first shows it, up to a poll late).
-        // Only those of a watch that this screen has been following count. The ones a scan or a stream test left
-        // behind, or that came in while nothing was refreshed (the app in the background: the adapter streams on
-        // for a while), say nothing about the picture now: the count is then only taken note of.
+        // Only those of a watch that this screen has been following count: a rise between two refreshes that both
+        // found the radio watching. The ones a scan or a stream test left behind (up to its last moments, after
+        // the last refresh that saw it), or that came in while nothing was refreshed (the app in the background:
+        // the adapter streams on for a while), say nothing about the picture now: the count is then only taken
+        // note of.
         val now = android.os.SystemClock.elapsedRealtime()
         val late = s.optLong("stream_dropped")
         val queued = s.optLong("dropped") + s.optLong("decode_dropped")
         val dropped = late + queued   // lost anywhere on the way, for the figures on the Signal tab
         val load = maxOf(s.num("dsp_load"), s.num("decode_load"))
-        val followed = mode == "watch" && late >= lastLate && now - lastLateAt <= LATE_GAP_MS
+        val followed = mode == "watch" && lastLateWatching && late >= lastLate && now - lastLateAt <= LATE_GAP_MS
         if (!followed) lateMarks.clear()
         else if (late > lastLate) lateMarks.addLast(now to late - lastLate)
         while (lateMarks.isNotEmpty() && now - lateMarks.first().first > LATE_WINDOW_MS) lateMarks.removeFirst()
         val lateBurst = followed && late > lastLate && lateMarks.sumOf { it.second } >= LATE_BLOCKS
         lastLate = late
         lastLateAt = now
+        lastLateWatching = mode == "watch"
         if (mode == "watch" && (queued > lastDropped || load > 0.95 || lateBurst)) overloadedUntil = now + 5000
         lastDropped = queued
         val overloaded = mode == "watch" && now < overloadedUntil

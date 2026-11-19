@@ -810,4 +810,27 @@ class ReviewFixScenariosTest : AppHarness() {
         advance(500)
         assertNotEquals("one late block in this watch", MainActivity.OVERLOAD_ADVICE, detail)
     }
+
+    /** The same for the scan's last moments: blocks that no refresh saw while it was still scanning. */
+    @Test
+    fun lateUsbBlocksOfAScansLastMomentsAreNotHeldAgainstTheWatchAfterIt() {
+        running()
+        advance(6000)
+        showTab("Channel")
+        click(pill("Scan"))
+        settle()
+        assertEquals("scan", fake.mode)
+        advance(1000)
+        fake.streamDropped = 2   // after the screen's last look at the scan
+        fake.finishScan(listOf(FakeEngine.Pilot(5760.0, "F2", 31.0)))
+        advance(600)
+        assertEquals("watch", fake.mode)
+        assertNotEquals(MainActivity.OVERLOAD_ADVICE, detail)
+        fake.streamDropped = 3   // the first one of the watch
+        advance(500)
+        assertNotEquals("one late block in this watch", MainActivity.OVERLOAD_ADVICE, detail)
+        fake.streamDropped = 6   // and the watch's own are still counted
+        advance(500)
+        assertEquals(MainActivity.OVERLOAD_ADVICE, detail)
+    }
 }
