@@ -31,12 +31,13 @@ a **MENU** button (bottom centre) for three seconds; Back does the same.
   picture twice, side by side, for goggles that hold a phone, with an eye spacing slider to line the two
   pictures up with the lenses.
 - **Picture** — comb filter (sharper, no echo after edges), clean OSD edges (no rainbow fringe around text),
-  smooth lines (no stair steps, no shimmer), sparkle repair (for a weak signal), colour comb. The first
-  three are on by default; they are for NTSC cameras except smooth lines and sparkle repair, which work on
-  PAL too. None adds delay.
+  smooth lines (no stair steps, no shimmer), sparkle repair (for a weak signal), colour comb (fewer rainbows
+  on fine detail). The first three are on by default. Smooth lines and sparkle repair work on every camera;
+  the other three only change an NTSC picture. None adds delay.
 - **Signal** — sample rate (40 MS/s, or 20 for a USB link that cannot carry 40; the app also falls back by
-  itself), diversity (both antennas combined: fit two), tune beside the channel (keeps the picture off the
-  chip's DC point), and a line of numbers (USB speed, processing load, drops, restarts).
+  itself), diversity (both antennas combined: fit two; it roughly doubles the work of one of the two
+  processing threads), tune beside the channel (keeps the picture off the chip's DC point), and a line of
+  numbers (USB speed, processing load, drops, restarts).
 
 The status at the top left says what the adapter is doing. Nothing there needs attention unless it says so:
 a radio that does not start, or stops delivering samples, is closed and started again by itself, on the
@@ -88,6 +89,13 @@ nix-shell
 scripts/build-desktop.sh      # build/desktop/kp_replay, kp_live, kp_sim, kp_gen (+ kp_render with EGL / GLES 3)
 scripts/build-android.sh      # android/app/build/outputs/apk/debug/app-debug.apk
 scripts/build-web.sh          # build/web/site; serve it with: node web/serve.mjs (http://localhost:8080)
+```
+
+The menu can be looked at without a phone: a JVM test (Robolectric) draws every tab to PNG files, with a
+transparent background where the picture shows through.
+
+```sh
+cd android && gradle testDebugUnitTest --tests com.kepyur.app.MenuScreenshotTest -Pshots=/tmp/menu   # /tmp/menu/*.png
 ```
 
 ## On the phone

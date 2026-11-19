@@ -20,7 +20,6 @@ import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
-import android.widget.TextView
 import org.json.JSONObject
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -40,7 +39,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     private lateinit var root: FrameLayout
     private lateinit var video: SurfaceView
     private lateinit var menu: MenuView
-    private lateinit var hint: TextView
+    private lateinit var hint: MenuHint
     private var menuOpen = true
     private var foreground = false
 
@@ -52,6 +51,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     private var overloadedUntil = 0L
     private var frameRateFor = ""
     private var appliedRate = 0
+    private var statusBroken = false
 
     // USB stream test
     private val testPlan = ArrayDeque<Pair<Int, Double>>()
@@ -209,6 +209,9 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         if (retune) retune()
     }
 
+    /** A view slider is being dragged: the picture sharp under it, so the change can be judged. */
+    override fun onPeek(on: Boolean) = Native.setBackdrop(!on, false)
+
     override fun onStatusAction() = link.retryNow()
 
     override fun onClose() = closeMenu()
@@ -288,7 +291,15 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     }
 
     private fun radioState(): MenuState {
-        val s = JSONObject(Native.status())
+        // a number the native side could not print as JSON (nan, inf) must not take the app down with it
+        val s = try {
+            JSONObject(Native.status())
+        } catch (e: org.json.JSONException) {
+            if (!statusBroken) Native.log("status: unreadable ($e)")
+            statusBroken = true
+            return MenuState(Tone.BUSY, "Working", radioReady = !testRunning, found = found)
+        }
+        statusBroken = false
         link.check(s)
         if (link.state != UsbLink.State.RUNNING) return linkState()
         val was = mode
@@ -349,7 +360,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
             }
             "watch" -> when {
                 overloaded -> base.copy(tone = Tone.WARN, headline = where,
-                    detail = "The phone is not keeping up. Turn off Clean OSD edges or Colour comb, or use sample rate 20.")
+                    detail = "The phone is not keeping up. Turn off Clean OSD edges, Colour comb or Diversity, or use sample rate 20.")
                 locked -> base.copy(tone = Tone.LIVE, headline = where, detail = buildString {
                     append(v?.optString("std") ?: "")
                     if (v?.optBoolean("colour") == false) append(" · black and white")
@@ -405,19 +416,12 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         })
         root.addView(video, FrameLayout.LayoutParams(-1, -1))
 
-        hint = TextView(this).apply {
-            text = "MENU"
-            textSize = 13f
-            typeface = Skin.MEDIUM
-            letterSpacing = 0.22f
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-            background = rounded(Color.argb(150, 10, 12, 15), dp(24f), Color.argb(70, 255, 255, 255), dp(1f).roundToInt())
+        hint = MenuHint(this).apply {
             alpha = 0f
             visibility = View.GONE
             setOnClickListener { openMenu() }
         }
-        root.addView(hint, FrameLayout.LayoutParams(dp(132f).roundToInt(), dp(48f).roundToInt(), Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL)
+        root.addView(hint, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL)
             .apply { bottomMargin = dp(30f).roundToInt() })
 
         menu = MenuView(this, settings, this)

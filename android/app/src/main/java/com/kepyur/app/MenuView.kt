@@ -1,9 +1,11 @@
 package com.kepyur.app
 
+import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.InsetDrawable
 import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
@@ -15,6 +17,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import kotlin.math.abs
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 enum class Tone { IDLE, BUSY, LIVE, WARN, ERROR }
@@ -56,12 +59,23 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         fun onPicture(rebuild: Boolean)
         /** A signal setting changed. [retune]: it applies on the next tune. */
         fun onSignal(retune: Boolean)
+        /**
+         * A view slider is being dragged ([on]) or was let go: while it is, the menu steps aside (all but that
+         * slider) so the picture can be seen changing, and the picture should be shown sharp.
+         */
+        fun onPeek(on: Boolean)
         fun onStatusAction()
         fun onClose()
     }
 
     private var state = MenuState()
     private var tab = 0
+    private val group = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }   // rail + card
+    private lateinit var rail: View
+    private lateinit var card: FrameLayout
+    private val pageBodies = ArrayList<LinearLayout>()
+    private var peeking: View? = null
+    private var peekAnim: ValueAnimator? = null
 
     // rail
     private val dot = View(ctx)
@@ -76,6 +90,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     private lateinit var bandPicker: Segmented
     private val bandName = label(ctx, "", 12.5f, Skin.TEXT_2)
     private val tiles = List(8) { ChannelTile(ctx) }
+    private val tileRows = ArrayList<LinearLayout>()
     private lateinit var scanButton: PillButton
     private val scanText = label(ctx, "", 12.5f, Skin.TEXT_2)
     private val foundRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
@@ -93,12 +108,20 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     // signal page
     private val stats = label(ctx, "", 12f, Skin.TEXT_3)
 
+    // Everything the pages read while they are built has to be declared above this point: Kotlin runs property
+    // initialisers and init blocks in the order they are written.
+    private val fitWords = listOf(
+        "The whole picture, black bars where the screen is wider",
+        "Pulled to the shape of the screen",
+        "Fills the screen, the picture's edges cut off",
+    )
+
     init {
         setBackgroundColor(Skin.SCRIM)
         isClickable = true   // touches stop here: nothing behind the menu reacts
-        val row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
-        row.addView(buildRail(), LinearLayout.LayoutParams(dpi(196f), -1))
-        val card = FrameLayout(ctx).apply {
+        rail = buildRail()
+        group.addView(rail, LinearLayout.LayoutParams(dpi(196f), -1))
+        card = FrameLayout(ctx).apply {
             background = rounded(Skin.PANEL, dp(22f), Skin.STROKE, dpi(1f))
             clipToOutline = true
         }
@@ -107,28 +130,33 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         pages += scrolling(buildPicturePage())
         pages += scrolling(buildSignalPage())
         for (p in pages) card.addView(p, LayoutParams(-1, -1))
-        // the settings read best at a moderate width: on a very wide screen the card stops growing
-        val holder = object : FrameLayout(ctx) {
-            override fun onMeasure(w: Int, h: Int) {
-                val cap = dpi(720f)
-                card.layoutParams.width = if (MeasureSpec.getSize(w) > cap) cap else LayoutParams.MATCH_PARENT
-                super.onMeasure(w, h)
-            }
-        }
-        holder.addView(card, LayoutParams(-1, -1))
-        row.addView(holder, LinearLayout.LayoutParams(0, -1, 1f).apply { marginStart = dpi(14f) })
-        addView(row, LayoutParams(-1, -1))
+        group.addView(card, LinearLayout.LayoutParams(0, -1, 1f).apply { marginStart = dpi(14f) })
+        addView(group, LayoutParams(-1, -1, Gravity.CENTER))
         val base = dpi(18f)
-        row.setPadding(base, base, base, base)
+        group.setPadding(base, base, base, base)
         setOnApplyWindowInsetsListener { _, insets ->
             // keep clear of a camera cutout at either end (the picture runs under it, the menu does not)
             val cut = insets.displayCutout
-            row.setPadding(max(base, (cut?.safeInsetLeft ?: 0) + dpi(8f)), base, max(base, (cut?.safeInsetRight ?: 0) + dpi(8f)), base)
+            group.setPadding(max(base, (cut?.safeInsetLeft ?: 0) + dpi(8f)), base, max(base, (cut?.safeInsetRight ?: 0) + dpi(8f)), base)
             insets
         }
         showTab(0, animate = false)
         syncChannel()
         render(state)
+    }
+
+    /**
+     * On a phone the menu takes the whole screen; on anything larger it stays a phone-sized group in the middle.
+     * The channel tiles take what height the card can spare, within reason.
+     */
+    override fun onMeasure(w: Int, h: Int) {
+        val lp = group.layoutParams
+        lp.width = min(MeasureSpec.getSize(w), dpi(1010f))
+        lp.height = min(MeasureSpec.getSize(h), dpi(470f))
+        val cardHeight = lp.height - group.paddingTop - group.paddingBottom
+        val tileHeight = ((cardHeight - dpi(CHANNEL_PAGE_REST)) / 2).coerceIn(dpi(56f), dpi(84f))
+        for (r in tileRows) r.layoutParams.height = tileHeight
+        super.onMeasure(w, h)
     }
 
     // ------------------------------------------------------------------------------------------ rail
@@ -208,7 +236,51 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     private fun page() = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
         setPadding(dpi(22f), dpi(16f), dpi(22f), dpi(16f))
+        // a row being dragged gets a backing a little wider than itself, reaching into the padding (peek)
+        clipChildren = false
+        clipToPadding = false
+        pageBodies += this
     }
+
+    /**
+     * While a view slider is dragged ([row], else null): everything but that row fades away, so the picture
+     * can be seen changing under the finger, and comes back when the finger lifts.
+     */
+    private fun peek(row: View?) {
+        if (row === peeking) return
+        val was = peeking
+        peeking = row
+        val to = if (row == null) 1f else 0f
+        rail.animate().alpha(to).setDuration(PEEK_MS).start()
+        val body = pageBodies[tab]
+        for (i in 0 until body.childCount) {
+            val c = body.getChildAt(i)
+            if (c !== (row ?: was)) c.animate().alpha(to).setDuration(PEEK_MS).start()
+        }
+        // a backing for the row left standing, a little wider than it. (A background with insets hands its
+        // insets to the view as padding: the row keeps its own.)
+        (row ?: was)?.let { r ->
+            val pad = intArrayOf(r.paddingLeft, r.paddingTop, r.paddingRight, r.paddingBottom)
+            r.background = if (row == null) null
+            else InsetDrawable(rounded(Color.argb(176, 10, 12, 15), dp(18f)), -dpi(14f), 0, -dpi(14f), 0)
+            r.setPadding(pad[0], pad[1], pad[2], pad[3])
+        }
+        peekAnim?.cancel()
+        val from = background.alpha
+        peekAnim = ValueAnimator.ofInt(from, if (row == null) 255 else 0).apply {
+            duration = PEEK_MS
+            addUpdateListener {
+                val a = it.animatedValue as Int
+                this@MenuView.background.alpha = a
+                card.background.alpha = a
+            }
+            start()
+        }
+        on.onPeek(row != null)
+    }
+
+    /** For a picture of the peek (the screenshot test): as if the size slider were held. */
+    internal fun peekSizeRow(on: Boolean) = peek(if (on) sizeRow else null)
 
     // ------------------------------------------------------------------------------------------ channel
     private fun buildChannelPage(): View {
@@ -225,6 +297,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         p.addView(bandPicker, LinearLayout.LayoutParams(-1, dpi(38f)).apply { topMargin = dpi(8f) })
         for (r in 0 until 2) {
             val line = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
+            tileRows += line
             for (c in 0 until 4) {
                 val tile = tiles[r * 4 + c]
                 tile.setOnClickListener {
@@ -235,9 +308,9 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
                     syncChannel()
                     on.onTune()
                 }
-                line.addView(tile, LinearLayout.LayoutParams(0, dpi(60f), 1f).apply { if (c > 0) marginStart = dpi(8f) })
+                line.addView(tile, LinearLayout.LayoutParams(0, -1, 1f).apply { if (c > 0) marginStart = dpi(8f) })
             }
-            p.addView(line, LinearLayout.LayoutParams(-1, -2).apply { topMargin = if (r == 0) dpi(12f) else dpi(8f) })
+            p.addView(line, LinearLayout.LayoutParams(-1, dpi(60f)).apply { topMargin = if (r == 0) dpi(12f) else dpi(8f) })
         }
         val scan = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         scanButton = PillButton(context, "Scan").apply { setOnClickListener { on.onScan() } }
@@ -273,12 +346,6 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     }
 
     // ------------------------------------------------------------------------------------------ view
-    private val fitWords = listOf(
-        "The whole picture, black bars where the screen is wider",
-        "Pulled to the shape of the screen",
-        "Fills the screen, the picture's edges cut off",
-    )
-
     private fun buildViewPage(): View {
         val p = page()
         p.addView(SettingRow(context, "Aspect ratio", "How the camera's picture is shaped",
@@ -297,6 +364,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
             Slider(context, Settings.SCALE_MIN, Settings.SCALE_MAX, s.scale, 1f) { v, done ->
                 s.scale = v
                 sizeRow.detailView.text = sizeWords()
+                peek(if (done) null else sizeRow)
                 changedView(save = done)
             }.sized(dpi(216f)))
         p.addView(sizeRow)
@@ -310,7 +378,11 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         eyeDivider = divider(context)
         p.addView(eyeDivider)
         eyeRow = SettingRow(context, "Eye spacing", "Slide until the two pictures become one",
-            Slider(context, -1f, 1f, s.eyeSpacing, 0f) { v, done -> s.eyeSpacing = v; changedView(save = done) }.sized(dpi(216f)))
+            Slider(context, -1f, 1f, s.eyeSpacing, 0f, fromDetent = true) { v, done ->
+                s.eyeSpacing = v
+                peek(if (done) null else eyeRow)
+                changedView(save = done)
+            }.sized(dpi(216f)))
         p.addView(eyeRow)
         showEyeRow()
         return p
@@ -357,12 +429,12 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     // ------------------------------------------------------------------------------------------ signal
     private fun buildSignalPage(): View {
         val p = page()
-        p.addView(SettingRow(context, "Sample rate", "40 hears more of the channel. 20 is easier on the USB link, and is used by itself when 40 keeps dropping out",
-            Segmented(context, listOf("40", "20"), if (s.rate40) 0 else 1) { i ->
+        p.addView(SettingRow(context, "Sample rate", "40 hears more of the channel. 20 is easier on the USB link, and takes over by itself when 40 keeps dropping out",
+            Segmented(context, listOf("40 MS/s", "20 MS/s"), if (s.rate40) 0 else 1) { i ->
                 s.rate40 = i == 0
                 s.save()
                 on.onSignal(retune = true)
-            }.sized(dpi(130f))))
+            }.sized(dpi(184f))))
         p.addView(divider(context))
         p.addView(SettingRow(context, "Diversity", "Both of the adapter's antennas combined, so a fade on one is covered by the other",
             Toggle(context, s.diversity) { v -> s.diversity = v; s.save(); on.onSignal(retune = false) }))
@@ -376,6 +448,12 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     }
 
     private fun <T : View> T.sized(width: Int): T = apply { layoutParams = LinearLayout.LayoutParams(width, dpi(38f)) }
+
+    companion object {
+        const val PEEK_MS = 150L
+        /** Height (dp) of everything on the channel page but its two rows of tiles, paddings included. */
+        const val CHANNEL_PAGE_REST = 168f
+    }
 
     // ------------------------------------------------------------------------------------------ state
     fun render(st: MenuState) {

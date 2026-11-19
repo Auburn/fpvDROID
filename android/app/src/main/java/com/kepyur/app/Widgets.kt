@@ -97,6 +97,24 @@ class PillButton(ctx: Context, text: String, private val primary: Boolean = fals
     }
 }
 
+/** The one thing on screen when the picture is tapped: brings the menu back. */
+class MenuHint(ctx: Context) : TextView(ctx) {
+    init {
+        text = "MENU"
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+        typeface = Skin.MEDIUM
+        letterSpacing = 0.22f
+        setTextColor(Color.WHITE)
+        gravity = Gravity.CENTER
+        includeFontPadding = false
+        isClickable = true
+        background = RippleDrawable(ColorStateList.valueOf(Color.argb(60, 255, 255, 255)),
+            rounded(Color.argb(150, 10, 12, 15), dp(24f), Color.argb(70, 255, 255, 255), dpi(1f)), rounded(Color.WHITE, dp(24f)))
+    }
+
+    override fun onMeasure(w: Int, h: Int) = setMeasuredDimension(dpi(132f), dpi(48f))
+}
+
 /** One choice out of a few, side by side; the white thumb slides to the chosen one. */
 @SuppressLint("ViewConstructor")
 class Segmented(ctx: Context, private val labels: List<String>, selected: Int, private val onSelect: (Int) -> Unit) : View(ctx) {
@@ -224,12 +242,13 @@ class Toggle(ctx: Context, on: Boolean, private val onChange: (Boolean) -> Unit)
 
 /**
  * A value between [min] and [max]. Dragging near [detent] snaps to it (and a mark shows where it is).
+ * [fromDetent]: a value that goes either way from its detent, drawn filled from there instead of from the left.
  * [onChange] is told every move; the second argument is true when the finger lifts.
  */
 @SuppressLint("ViewConstructor")
 class Slider(
     ctx: Context, private val min: Float, private val max: Float, value: Float, private val detent: Float,
-    private val onChange: (Float, Boolean) -> Unit,
+    private val fromDetent: Boolean = false, private val onChange: (Float, Boolean) -> Unit,
 ) : View(ctx) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val box = RectF()
@@ -251,8 +270,9 @@ class Slider(
         box.set(edge, cy - t, width - edge, cy + t)
         c.drawRoundRect(box, t, t, paint)
         val x = xOf(value)
+        val from = if (fromDetent) xOf(detent) else edge
         paint.color = Skin.ACCENT
-        box.set(edge, cy - t, x, cy + t)
+        box.set(minOf(from, x), cy - t, maxOf(from, x), cy + t)
         c.drawRoundRect(box, t, t, paint)
         paint.color = Skin.TEXT_3
         c.drawCircle(xOf(detent), cy + dp(9f), dp(1.5f), paint)

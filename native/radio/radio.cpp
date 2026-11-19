@@ -131,6 +131,9 @@ void Radio::close() {
     _dq.clear();
   }
   _fe.reset();
+  // a recording cut short by the close: what was written stays (no .json: kp_replay then needs --fs)
+  if (_rec) std::fclose(_rec), _rec = nullptr;
+  if (_rec_b) std::fclose(_rec_b), _rec_b = nullptr;
   if (_rx) {
     _rx->close();
     _rx.reset();
