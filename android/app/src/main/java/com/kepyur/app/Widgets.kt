@@ -25,8 +25,8 @@ import kotlin.math.roundToInt
 object Skin {
     val ACCENT = Color.rgb(61, 220, 180)
     val TEXT = Color.argb(242, 255, 255, 255)
-    val TEXT_2 = Color.argb(158, 255, 255, 255)
-    val TEXT_3 = Color.argb(102, 255, 255, 255)
+    val TEXT_2 = Color.argb(194, 255, 255, 255)   // what explains: 4.5:1 or better over the panel on a bright picture
+    val TEXT_3 = Color.argb(150, 255, 255, 255)   // what merely labels
     val FILL = Color.argb(22, 255, 255, 255)
     val FILL_STRONG = Color.argb(40, 255, 255, 255)
     val STROKE = Color.argb(30, 255, 255, 255)
@@ -131,6 +131,7 @@ class Segmented(ctx: Context, private val labels: List<String>, selected: Int, p
     fun select(index: Int, animate: Boolean = true) {
         if (index == selected && anim == null) return
         selected = index
+        describe()
         anim?.cancel()
         if (!animate || !isLaidOut) { thumb = index.toFloat(); invalidate(); return }
         anim = ValueAnimator.ofFloat(thumb, index.toFloat()).apply {
@@ -141,7 +142,26 @@ class Segmented(ctx: Context, private val labels: List<String>, selected: Int, p
         }
     }
 
-    init { isClickable = true; contentDescription = labels.joinToString(", ") }
+    /** What this chooses ("Scaling"), for a screen reader: it then says "Scaling: Fit". */
+    var label = ""
+        set(v) { field = v; describe() }
+    private var pressed = -1   // the segment under the finger, while it is down on one
+
+    private fun describe() {
+        contentDescription = (if (label.isEmpty()) "" else "$label: ") + labels[selected]
+    }
+
+    init { isClickable = true; isFocusable = true; describe() }
+
+    /** Without a pointer (a screen reader's double tap, a switch, a keyboard): on to the next choice, and round. */
+    override fun performClick(): Boolean {
+        super.performClick()
+        if (pressed < 0) {
+            select((selected + 1) % labels.size)
+            onSelect(selected)
+        }
+        return true
+    }
 
     override fun onMeasure(w: Int, h: Int) {
         val want = labels.size * dpi(56f)
@@ -166,16 +186,30 @@ class Segmented(ctx: Context, private val labels: List<String>, selected: Int, p
         }
     }
 
+    private fun segmentAt(e: MotionEvent): Int {
+        val slop = dp(8f)
+        if (e.x < -slop || e.x > width + slop || e.y < -slop || e.y > height + slop) return -1
+        return (e.x / width * labels.size).toInt().coerceIn(0, labels.size - 1)
+    }
+
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(e: MotionEvent): Boolean {
         if (!isEnabled) return false
-        if (e.actionMasked == MotionEvent.ACTION_UP) {
-            val i = (e.x / width * labels.size).toInt().coerceIn(0, labels.size - 1)
-            if (i != selected) {
-                select(i)
-                onSelect(i)
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> pressed = segmentAt(e)
+            MotionEvent.ACTION_UP -> {
+                // the choice is the segment the finger went down on, if it is still there: sliding off cancels
+                val i = segmentAt(e)
+                if (i >= 0 && i == pressed) {
+                    if (i != selected) {
+                        select(i)
+                        onSelect(i)
+                    }
+                    performClick()
+                }
+                pressed = -1
             }
-            performClick()
+            MotionEvent.ACTION_CANCEL -> pressed = -1
         }
         return true
     }
@@ -206,11 +240,20 @@ class Toggle(ctx: Context, on: Boolean, private val onChange: (Boolean) -> Unit)
         }
     }
 
-    init { isClickable = true }
+    init { isClickable = true; isFocusable = true }
 
     override fun setEnabled(enabled: Boolean) {
         super.setEnabled(enabled)
         alpha = if (enabled) 1f else 0.35f
+    }
+
+    // a switch, on or off, to anything that asks (a screen reader says so, with the name its row gives it)
+    override fun getAccessibilityClassName(): CharSequence = android.widget.Switch::class.java.name
+
+    override fun onInitializeAccessibilityNodeInfo(info: android.view.accessibility.AccessibilityNodeInfo) {
+        super.onInitializeAccessibilityNodeInfo(info)
+        info.isCheckable = true
+        info.isChecked = isOn
     }
 
     override fun onMeasure(w: Int, h: Int) = setMeasuredDimension(dpi(50f), dpi(30f))
@@ -228,11 +271,15 @@ class Toggle(ctx: Context, on: Boolean, private val onChange: (Boolean) -> Unit)
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(e: MotionEvent): Boolean {
         if (!isEnabled) return false
-        if (e.actionMasked == MotionEvent.ACTION_UP) performClick()
+        if (e.actionMasked == MotionEvent.ACTION_UP) {
+            val slop = dp(12f)   // lifted on the switch (a little outside counts): sliding away cancels
+            if (e.x >= -slop && e.x <= width + slop && e.y >= -slop && e.y <= height + slop) performClick()
+        }
         return true
     }
 
     override fun performClick(): Boolean {
+        if (!isEnabled) return false
         super.performClick()
         set(!isOn)
         onChange(isOn)
@@ -280,19 +327,90 @@ class Slider(
         c.drawCircle(x, cy, dp(9f), paint)
     }
 
+    private var downX = 0f
+    private var downY = 0f
+    private var dragging = false
+
+    private fun valueAt(x: Float): Float {
+        val v = min + ((x - edge) / (width - 2 * edge)).coerceIn(0f, 1f) * (max - min)
+        return if (abs(v - detent) < (max - min) * 0.025f) detent else v
+    }
+
+    private fun move(v: Float) {
+        if (v == value) return
+        value = v
+        invalidate()
+        onChange(v, false)
+    }
+
+    /**
+     * As a seek bar does inside something that scrolls: touching it changes nothing. It becomes a drag once the
+     * finger has clearly moved along it (until then the page may still take the gesture as a scroll), and a
+     * tap, a touch lifted where it landed, sets the value there.
+     */
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(e: MotionEvent): Boolean {
+        if (!isEnabled) return false
+        val slop = android.view.ViewConfiguration.get(context).scaledTouchSlop
         when (e.actionMasked) {
-            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> {
-                parent?.requestDisallowInterceptTouchEvent(true)   // the tab scrolls; this drag is ours
-                var v = min + ((e.x - edge) / (width - 2 * edge)).coerceIn(0f, 1f) * (max - min)
-                if (abs(v - detent) < (max - min) * 0.025f) v = detent
-                if (v != value) { value = v; invalidate(); onChange(v, false) }
+            MotionEvent.ACTION_DOWN -> {
+                downX = e.x
+                downY = e.y
+                dragging = false
             }
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                parent?.requestDisallowInterceptTouchEvent(false)
-                onChange(value, true)
+            MotionEvent.ACTION_MOVE -> {
+                val dx = abs(e.x - downX)
+                if (!dragging && dx > slop && dx > abs(e.y - downY)) {
+                    dragging = true
+                    parent?.requestDisallowInterceptTouchEvent(true)   // from here on this drag is ours
+                }
+                if (dragging) move(valueAt(e.x))
             }
+            MotionEvent.ACTION_UP -> {
+                if (!dragging && abs(e.x - downX) <= slop && abs(e.y - downY) <= slop) move(valueAt(e.x))   // a tap
+                finish()
+            }
+            MotionEvent.ACTION_CANCEL -> finish()
+        }
+        return true
+    }
+
+    private fun finish() {
+        parent?.requestDisallowInterceptTouchEvent(false)
+        dragging = false
+        onChange(value, true)
+    }
+
+    // a seek bar to anything that asks: its range, where it stands, and a step either way
+    var label = ""
+        set(v) { field = v; contentDescription = v }
+    /** The value in words ("85%"), for a screen reader. */
+    var spoken: (Float) -> String = { "${((it - min) / (max - min) * 100).roundToInt()}%" }
+
+    init { isFocusable = true }
+
+    override fun getAccessibilityClassName(): CharSequence = android.widget.SeekBar::class.java.name
+
+    override fun onInitializeAccessibilityNodeInfo(info: android.view.accessibility.AccessibilityNodeInfo) {
+        super.onInitializeAccessibilityNodeInfo(info)
+        info.rangeInfo = android.view.accessibility.AccessibilityNodeInfo.RangeInfo.obtain(
+            android.view.accessibility.AccessibilityNodeInfo.RangeInfo.RANGE_TYPE_FLOAT, min, max, value)
+        if (android.os.Build.VERSION.SDK_INT >= 30) info.stateDescription = spoken(value)
+        info.addAction(android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_FORWARD)
+        info.addAction(android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_BACKWARD)
+    }
+
+    override fun performAccessibilityAction(action: Int, arguments: android.os.Bundle?): Boolean {
+        val step = (max - min) / 20
+        val to = when (action) {
+            android.view.accessibility.AccessibilityNodeInfo.ACTION_SCROLL_FORWARD -> value + step
+            android.view.accessibility.AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD -> value - step
+            else -> return super.performAccessibilityAction(action, arguments)
+        }
+        val v = to.coerceIn(min, max)
+        if (v != value) {
+            move(v)
+            onChange(v, true)
         }
         return true
     }
@@ -333,6 +451,7 @@ class ChannelTile(ctx: Context) : View(ctx) {
         set(v) {
             if (field == v) return
             field = v
+            isSelected = v
             anim?.cancel()
             val to = if (v) 1f else 0f
             if (!isLaidOut) { sel = to; invalidate(); return }
@@ -426,6 +545,15 @@ class SettingRow(ctx: Context, title: String, detail: String, val control: View)
         if (detail.isEmpty()) detailView.visibility = GONE
         addView(words, LayoutParams(0, -2, 1f).apply { marginEnd = dpi(20f) })
         addView(control, control.layoutParams ?: LayoutParams(-2, -2))   // a control may come with its own width
+        when (control) {
+            is Toggle -> {
+                // the switch alone is a small thing to hit with a gloved thumb: the whole row works it
+                control.contentDescription = title
+                setOnClickListener { control.performClick() }
+            }
+            is Segmented -> control.label = title
+            is Slider -> control.label = title
+        }
     }
 
     /** Greyed out, with the control dead (a setting that needs another one on). */

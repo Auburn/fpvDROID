@@ -10,6 +10,9 @@ data class Channel(val band: Char, val number: Int, val mhz: Int) {
 }
 
 object Channels {
+    /** A signal within this of a channel's frequency is on that channel (VTXs are a few MHz out at worst). */
+    const val SAME_CHANNEL_MHZ = 4.0
+
     /** Band letter to long name, in the order the picker shows them (Raceband first: by far the most common). */
     val bands = listOf('R' to "Raceband", 'F' to "Fatshark", 'A' to "Boscam A", 'B' to "Boscam B", 'E' to "Boscam E", 'L' to "Lowband")
 

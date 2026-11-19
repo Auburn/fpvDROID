@@ -42,7 +42,14 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     private lateinit var menu: MenuView
     private lateinit var hint: MenuHint
     private var menuOpen = true
+    /**
+     * The menu opened itself, because there was no picture to show and a reason to give (the adapter gone, a
+     * radio being started again): it closes itself when the picture is back, unless it has been touched since.
+     */
+    private var menuAuto = false
     private var foreground = false
+    private var wasRunning = false
+    private val surfaceToken = Any()
 
     // what the radio last said
     private var mode = ""
@@ -53,6 +60,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     private var frameRateFor = ""
     private var appliedRate = 0
     private var scanOnReturn = false       // a scan is owed: the first one, or one the background cut short
+    private var scanStartedAt = 0L         // when the last scan began (elapsedRealtime); 0: none this session
     private var statusBroken = false
 
     // USB stream test
@@ -113,7 +121,12 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         ui.removeCallbacks(closeInBackground)
         ui.removeCallbacks(poll)
         ui.post(poll)
-        link.start()   // again, if the adapter was let go in the background (onRadioUp then tunes)
+        if (!link.started) {
+            // the adapter was let go in the background: it takes a few seconds to come back (onRadioUp then
+            // tunes), and until then the menu says so instead of a black screen saying nothing
+            link.start()
+            showMenuForTrouble()
+        }
         // back from the background, where decoding was stopped
         if (link.state == UsbLink.State.RUNNING && !testRunning) {
             if (scanOnReturn) onScan() else if (mode == "idle") tune(fresh = true)
@@ -148,6 +161,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         engine.log("in the background for ${BACKGROUND_CLOSE_MS / 1000} s: closing the adapter")
         link.stop()
         mode = ""
+        wasRunning = false
     }
 
     override fun onDestroy() {
@@ -188,7 +202,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     private fun channelHz(): Double {
         val mhz = settings.channelMhz
         if (mhz <= 0) return 0.0
-        val seen = found.filter { abs(it.mhz - mhz) < 4 }.maxByOrNull { it.snrDb }
+        val seen = found.filter { abs(it.mhz - mhz) < Channels.SAME_CHANNEL_MHZ }.maxByOrNull { it.snrDb }
         return (seen?.mhz ?: mhz.toDouble()) * 1e6
     }
 
@@ -197,6 +211,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         val hz = channelHz()
         if (hz <= 0) return
         noVideoFound = false
+        scanOnReturn = false   // a channel has been chosen since: no scan is owed any more
         engine.watch(hz, fresh)
         mode = "watch"
     }
@@ -213,6 +228,8 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         if (link.state != UsbLink.State.RUNNING || testRunning) return
         scanOnReturn = false
         noVideoFound = false
+        scanStartedAt = android.os.SystemClock.elapsedRealtime()
+        found = emptyList()   // what earlier scans saw is history: this one starts from nothing
         engine.scan(channelHz())
         mode = "scan"
         refresh()
@@ -231,7 +248,12 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     }
 
     /** A view slider is being dragged: the picture sharp under it, so the change can be judged. */
-    override fun onPeek(on: Boolean) = engine.setBackdrop(!on, false)
+    override fun onPeek(on: Boolean) = engine.setBackdrop(menuOpen && !on, false)
+
+    /** A finger on the menu: whoever opened it, it now stays until it is closed. */
+    override fun onTouched() {
+        menuAuto = false
+    }
 
     override fun onStatusAction() = link.retryNow()
 
@@ -239,17 +261,29 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
 
     // ---------------------------------------------------------------------------------------- UsbLink.Events
     override fun onLinkChanged() {
-        if (link.state != UsbLink.State.RUNNING) {
+        val running = link.state == UsbLink.State.RUNNING
+        if (!running) {
             mode = ""
             testRunning = false
+            // the picture has just gone, with nothing on screen to say why: the menu does (and steps aside
+            // again by itself once the radio is back, see onRadioUp)
+            if (wasRunning && foreground) showMenuForTrouble()
         }
+        wasRunning = running
         refresh()
+    }
+
+    private fun showMenuForTrouble() {
+        if (menuOpen || !::menu.isInitialized) return
+        openMenu()
+        menuAuto = true
     }
 
     override fun onRadioUp() {
         applyPicture()
         applySignal()
         lastDropped = 0
+        if (menuAuto) closeMenu()   // it only came up to say the picture was away
         when {
             testRequested -> startTest()
             !foreground -> {   // it came up with nobody watching: wait, and on return tune, or scan if this is the first run
@@ -257,6 +291,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
                 mode = "idle"
                 scanOnReturn = settings.channelMhz <= 0
             }
+            scanOnReturn -> onScan()   // one was cut short before the adapter was let go
             settings.channelMhz > 0 -> tune(fresh = true)
             else -> onScan()   // first run: find something to show
         }
@@ -315,7 +350,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
 
     private fun linkHeadline(): MenuState = when (link.state) {
         UsbLink.State.NO_ADAPTER -> MenuState(Tone.IDLE, "No adapter", "Plug the Wi-Fi adapter into the phone's USB port.")
-        UsbLink.State.PERMISSION -> MenuState(Tone.BUSY, "Waiting for permission", "Allow Kepyur to use the adapter.")
+        UsbLink.State.PERMISSION -> MenuState(Tone.BUSY, "Allow USB access", "Android is asking whether Kepyur may use the adapter.")
         UsbLink.State.DENIED -> MenuState(Tone.WARN, "Permission needed", "Kepyur cannot use the adapter without it.", "Ask again")
         UsbLink.State.SWITCHING -> MenuState(Tone.BUSY, "Switching to USB 3", "The adapter restarts itself. This takes a few seconds.")
         UsbLink.State.OPENING -> MenuState(Tone.BUSY, "Starting the radio", link.message.ifEmpty { "About five seconds." })
@@ -344,12 +379,16 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         val locked = v?.optBoolean("locked") ?: false
         val watchHz = s.num("watch_hz")
 
-        found = buildList {
+        // The radio remembers every signal it has ever seen; what the menu shows as found is what the last scan
+        // saw (a transmitter that has since landed is not "found", and its old frequency is no guide to tuning).
+        val sinceScan = android.os.SystemClock.elapsedRealtime() - scanStartedAt
+        found = if (scanStartedAt == 0L) emptyList() else buildList {
             val arr = s.optJSONArray("pilots") ?: return@buildList
             for (i in 0 until arr.length()) {
                 val p = arr.optJSONObject(i) ?: continue
                 val mhz = p.num("mhz")
-                if (mhz > 0) add(Found(mhz, p.optString("name"), p.num("snr").toFloat(), p.optString("std")))
+                val seenInThisScan = p.optLong("age_s") * 1000 <= sinceScan + 1500
+                if (mhz > 0 && seenInThisScan) add(Found(mhz, p.optString("name"), p.num("snr").toFloat(), p.optString("std")))
             }
         }
         // a scan has just ended: it left the radio on the channel it judged best, and the picker follows
@@ -364,13 +403,14 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
 
         // is the phone keeping up? (dropped blocks, or a thread with no time to spare)
         val now = android.os.SystemClock.elapsedRealtime()
-        val dropped = s.optLong("dropped") + s.optLong("decode_dropped")
+        // blocks lost anywhere on the way: on the USB link itself, in the queue behind it, before the decoder
+        val dropped = s.optLong("stream_dropped") + s.optLong("dropped") + s.optLong("decode_dropped")
         val load = maxOf(s.num("dsp_load"), s.num("decode_load"))
         if (mode == "watch" && (dropped > lastDropped || load > 0.95)) overloadedUntil = now + 5000
         lastDropped = dropped
         val overloaded = mode == "watch" && now < overloadedUntil
 
-        val name = Channels.nearest(watchHz / 1e6, settings.band, 4.0)?.name
+        val name = Channels.nearest(watchHz / 1e6, settings.band, Channels.SAME_CHANNEL_MHZ)?.name
         val where = (if (name != null) "$name · " else "") + "${(watchHz / 1e6).roundToInt()} MHz"   // finite: num()
         val stats = buildString {
             append(if (s.optBoolean("usb3")) "USB 3" else "USB 2")
@@ -396,8 +436,9 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
                 } ?: "Starting…")
             }
             "watch" -> when {
-                overloaded -> base.copy(tone = Tone.WARN, headline = where,
-                    detail = "The phone is not keeping up. Turn off Clean OSD edges, Colour comb or Diversity, or use sample rate 20.")
+                overloaded -> OVERLOAD_ADVICE.let { advice ->   // in full on the Signal tab: the rail may cut it short
+                    base.copy(tone = Tone.WARN, headline = where, detail = advice, stats = "$advice\n$stats")
+                }
                 locked -> base.copy(tone = Tone.LIVE, headline = where, detail = buildString {
                     append(v?.optString("std") ?: "")
                     if (v?.optBoolean("colour") == false) append(" · black and white")
@@ -414,7 +455,8 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     /** The radio is on [mhz] by its own choice (after a scan): the picker and the saved channel follow. */
     private fun adoptChannel(mhz: Double) {
         if (!mhz.isFinite() || mhz <= 0) return
-        val ch = Channels.nearest(mhz, settings.band)
+        // a transmitter further than that from a channel is not on it: it is kept by its own frequency
+        val ch = Channels.nearest(mhz, settings.band, Channels.SAME_CHANNEL_MHZ)
         val to = ch?.mhz ?: mhz.roundToInt()
         if (to == settings.channelMhz && (ch == null || ch.band == settings.band)) return
         settings.channelMhz = to
@@ -447,10 +489,17 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         video.holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(h: SurfaceHolder) {
                 frameRateFor = ""
+                surfaceOwner = surfaceToken
                 engine.setSurface(h.surface)
             }
             override fun surfaceChanged(h: SurfaceHolder, f: Int, w: Int, ht: Int) = engine.redraw()
-            override fun surfaceDestroyed(h: SurfaceHolder) = engine.setSurface(null)
+            override fun surfaceDestroyed(h: SurfaceHolder) {
+                // the native screen is one for the process: an earlier activity, going away late, must not take
+                // the Surface of the one that has replaced it
+                if (surfaceOwner !== surfaceToken) return
+                surfaceOwner = null
+                engine.setSurface(null)
+            }
         })
         root.addView(video, FrameLayout.LayoutParams(-1, -1))
 
@@ -493,6 +542,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     private fun openMenu() {
         if (menuOpen) return
         menuOpen = true
+        menuAuto = false
         ui.removeCallbacks(hideHint)
         hint.animate().cancel()
         hint.alpha = 0f
@@ -509,6 +559,8 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     private fun closeMenu() {
         if (!menuOpen) return
         menuOpen = false
+        menuAuto = false
+        menu.endPeek()
         engine.setBackdrop(false, false)
         menu.animate().cancel()
         menu.animate().alpha(0f).translationY(dp(10f)).setDuration(200).setInterpolator(DecelerateInterpolator(1.5f))
@@ -539,5 +591,10 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     companion object {
         const val HINT_MS = 3000L
         const val BACKGROUND_CLOSE_MS = 30000L
+        const val OVERLOAD_ADVICE =
+            "The phone is not keeping up. Turn off Clean OSD edges, Colour comb or Diversity, or use sample rate 20."
+
+        /** The activity whose SurfaceView the native screen is drawing on, by its token (main thread only). */
+        private var surfaceOwner: Any? = null
     }
 }

@@ -55,7 +55,8 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
     private val usb = ctx.getSystemService(Context.USB_SERVICE) as UsbManager
     private val permAction = "com.kepyur.app.USB_PERMISSION"
     private var conn: UsbDeviceConnection? = null
-    private var started = false
+    var started = false
+        private set
 
     /** Bumped whenever the adapter in hand is given up: what an open in flight finds when it lands tells it to stand down. */
     private var generation = 0
@@ -149,9 +150,11 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
         val d = usb.deviceList.values.firstOrNull { ours(it) }
         if (d == null) {
             // gone because it is coming back as a USB 3 device? then keep saying so until the deadline
-            if (SystemClock.elapsedRealtime() < switchDeadline) set(State.SWITCHING) else set(State.NO_ADAPTER)
+            if (SystemClock.elapsedRealtime() < switchDeadline) awaitSwitch() else set(State.NO_ADAPTER)
             return
         }
+        // it is back (or was never away): from here on, its going away is an unplugging like any other
+        switchDeadline = 0
         if (!usb.hasPermission(d)) {
             // already asked about this very device and still waiting for the answer (the attach broadcast and
             // the USB 3 switch watch both come through here)
@@ -193,9 +196,7 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
                     c.close()
                     conn = null
                     switchDeadline = SystemClock.elapsedRealtime() + SWITCH_WAIT_MS
-                    set(State.SWITCHING)
-                    ui.removeCallbacks(switchWatch)
-                    ui.postDelayed(switchWatch, 1000)
+                    awaitSwitch()
                 }
                 return@execute
             }
@@ -204,7 +205,6 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
             val fast = err.isEmpty() && engine.superspeed()
             ui.post {
                 if (gen != generation) return@post   // unplugged meanwhile: the close queued behind us tidies up
-                switchDeadline = 0
                 when {
                     err.isNotEmpty() -> failLater("The radio did not start: $err")
                     !fast -> set(State.USB2)
@@ -215,11 +215,18 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
                         runningSince = banksMovedAt
                         checkedAt = banksMovedAt
                         set(State.RUNNING)
-                        events.onRadioUp()
+                        if (state == State.RUNNING) events.onRadioUp()   // a listener may already have moved on
                     }
                 }
             }
         }
+    }
+
+    /** Waiting for the adapter to come back as a USB 3 device, with the watch that ends the wait running. */
+    private fun awaitSwitch() {
+        set(State.SWITCHING)
+        ui.removeCallbacks(switchWatch)
+        ui.postDelayed(switchWatch, 1000)
     }
 
     /** While the adapter re-enumerates: open it as soon as it is back; say so if it never comes. */
@@ -275,9 +282,15 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
 
     // ---------------------------------------------------------------------------------------- watching over it
     /**
-     * Once per status poll while [State.RUNNING]: is the radio still alive? A receiver that has given up
-     * ("lost", "error", or its thread gone), or one that still says it is streaming while no samples have
-     * arrived for [STALL_MS], is closed and reopened; [Events.onRadioUp] then tunes the channel again.
+     * Once per status poll while [State.RUNNING]: is the radio still alive? A radio whose receiver has ended
+     * ("dead", or "lost": the adapter is gone), one that has been closed underneath us, or one that says it is
+     * streaming while no samples have arrived for [STALL_MS], is closed and reopened; [Events.onRadioUp] then
+     * tunes the channel again.
+     *
+     * The receiver's other states are not verdicts. It reads "closed" from the moment it is opened until its
+     * own thread first runs, and "error" for a fifth of a second before it tries a failed retune again: a poll
+     * that lands there must not take a healthy radio down. If it does stay there, no samples come, and the
+     * stall rule ends it.
      */
     fun check(status: JSONObject) {
         if (state != State.RUNNING) return
@@ -292,9 +305,9 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
         }
         val rx = status.optString("rx_state")
         val why = when {
-            status.optBoolean("dead") || rx == "lost" || rx == "error" ->
+            status.optBoolean("dead") || rx == "lost" ->
                 status.optString("rx_error").ifEmpty { status.optString("last_fault") }.ifEmpty { "the adapter stopped answering" }
-            !status.optBoolean("open", true) || rx == "closed" -> "it was closed"   // under us: nothing will come
+            !status.optBoolean("open", true) -> "it was closed"   // under us: nothing will come
             now - banksMovedAt > STALL_MS -> "no samples for ${STALL_MS / 1000} seconds"
             else -> {
                 if (now - runningSince > HEALTHY_MS) failures = 0   // it has run well for a while: a clean slate
@@ -322,7 +335,7 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
                     giveUpAdapter()
                     failures = 0
                     askedFor = null
-                    if (switching) set(State.SWITCHING) else { switchRequests = 0; set(State.NO_ADAPTER) }
+                    if (switching) awaitSwitch() else { switchRequests = 0; set(State.NO_ADAPTER) }
                 }
                 UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
                     engine.log("adapter attached")

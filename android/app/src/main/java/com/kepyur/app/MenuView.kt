@@ -8,6 +8,7 @@ import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.InsetDrawable
 import android.text.TextUtils
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -64,6 +65,8 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
          * slider) so the picture can be seen changing, and the picture should be shown sharp.
          */
         fun onPeek(on: Boolean)
+        /** A finger has come down somewhere on the menu. */
+        fun onTouched() {}
         fun onStatusAction()
         fun onClose()
     }
@@ -74,8 +77,13 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     private lateinit var rail: View
     private lateinit var card: FrameLayout
     private val pageBodies = ArrayList<LinearLayout>()
+    private val pageScrollers = ArrayList<ScrollView>()
     private var peeking: View? = null
+    private var peekBody: LinearLayout? = null   // the page whose other rows the peek has faded
+    private var peekShade = 255                  // how much of the scrim and the card is showing, 0..255
     private var peekAnim: ValueAnimator? = null
+    private var cutLeft = 0    // a camera cutout's share of either end of the screen, px
+    private var cutRight = 0
 
     // rail
     private val wordmark = label(ctx, "KEPYUR", 11f, Skin.TEXT_3, medium = true).apply { letterSpacing = 0.32f }
@@ -108,8 +116,9 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
 
     // signal page
     private lateinit var gainRow: SettingRow
+    private var gainApplied = s.gainDb   // the manual gain the radio was last told
     private lateinit var gainDivider: View
-    private val stats = label(ctx, "", 12f, Skin.TEXT_3)
+    private val stats = label(ctx, "", 12.5f, Skin.TEXT_2)
 
     // Everything the pages read while they are built has to be declared above this point: Kotlin runs property
     // initialisers and init blocks in the order they are written.
@@ -123,7 +132,9 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         setBackgroundColor(Skin.SCRIM)
         isClickable = true   // touches stop here: nothing behind the menu reacts
         rail = buildRail()
-        group.addView(rail, LinearLayout.LayoutParams(dpi(196f), -1))
+        rail.background = rounded(Skin.PANEL, dp(22f), Skin.STROKE, dpi(1f))
+        rail.setPadding(dpi(8f), dpi(10f), dpi(8f), dpi(8f))
+        group.addView(rail, LinearLayout.LayoutParams(dpi(RAIL_DP), -1))
         card = FrameLayout(ctx).apply {
             background = rounded(Skin.PANEL, dp(22f), Skin.STROKE, dpi(1f))
             clipToOutline = true
@@ -133,19 +144,31 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         pages += scrolling(buildPicturePage())
         pages += scrolling(buildSignalPage())
         for (p in pages) card.addView(p, LayoutParams(-1, -1))
-        group.addView(card, LinearLayout.LayoutParams(0, -1, 1f).apply { marginStart = dpi(14f) })
+        group.addView(card, LinearLayout.LayoutParams(0, -1, 1f).apply { marginStart = dpi(12f) })
         addView(group, LayoutParams(-1, -1, Gravity.CENTER))
-        val base = dpi(18f)
-        group.setPadding(base, base, base, base)
         setOnApplyWindowInsetsListener { _, insets ->
             // keep clear of a camera cutout at either end (the picture runs under it, the menu does not)
             val cut = insets.displayCutout
-            group.setPadding(max(base, (cut?.safeInsetLeft ?: 0) + dpi(8f)), base, max(base, (cut?.safeInsetRight ?: 0) + dpi(8f)), base)
+            val left = cut?.safeInsetLeft ?: 0
+            val right = cut?.safeInsetRight ?: 0
+            if (left != cutLeft || right != cutRight) {
+                cutLeft = left
+                cutRight = right
+                requestLayout()
+            }
             insets
         }
         showTab(0, animate = false)
         syncChannel()
         render(state)
+    }
+
+    override fun dispatchTouchEvent(e: MotionEvent): Boolean {
+        if (e.actionMasked == MotionEvent.ACTION_DOWN) on.onTouched()
+        // While a slider is held and the rest has faded away, what cannot be seen must not be pressed: a second
+        // finger (a thumb resting where Close menu was) goes nowhere.
+        if (peeking != null && e.actionMasked == MotionEvent.ACTION_POINTER_DOWN) return true
+        return super.dispatchTouchEvent(e)
     }
 
     /**
@@ -156,8 +179,11 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         val lp = group.layoutParams
         lp.width = min(MeasureSpec.getSize(w), dpi(1010f))
         lp.height = min(MeasureSpec.getSize(h), dpi(470f))
+        // the margin round the menu: less of it on a short screen, where every line of the status counts
+        val base = dpi(if (lp.height < dpi(SHORT_DP)) 12f else 18f)
+        group.setPadding(max(base, cutLeft + dpi(8f)), base, max(base, cutRight + dpi(8f)), base)
         val cardHeight = lp.height - group.paddingTop - group.paddingBottom
-        fitRail(cardHeight)
+        fitRail(cardHeight - rail.paddingTop - rail.paddingBottom)
         val tileHeight = ((cardHeight - dpi(CHANNEL_PAGE_REST)) / 2).coerceIn(dpi(56f), dpi(84f))
         for (r in tileRows) r.layoutParams.height = tileHeight
         super.onMeasure(w, h)
@@ -216,11 +242,11 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
      * message cut to the lines there is room for, so that the tabs and Close menu always fit.
      */
     private fun fitRail(height: Int) {
-        val short = height < dpi(380f)
+        val short = height < dpi(SHORT_DP - 40f)
         // a problem with something to tap, on a short screen: its message is worth more than the name of the app
         val tight = short && state.action != null
         wordmark.visibility = if (tight) View.GONE else View.VISIBLE
-        val tab = dpi(if (tight) 36f else if (short) 38f else 42f)
+        val tab = dpi(if (tight) 34f else if (short) 36f else 42f)
         for (t in tabViews) if (t.layoutParams.height != tab) t.layoutParams.height = tab
         // the wordmark, the headline with the status block's padding, the tabs with their gaps, the button
         val rest = (if (tight) 0 else dpi(18f)) + dpi(46f) + dpi(12f) + 4 * tab + dpi(54f)
@@ -230,9 +256,11 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     }
 
     fun showTab(index: Int, animate: Boolean = true) {
+        endPeek()
         tab = index
         for ((i, t) in tabViews.withIndex()) {
             val sel = i == index
+            t.isSelected = sel
             t.background = if (sel) rounded(Skin.FILL_STRONG, dp(13f)) else null
             t.setTextColor(if (sel) Skin.TEXT else Skin.TEXT_2)
             t.typeface = if (sel) Skin.MEDIUM else Skin.REGULAR
@@ -259,7 +287,29 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         isVerticalScrollBarEnabled = false
         overScrollMode = View.OVER_SCROLL_NEVER
         isFillViewport = true
+        // a page taller than the card fades out at the edge it continues past: the only sign that it scrolls
+        isVerticalFadingEdgeEnabled = true
+        setFadingEdgeLength(dpi(28f))
         addView(content, ViewGroup.LayoutParams(-1, -2))
+        pageScrollers += this
+    }
+
+    /** A row that has just appeared may be below the card's edge: bring it into view. */
+    private fun reveal(row: View) {
+        val scroller = pageScrollers.firstOrNull { row.isDescendantOf(it) } ?: return
+        scroller.post {
+            val bottom = row.bottom + dpi(16f)
+            if (bottom > scroller.scrollY + scroller.height) scroller.smoothScrollTo(0, bottom - scroller.height)
+        }
+    }
+
+    private fun View.isDescendantOf(group: ViewGroup): Boolean {
+        var p = parent
+        while (p != null) {
+            if (p === group) return true
+            p = p.parent
+        }
+        return false
     }
 
     private fun page() = LinearLayout(context).apply {
@@ -281,7 +331,9 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         peeking = row
         val to = if (row == null) 1f else 0f
         rail.animate().alpha(to).setDuration(PEEK_MS).start()
-        val body = pageBodies[tab]
+        // the page that is faded is the one the row is on, whatever tab is showing by the time it comes back
+        val body = (if (row != null) pageBodies[tab] else peekBody) ?: pageBodies[tab]
+        peekBody = if (row != null) body else null
         for (i in 0 until body.childCount) {
             val c = body.getChildAt(i)
             if (c !== (row ?: was)) c.animate().alpha(to).setDuration(PEEK_MS).start()
@@ -295,18 +347,21 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
             r.setPadding(pad[0], pad[1], pad[2], pad[3])
         }
         peekAnim?.cancel()
-        val from = background.alpha
-        peekAnim = ValueAnimator.ofInt(from, if (row == null) 255 else 0).apply {
+        peekAnim = ValueAnimator.ofInt(peekShade, if (row == null) 255 else 0).apply {
             duration = PEEK_MS
             addUpdateListener {
-                val a = it.animatedValue as Int
-                this@MenuView.background.alpha = a
-                card.background.alpha = a
+                peekShade = it.animatedValue as Int
+                this@MenuView.background.alpha = peekShade
+                card.background.alpha = peekShade
+                rail.background?.alpha = peekShade
             }
             start()
         }
         on.onPeek(row != null)
     }
+
+    /** Whatever was being dragged, the menu is whole again (the menu is closing, or another tab is wanted). */
+    fun endPeek() = peek(null)
 
     /** For a picture of the peek (the screenshot test): as if the size slider were held. */
     internal fun peekSizeRow(on: Boolean) = peek(if (on) sizeRow else null)
@@ -370,7 +425,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     }
 
     private fun barsOn(ch: Channel): Int {
-        val f = state.found.filter { abs(it.mhz - ch.mhz) < 4 }.maxByOrNull { it.snrDb } ?: return 0
+        val f = state.found.filter { abs(it.mhz - ch.mhz) < Channels.SAME_CHANNEL_MHZ }.maxByOrNull { it.snrDb } ?: return 0
         return barsFor(f.snrDb).coerceAtLeast(1)
     }
 
@@ -420,8 +475,10 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     private fun sizeWords() = "${(s.scale * 100).roundToInt()}% of the screen"
 
     private fun showEyeRow() {
+        val was = eyeRow.visibility
         eyeRow.visibility = if (s.goggles) View.VISIBLE else View.GONE
         eyeDivider.visibility = eyeRow.visibility
+        if (s.goggles && was != View.VISIBLE) reveal(eyeRow)
     }
 
     private fun changedView(save: Boolean = true) {
@@ -484,11 +541,13 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
             Slider(context, 0f, Settings.GAIN_MAX, s.gainDb, 30f) { v, done ->
                 s.gainDb = v.roundToInt().toFloat()
                 gainRow.detailView.text = gainWords()
-                if (done) {   // a retune interrupts the picture: once, when the finger lifts
+                // a retune interrupts the picture: once, when the finger lifts, and only for a new value
+                if (done && s.gainDb != gainApplied) {
+                    gainApplied = s.gainDb
                     s.save()
                     on.onSignal(retune = true)
                 }
-            }.sized(dpi(216f)))
+            }.apply { spoken = { "${it.roundToInt()} dB" } }.sized(dpi(216f)))
         p.addView(gainRow)
         showGainRow()
         p.addView(divider(context))
@@ -500,13 +559,18 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     private fun gainWords() = "${s.gainDb.roundToInt()} dB"
 
     private fun showGainRow() {
+        val was = gainRow.visibility
         gainRow.visibility = if (s.gainAuto) View.GONE else View.VISIBLE
         gainDivider.visibility = gainRow.visibility
+        if (!s.gainAuto && was != View.VISIBLE) reveal(gainRow)
     }
 
     private fun <T : View> T.sized(width: Int): T = apply { layoutParams = LinearLayout.LayoutParams(width, dpi(38f)) }
 
     companion object {
+        const val RAIL_DP = 204f
+        /** A screen lower than this is short: most phones held sideways are, by a little. */
+        const val SHORT_DP = 400f
         const val PEEK_MS = 150L
         /** Height (dp) of everything on the channel page but its two rows of tiles, paddings included. */
         const val CHANNEL_PAGE_REST = 168f
@@ -548,7 +612,8 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
             foundShown = st.found
             foundRow.removeAllViews()
             for (f in st.found.sortedByDescending { it.snrDb }) {
-                val ch = Channels.nearest(f.mhz, s.band)
+                // a signal further than that from any channel is shown, saved and tuned by its own frequency
+                val ch = Channels.nearest(f.mhz, s.band, Channels.SAME_CHANNEL_MHZ)
                 val chip = FoundChip(context, ch?.name ?: "${f.mhz.roundToInt()}", barsFor(f.snrDb).coerceAtLeast(1))
                 chip.setOnClickListener {
                     s.channelMhz = ch?.mhz ?: f.mhz.roundToInt()

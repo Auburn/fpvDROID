@@ -108,10 +108,46 @@ class UsbLinkScenariosTest : AppHarness() {
     }
 
     @Test
-    fun receiverInErrorIsClosedReopenedAndTunedAgain() {
+    fun receiverInErrorForAMomentIsLeftAlone() {
+        // the receiver reads "error" for a fifth of a second before it tries a failed retune again by itself
         running()
         fake.rxState = "error"
-        assertReopensAndTunesAgain(maxDetectMs = 500)
+        advance(600)
+        fake.rxState = null
+        advance(8000)
+        assertEquals(State.RUNNING, link.state)
+        assertEquals(0, fake.count("close"))
+        assertEquals(1, fake.count("open"))
+    }
+
+    @Test
+    fun receiverStuckInErrorWithNoSamplesIsEndedByTheStallRule() {
+        running()
+        advance(1000)
+        fake.rxState = "error"
+        fake.freezeBanks = true
+        val detect = advanceUntil("the app to close the radio", 6000) { fake.count("close") == 1 }
+        assertTrue("ended after $detect ms, expected just over 4000", detect in 4000..4600)
+        fake.rxState = null
+        fake.freezeBanks = false
+        advanceUntil("the reopen", 3000) { fake.count("open") == 2 }
+        assertEquals(State.RUNNING, link.state)
+    }
+
+    @Test
+    fun receiverStillClosedAtTheFirstPollAfterOpenIsNotTornDown() {
+        // between open() returning and the receiver's own thread first running, its state still reads "closed"
+        saveChannel(5760, 'F')
+        plug(adapter(), broadcast = false)
+        fake.rxState = "closed"
+        launch()
+        assertEquals(State.RUNNING, link.state)
+        advance(500)
+        fake.rxState = null
+        advance(8000)
+        assertEquals(State.RUNNING, link.state)
+        assertEquals(0, fake.count("close"))
+        assertEquals(1, fake.count("open"))
     }
 
     @Test
@@ -351,7 +387,7 @@ class UsbLinkScenariosTest : AppHarness() {
         assertEquals(1, permissionRequests.size)
         assertEquals(d, permissionRequests[0].first)
         advance(300)
-        assertEquals("Waiting for permission", headline)
+        assertEquals("Allow USB access", headline)
 
         answerPermission(false)
         assertEquals(State.DENIED, link.state)
