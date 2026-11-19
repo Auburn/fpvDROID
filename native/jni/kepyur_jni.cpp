@@ -7,6 +7,7 @@
 #include <jni.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -20,6 +21,7 @@
 
 #include "log.h"
 #include "radio.h"
+#include "test_card.h"
 #include "usbmode.h"
 #include "video.h"
 #include "video_renderer.h"
@@ -332,6 +334,33 @@ std::unique_ptr<Screen> g_screen;
 std::unique_ptr<Radio> g_radio;
 std::mutex g_api;  // serialises open/close against the other calls
 
+// ---- test picture ----
+// The screen side of the app without an adapter (the "testcard" extra): the test card as if it were decoded
+// video, 30 times a second, with its bar moving.
+std::mutex g_card_m;
+std::thread g_card;
+std::atomic<bool> g_card_on{false};
+
+void card_stop() {
+  std::lock_guard<std::mutex> l(g_card_m);
+  g_card_on = false;
+  if (g_card.joinable()) g_card.join();
+}
+
+void card_start() {
+  card_stop();
+  std::lock_guard<std::mutex> l(g_card_m);
+  g_card_on = true;
+  g_card = std::thread([] {
+    std::vector<uint8_t> px;
+    for (int tick = 1; g_card_on; tick++) {
+      test_card(px, 720, 480, tick);
+      if (g_screen) g_screen->post(Frame{px.data(), 720, 480, &kNtsc});
+      std::this_thread::sleep_for(std::chrono::milliseconds(33));
+    }
+  });
+}
+
 std::string jstring_of(JNIEnv *env, jstring s) {
   const char *p = env->GetStringUTFChars(s, nullptr);
   std::string out = p ? p : "";
@@ -471,6 +500,16 @@ JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setSurface(JNIEnv *env, jclass
 
 JNIEXPORT void JNICALL Java_com_kepyur_app_Native_redraw(JNIEnv *, jclass) {
   if (g_screen) g_screen->redraw();
+}
+
+JNIEXPORT void JNICALL Java_com_kepyur_app_Native_testCard(JNIEnv *, jclass, jboolean on) {
+  KP_LOGI("test picture %s", on ? "on" : "off");
+  if (on) {
+    card_start();
+  } else {
+    card_stop();
+    if (g_screen) g_screen->clear();
+  }
 }
 
 JNIEXPORT void JNICALL Java_com_kepyur_app_Native_log(JNIEnv *env, jclass, jstring msg) {

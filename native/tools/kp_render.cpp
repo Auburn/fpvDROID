@@ -5,7 +5,7 @@
 //             [--fit fit|stretch|crop] [--scale 1.0] [--stereo] [--eye 0.0] [--blur 0..1] [--gain 1]
 //
 // FRAME.rgbx is one frame as kp_replay --frames writes them (the last 720 x H x 4 bytes of its output);
-// without --in a test card is drawn (a circle shows the aspect ratio, a border shows what is cut off).
+// without --in the test card is drawn (test_card.h: a circle shows the aspect ratio, a border what is cut off).
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES3/gl3.h>
@@ -17,29 +17,10 @@
 #include <string>
 #include <vector>
 
+#include "test_card.h"
 #include "video_renderer.h"
 
 namespace {
-
-std::vector<uint8_t> test_card(int w, int h) {
-  std::vector<uint8_t> px(static_cast<size_t>(w) * h * 4, 255);
-  for (int y = 0; y < h; y++)
-    for (int x = 0; x < w; x++) {
-      uint8_t *p = &px[(static_cast<size_t>(y) * w + x) * 4];
-      const double u = (x + 0.5) / w, v = (y + 0.5) / h;
-      // sky to ground gradient with a coloured grid, so blur and scaling are easy to judge
-      double r = 0.20 + 0.5 * v, g = 0.35 + 0.3 * (1 - v), b = 0.75 * (1 - v) + 0.1;
-      if (std::fmod(u * 12, 1.0) < 0.04 || std::fmod(v * 9, 1.0) < 0.05) r = g = b = 0.92;
-      // a circle as the camera saw it: round only when the picture is shown at 4:3
-      const double dx = (u - 0.5) * 4 / 3, dy = v - 0.5, d = std::sqrt(dx * dx + dy * dy);
-      if (std::fabs(d - 0.36) < 0.012) r = 1, g = 0.85, b = 0.1;
-      if (x < 6 || y < 4 || x >= w - 6 || y >= h - 4) r = 1, g = 0.1, b = 0.1;  // the frame's very edge
-      p[0] = static_cast<uint8_t>(r * 255);
-      p[1] = static_cast<uint8_t>(g * 255);
-      p[2] = static_cast<uint8_t>(b * 255);
-    }
-  return px;
-}
 
 bool pair_of(const char *s, char sep, double &a, double &b) {
   const char *p = std::strchr(s, sep);
@@ -84,7 +65,7 @@ int main(int argc, char **argv) {
   }
   std::vector<uint8_t> frame;
   if (in.empty()) {
-    frame = test_card(fw, fh);
+    kp::test_card(frame, fw, fh);
   } else {
     FILE *f = std::fopen(in.c_str(), "rb");
     if (!f) return std::perror(in.c_str()), 1;

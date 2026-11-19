@@ -111,6 +111,10 @@ scripts/phone.sh run        # normal start
 scripts/phone.sh logs NAME  # pull kepyur.log + logcat
 ```
 
+Without an adapter, `adb shell am start -n com.kepyur.app/.MainActivity --ez testcard true` puts a moving test
+picture where the video would be (`false` takes it away): enough to try the view settings, or to line up
+goggles before there is anything to watch.
+
 ## Desktop bench
 
 ```sh

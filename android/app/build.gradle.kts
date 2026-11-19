@@ -22,7 +22,8 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1"
-        ndk { abiFilters += listOf("arm64-v8a") }
+        // phones are arm64; -Pabi=x86_64 builds for an emulator on a PC
+        ndk { abiFilters += listOf((findProperty("abi") as String?) ?: "arm64-v8a") }
         externalNativeBuild {
             cmake {
                 arguments += listOf(

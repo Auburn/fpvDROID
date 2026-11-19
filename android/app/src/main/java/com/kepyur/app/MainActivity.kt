@@ -82,9 +82,10 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         if (intent.action == UsbManager.ACTION_USB_DEVICE_ATTACHED) link.onAttachedIntent()
     }
 
-    /** adb shell am start -n com.kepyur.app/.MainActivity [--es mode usbtest] [--ef gain 30] [--ef record 3] */
+    /** adb shell am start -n com.kepyur.app/.MainActivity [--es mode usbtest] [--ef gain 30] [--ef record 3] [--ez testcard true] */
     private fun handleIntent(i: Intent?) {
         i ?: return
+        if (i.hasExtra("testcard")) engine.testCard(i.getBooleanExtra("testcard", false))
         if (i.getStringExtra("mode") == "usbtest") {
             testRequested = true
             if (::link.isInitialized && link.state == UsbLink.State.RUNNING) startTest()

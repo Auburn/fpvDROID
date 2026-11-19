@@ -44,6 +44,8 @@ interface Engine {
     fun setSurface(surface: Surface?)
     /** Draw again (the Surface changed size). */
     fun redraw()
+    /** Debug: a moving test picture in place of video (no adapter needed), for looking at the screen side alone. */
+    fun testCard(on: Boolean) {}
     fun log(msg: String)
 
     companion object {
@@ -77,5 +79,6 @@ object Native : Engine {
     external override fun status(): String
     external override fun setSurface(surface: Surface?)
     external override fun redraw()
+    external override fun testCard(on: Boolean)
     external override fun log(msg: String)
 }
