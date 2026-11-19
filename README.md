@@ -91,10 +91,13 @@ scripts/build-android.sh      # android/app/build/outputs/apk/debug/app-debug.ap
 scripts/build-web.sh          # build/web/site; serve it with: node web/serve.mjs (http://localhost:8080)
 ```
 
-The menu can be looked at without a phone: a JVM test (Robolectric) draws every tab to PNG files, with a
-transparent background where the picture shows through.
+The app's own code runs without a phone, in JVM tests (Robolectric) against a stand-in for the native side:
+the activity and the adapter's state machine through a failed start, a radio that dies or stalls, the USB 3
+switch, unplugging, the background; every menu control down to the call it makes; and the menu itself drawn
+to PNG files, with a transparent background where the picture shows through.
 
 ```sh
+cd android && gradle testDebugUnitTest                                                               # everything
 cd android && gradle testDebugUnitTest --tests com.kepyur.app.MenuScreenshotTest -Pshots=/tmp/menu   # /tmp/menu/*.png
 ```
 

@@ -795,37 +795,41 @@ std::string Radio::status_json() {
   wsdr::RxStatus rs;
   if (_rx) rs = _rx->status();
   std::lock_guard<std::mutex> l(_m);
+  // A JSON number or nothing: a nan or inf printed as it comes is not JSON, and a reader may choke on it or,
+  // worse, take it for a string (Android's does).
+  const auto num = [](double v) { return std::isfinite(v) ? v : 0.0; };
   static const char *modes[] = {"idle", "scan", "watch", "test"};
   o << "{\"open\":" << (_open ? "true" : "false") << ",\"usb3\":" << (_superspeed ? "true" : "false")
     << ",\"chip\":" << jstr(_chip) << ",\"rx_state\":" << jstr(wsdr::rx_state_name(rs.state))
     << ",\"rx_error\":" << jstr(rs.error) << ",\"last_fault\":" << jstr(rs.last_fault)
-    << ",\"mode\":\"" << modes[static_cast<int>(_mode)] << "\",\"freq_hz\":" << _req_hz
-    << ",\"watch_hz\":" << _watch_hz << ",\"fs\":" << rs.fs << ",\"banks\":" << _banks.load()
+    << ",\"mode\":\"" << modes[static_cast<int>(_mode)] << "\",\"freq_hz\":" << num(_req_hz)
+    << ",\"watch_hz\":" << num(_watch_hz) << ",\"fs\":" << num(rs.fs) << ",\"banks\":" << _banks.load()
     << ",\"dropped\":" << _dropped.load() << ",\"decode_dropped\":" << _ddropped.load()
-    << ",\"restarts\":" << rs.restarts << ",\"dsp_load\":" << _load << ",\"decode_load\":" << _dload
+    << ",\"restarts\":" << rs.restarts << ",\"dsp_load\":" << num(_load) << ",\"decode_load\":" << num(_dload)
     << ",\"watch_msps\":" << (_mode == Mode::Watch ? wsdr::Receiver::rate_of(_req_rate) / 1e6 : 0)
     << ",\"fallback\":" << (_fallback ? "true" : "false") << ",\"dead\":" << (_dead ? "true" : "false")
-    << ",\"offset_tuning\":" << (_offset ? "true" : "false") << ",\"centre_hz\":" << rs.centre_hz;
-  if (_mode == Mode::Watch && _snr_db >= 0) o << ",\"snr_db\":" << _snr_db;
+    << ",\"offset_tuning\":" << (_offset ? "true" : "false") << ",\"centre_hz\":" << num(rs.centre_hz);
+  if (_mode == Mode::Watch && _snr_db >= 0) o << ",\"snr_db\":" << num(_snr_db);
   if (_mode == Mode::Scan) o << ",\"scan_step\":" << _step << ",\"scan_steps\":" << _plan.size();
   o << ",\"video\":{\"locked\":" << (!_vstats.acquiring && _vstats.lock_recent > 0.5f ? "true" : "false")
-    << ",\"lock\":" << _vstats.lock_recent << ",\"std\":" << jstr(_vstats.std_name) << ",\"fps\":" << _fps
+    << ",\"lock\":" << num(_vstats.lock_recent) << ",\"std\":" << jstr(_vstats.std_name) << ",\"fps\":" << num(_fps)
     << ",\"acquisitions\":" << _vstats.acquisitions << ",\"losses\":" << _vstats.losses
     << ",\"rephases\":" << _vstats.rephases << ",\"clicks_repaired\":" << _vstats.clicks_repaired
     << ",\"lines_mended\":" << _vstats.lines_mended << ",\"colour\":" << (_vstats.colour ? "true" : "false") << "}";
   {
     const auto &d = _comb_status.s;
-    o << ",\"antennas\":{\"combine\":" << (_comb_status.on ? "true" : "false") << ",\"snr_a\":" << d.snr_a_db
-      << ",\"snr_b\":" << d.snr_b_db << ",\"snr_c\":" << d.snr_c_db << ",\"b_share\":" << d.b_share
-      << ",\"a_fade\":" << d.a_fade << ",\"rescued\":" << d.rescued << ",\"coherence\":" << d.coherence << "}";
+    o << ",\"antennas\":{\"combine\":" << (_comb_status.on ? "true" : "false") << ",\"snr_a\":" << num(d.snr_a_db)
+      << ",\"snr_b\":" << num(d.snr_b_db) << ",\"snr_c\":" << num(d.snr_c_db) << ",\"b_share\":" << num(d.b_share)
+      << ",\"a_fade\":" << num(d.a_fade) << ",\"rescued\":" << num(d.rescued) << ",\"coherence\":" << num(d.coherence)
+      << "}";
   }
   o << ",\"test\":" << (_test_result.empty() ? "null" : _test_result);
   o << ",\"pilots\":[";
   const int64_t t = now_ms();
   for (size_t i = 0; i < _pilots.size(); i++) {
     const auto &p = _pilots[i];
-    o << (i ? "," : "") << "{\"mhz\":" << p.mhz << ",\"name\":" << jstr(p.name) << ",\"std\":" << jstr(p.std_name)
-      << ",\"snr\":" << p.snr_db << ",\"age_s\":" << (t - p.seen_ms) / 1000 << "}";
+    o << (i ? "," : "") << "{\"mhz\":" << num(p.mhz) << ",\"name\":" << jstr(p.name) << ",\"std\":" << jstr(p.std_name)
+      << ",\"snr\":" << num(p.snr_db) << ",\"age_s\":" << (t - p.seen_ms) / 1000 << "}";
   }
   o << "]}";
   return o.str();

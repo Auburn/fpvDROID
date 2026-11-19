@@ -52,6 +52,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     private var overloadedUntil = 0L
     private var frameRateFor = ""
     private var appliedRate = 0
+    private var scanOnReturn = false       // a scan is owed: the first one, or one the background cut short
     private var statusBroken = false
 
     // USB stream test
@@ -109,10 +110,14 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     override fun onStart() {
         super.onStart()
         foreground = true
+        ui.removeCallbacks(closeInBackground)
         ui.removeCallbacks(poll)
         ui.post(poll)
+        link.start()   // again, if the adapter was let go in the background (onRadioUp then tunes)
         // back from the background, where decoding was stopped
-        if (link.state == UsbLink.State.RUNNING && mode == "idle" && !testRunning) tune(fresh = true)
+        if (link.state == UsbLink.State.RUNNING && !testRunning) {
+            if (scanOnReturn) onScan() else if (mode == "idle") tune(fresh = true)
+        }
     }
 
     override fun onResume() {
@@ -130,10 +135,19 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         ui.removeCallbacks(poll)
         // nobody is watching: no reason to keep two cores decoding
         if (link.state == UsbLink.State.RUNNING && !testRunning) {
+            if (mode == "scan") scanOnReturn = true   // cut short: start it over when the app is back
             engine.idle()
             mode = "idle"
         }
+        // ... nor, after a while, to keep the adapter streaming and warm: it is opened again on return
+        if (!testRunning) ui.postDelayed(closeInBackground, BACKGROUND_CLOSE_MS)
         super.onStop()
+    }
+
+    private val closeInBackground = Runnable {
+        engine.log("in the background for ${BACKGROUND_CLOSE_MS / 1000} s: closing the adapter")
+        link.stop()
+        mode = ""
     }
 
     override fun onDestroy() {
@@ -197,6 +211,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
 
     override fun onScan() {
         if (link.state != UsbLink.State.RUNNING || testRunning) return
+        scanOnReturn = false
         noVideoFound = false
         engine.scan(channelHz())
         mode = "scan"
@@ -237,7 +252,11 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         lastDropped = 0
         when {
             testRequested -> startTest()
-            !foreground -> { engine.idle(); mode = "idle" }
+            !foreground -> {   // it came up with nobody watching: wait, and on return tune, or scan if this is the first run
+                engine.idle()
+                mode = "idle"
+                scanOnReturn = settings.channelMhz <= 0
+            }
             settings.channelMhz > 0 -> tune(fresh = true)
             else -> onScan()   // first run: find something to show
         }
@@ -283,6 +302,12 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         if (menuOpen) menu.render(st)
     }
 
+    /**
+     * A number from the status, or [or] when it is missing or not a finite number. (The native side prints
+     * doubles as they come, and Android's JSON reader takes a bare nan or inf for a string without complaint.)
+     */
+    private fun JSONObject.num(key: String, or: Double = 0.0): Double = optDouble(key, or).let { if (it.isFinite()) it else or }
+
     private fun linkState(): MenuState = when (link.state) {
         UsbLink.State.NO_ADAPTER -> MenuState(Tone.IDLE, "No adapter", "Plug the Wi-Fi adapter into the phone's USB port.")
         UsbLink.State.PERMISSION -> MenuState(Tone.BUSY, "Waiting for permission", "Allow Kepyur to use the adapter.")
@@ -312,13 +337,14 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         mode = s.optString("mode")
         val v = s.optJSONObject("video")
         val locked = v?.optBoolean("locked") ?: false
-        val watchHz = s.optDouble("watch_hz")
+        val watchHz = s.num("watch_hz")
 
         found = buildList {
             val arr = s.optJSONArray("pilots") ?: return@buildList
             for (i in 0 until arr.length()) {
-                val p = arr.getJSONObject(i)
-                add(Found(p.optDouble("mhz"), p.optString("name"), p.optDouble("snr").toFloat(), p.optString("std")))
+                val p = arr.optJSONObject(i) ?: continue
+                val mhz = p.num("mhz")
+                if (mhz > 0) add(Found(mhz, p.optString("name"), p.num("snr").toFloat(), p.optString("std")))
             }
         }
         // a scan has just ended: it left the radio on the channel it judged best, and the picker follows
@@ -334,23 +360,23 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         // is the phone keeping up? (dropped blocks, or a thread with no time to spare)
         val now = android.os.SystemClock.elapsedRealtime()
         val dropped = s.optLong("dropped") + s.optLong("decode_dropped")
-        val load = maxOf(s.optDouble("dsp_load"), s.optDouble("decode_load"))
+        val load = maxOf(s.num("dsp_load"), s.num("decode_load"))
         if (mode == "watch" && (dropped > lastDropped || load > 0.95)) overloadedUntil = now + 5000
         lastDropped = dropped
         val overloaded = mode == "watch" && now < overloadedUntil
 
         val name = Channels.nearest(watchHz / 1e6, settings.band, 4.0)?.name
-        val where = (if (name != null) "$name · " else "") + "${(watchHz / 1e6).roundToInt()} MHz"
+        val where = (if (name != null) "$name · " else "") + "${(watchHz / 1e6).roundToInt()} MHz"   // finite: num()
         val stats = buildString {
             append(if (s.optBoolean("usb3")) "USB 3" else "USB 2")
-            val msps = s.optDouble("watch_msps")
+            val msps = s.num("watch_msps")
             if (msps > 0) append(" · %.0f MS/s".format(msps))
             if (s.optBoolean("fallback")) append(" (40 kept dropping out)")
             append(" · processing %.0f%%".format(load * 100))
             append(" · $dropped dropped · ${s.optLong("restarts")} restarts")
             s.optJSONObject("antennas")?.let { a ->
                 if (a.optBoolean("combine")) append("\nAntenna A %.0f dB · B %.0f dB · together %.0f dB".format(
-                    a.optDouble("snr_a"), a.optDouble("snr_b"), a.optDouble("snr_c")))
+                    a.num("snr_a"), a.num("snr_b"), a.num("snr_c")))
             }
         }
         val base = MenuState(radioReady = !testRunning, scanning = mode == "scan", scanStep = s.optInt("scan_step"),
@@ -360,7 +386,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
             "test" -> {
                 val t = s.optJSONObject("test")
                 base.copy(tone = Tone.BUSY, headline = "USB test", detail = t?.let {
-                    "%.0f MS/s · %.0f s\n%d of %d blocks · %d gaps · %d restarts".format(it.optDouble("rate_msps"), it.optDouble("seconds"),
+                    "%.0f MS/s · %.0f s\n%d of %d blocks · %d gaps · %d restarts".format(it.num("rate_msps"), it.num("seconds"),
                         it.optLong("banks"), it.optLong("expected"), it.optLong("seq_gaps"), it.optLong("restarts"))
                 } ?: "Starting…")
             }
@@ -370,8 +396,8 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
                 locked -> base.copy(tone = Tone.LIVE, headline = where, detail = buildString {
                     append(v?.optString("std") ?: "")
                     if (v?.optBoolean("colour") == false) append(" · black and white")
-                    append(" · %.0f fps".format(v?.optDouble("fps") ?: 0.0))
-                    if (s.has("snr_db")) append(" · %.0f dB".format(s.optDouble("snr_db")))
+                    append(" · %.0f fps".format(v?.num("fps") ?: 0.0))
+                    if (s.has("snr_db")) append(" · %.0f dB".format(s.num("snr_db")))
                 })
                 else -> base.copy(tone = Tone.BUSY, headline = where, detail = "Looking for a picture…")
             }
@@ -382,6 +408,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
 
     /** The radio is on [mhz] by its own choice (after a scan): the picker and the saved channel follow. */
     private fun adoptChannel(mhz: Double) {
+        if (!mhz.isFinite() || mhz <= 0) return
         val ch = Channels.nearest(mhz, settings.band)
         val to = ch?.mhz ?: mhz.roundToInt()
         if (to == settings.channelMhz && (ch == null || ch.band == settings.band)) return
@@ -492,5 +519,6 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
 
     companion object {
         const val HINT_MS = 3000L
+        const val BACKGROUND_CLOSE_MS = 30000L
     }
 }

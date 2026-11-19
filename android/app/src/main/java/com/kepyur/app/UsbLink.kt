@@ -13,6 +13,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import org.json.JSONObject
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
 /**
@@ -49,7 +50,6 @@ class UsbLink(private val ctx: Context, private val engine: Engine, private val 
         private set
 
     private val ui = Handler(Looper.getMainLooper())
-    private val worker = Executors.newSingleThreadExecutor()
     private val usb = ctx.getSystemService(Context.USB_SERVICE) as UsbManager
     private val permAction = "com.kepyur.app.USB_PERMISSION"
     private var conn: UsbDeviceConnection? = null
@@ -58,6 +58,9 @@ class UsbLink(private val ctx: Context, private val engine: Engine, private val 
     /** Bumped whenever the adapter in hand is given up: what an open in flight finds when it lands tells it to stand down. */
     private var generation = 0
     private var failures = 0
+    private var runningSince = 0L
+    /** The device a permission request is out for (no second request, and no second dialog, while it is). */
+    private var askedFor: String? = null
     private var switchRequests = 0
     private var switchDeadline = 0L
     // the bank counter of the last status, and when it last moved (a stream that has silently stopped)
@@ -89,6 +92,12 @@ class UsbLink(private val ctx: Context, private val engine: Engine, private val 
         ctx.unregisterReceiver(usbReceiver)
         ctx.unregisterReceiver(permReceiver)
         giveUpAdapter()
+        // quietly: nobody is listening any more, and start() begins from nothing
+        state = State.NO_ADAPTER
+        message = ""
+        askedFor = null
+        switchDeadline = 0
+        failures = 0
     }
 
     /** The user asked for another go (a tap on the status). */
@@ -96,7 +105,11 @@ class UsbLink(private val ctx: Context, private val engine: Engine, private val 
         when (state) {
             State.DENIED, State.WAITING, State.FAILED, State.USB2, State.NO_ADAPTER -> {
                 ui.removeCallbacks(retry)
-                if (state == State.USB2) giveUpAdapter()
+                if (state == State.USB2) {   // open, on a slow link: close it and go through the switch again
+                    giveUpAdapter()
+                    state = State.NO_ADAPTER
+                }
+                askedFor = null
                 switchRequests = 0
                 connect(force = true)
             }
@@ -133,6 +146,10 @@ class UsbLink(private val ctx: Context, private val engine: Engine, private val 
             return
         }
         if (!usb.hasPermission(d)) {
+            // already asked about this very device and still waiting for the answer (the attach broadcast and
+            // the USB 3 switch watch both come through here)
+            if (state == State.PERMISSION && askedFor == d.deviceName) return
+            askedFor = d.deviceName
             set(State.PERMISSION)
             val pi = PendingIntent.getBroadcast(
                 ctx, 0, Intent(permAction).setPackage(ctx.packageName),
@@ -141,6 +158,7 @@ class UsbLink(private val ctx: Context, private val engine: Engine, private val 
             usb.requestPermission(d, pi)
             return
         }
+        askedFor = null
         val c = usb.openDevice(d)
         if (c == null) {
             failLater("Android would not open the adapter. Another app may be using it.")
@@ -174,6 +192,7 @@ class UsbLink(private val ctx: Context, private val engine: Engine, private val 
                 }
                 return@execute
             }
+            holder = this   // from here on the native radio is ours to close
             val err = engine.open(fd)
             val fast = err.isEmpty() && engine.superspeed()
             ui.post {
@@ -183,9 +202,11 @@ class UsbLink(private val ctx: Context, private val engine: Engine, private val 
                     err.isNotEmpty() -> failLater("The radio did not start: $err")
                     !fast -> set(State.USB2)
                     else -> {
-                        failures = 0
+                        // failures is not forgotten yet: a radio that opens and then never streams is still failing
                         lastBanks = -1
                         banksMovedAt = SystemClock.elapsedRealtime()
+                        runningSince = banksMovedAt
+                        checkedAt = banksMovedAt
                         set(State.RUNNING)
                         events.onRadioUp()
                     }
@@ -213,23 +234,34 @@ class UsbLink(private val ctx: Context, private val engine: Engine, private val 
 
     private val retry = Runnable { connect(force = true) }
 
-    /** Close what there is, say what went wrong, and try again shortly. */
+    /**
+     * Close what there is, say what went wrong, and try again shortly: soon the first time, then every
+     * [RETRY_MS], and less often once it keeps failing (it never gives up: the cause may be a loose plug).
+     */
     private fun failLater(msg: String) {
         engine.log("link: $msg (failure ${failures + 1})")
         giveUpAdapter()
         failures++
-        set(State.WAITING, msg)
+        val persistent = failures >= PERSISTENT_FAILURES
+        set(State.WAITING, if (persistent) "$msg If this goes on, unplug the adapter and plug it in again." else msg)
         ui.removeCallbacks(retry)
-        ui.postDelayed(retry, if (failures <= 1) FIRST_RETRY_MS else RETRY_MS)
+        ui.postDelayed(retry, if (failures <= 1) FIRST_RETRY_MS else if (persistent) SLOW_RETRY_MS else RETRY_MS)
     }
 
-    /** Stop using the adapter in hand. The connection closes after the native side has let go of its fd. */
+    /**
+     * Stop using the adapter in hand. The connection closes after the native side has let go of its fd, and the
+     * native radio is closed only if it is this link's: an earlier activity's link, stopping late, must not
+     * close the radio a newer one has opened since.
+     */
     private fun giveUpAdapter() {
         generation++
         val c = conn
         conn = null
         worker.execute {
-            engine.close()
+            if (holder === this) {
+                engine.close()
+                holder = null
+            }
             c?.close()
         }
     }
@@ -255,10 +287,14 @@ class UsbLink(private val ctx: Context, private val engine: Engine, private val 
         val why = when {
             status.optBoolean("dead") || rx == "lost" || rx == "error" ->
                 status.optString("rx_error").ifEmpty { status.optString("last_fault") }.ifEmpty { "the adapter stopped answering" }
+            !status.optBoolean("open", true) || rx == "closed" -> "it was closed"   // under us: nothing will come
             now - banksMovedAt > STALL_MS -> "no samples for ${STALL_MS / 1000} seconds"
-            else -> return
+            else -> {
+                if (now - runningSince > HEALTHY_MS) failures = 0   // it has run well for a while: a clean slate
+                return
+            }
         }
-        failLater("The radio stopped: $why")
+        failLater("The radio stopped: $why.")
     }
 
     // ---------------------------------------------------------------------------------------- broadcasts
@@ -275,6 +311,7 @@ class UsbLink(private val ctx: Context, private val engine: Engine, private val 
                     ui.removeCallbacks(retry)
                     giveUpAdapter()
                     failures = 0
+                    askedFor = null
                     if (switching) set(State.SWITCHING) else { switchRequests = 0; set(State.NO_ADAPTER) }
                 }
                 UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
@@ -295,8 +332,20 @@ class UsbLink(private val ctx: Context, private val engine: Engine, private val 
     }
 
     companion object {
+        /**
+         * One worker for the process, as the native radio is one for the process: every open and close runs in
+         * the order it was asked for, whichever activity instance asked.
+         */
+        private val worker: ExecutorService =
+            Executors.newSingleThreadExecutor { r -> Thread(r, "kepyur-usb").apply { isDaemon = true } }
+        /** The link whose radio the native side has open, if any (touched on the worker only). */
+        private var holder: UsbLink? = null
+
         const val FIRST_RETRY_MS = 2500L
         const val RETRY_MS = 5000L
+        const val SLOW_RETRY_MS = 10000L
+        const val PERSISTENT_FAILURES = 4   // in a row, with no healthy spell between
+        const val HEALTHY_MS = 10000L
         const val SWITCH_WAIT_MS = 14000L   // re-enumeration takes "well over 4 s" on some controllers
         const val STALL_MS = 4000L
         const val SLOW_OPEN_MS = 25000L

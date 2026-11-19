@@ -486,7 +486,8 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     }
 
     // ------------------------------------------------------------------------------------------ state
-    fun render(st: MenuState) {
+    fun render(new: MenuState) {
+        val st = new.copy(found = new.found.filter { it.mhz.isFinite() && it.mhz > 0 })   // nothing to tune otherwise
         val foundChanged = st.found != state.found
         state = st
         (dot.background as GradientDrawable).setColor(when (st.tone) {
