@@ -134,6 +134,9 @@ class MenuScreenshotTest {
         stats = "USB 3 · 40 MS/s · processing 58% · 0 dropped · 0 restarts\nAntenna A 24 dB · B 19 dB · together 26 dB"),
         2400, 1080, { tuned(); diversity = true })
 
+    @Test @Config(qualifiers = PHONE)
+    fun signalManualGain() = shoot("signal_gain", 3, live, 2400, 1080, { tuned(); gainAuto = false; gainDb = 24f })
+
     // ---------------------------------------------------------------- small phone, 1600 x 720 at 320 dpi
     @Test @Config(qualifiers = SMALL)
     fun smallChannel() = shoot("small_channel", 0, live, 1600, 720, tuned)

@@ -36,7 +36,7 @@ a **MENU** button (bottom centre) for three seconds; Back does the same.
   the other three only change an NTSC picture. None adds delay.
 - **Signal** — sample rate (40 MS/s, or 20 for a USB link that cannot carry 40; the app also falls back by
   itself), diversity (both antennas combined: fit two; it roughly doubles the work of one of the two
-  processing threads), tune beside the channel (keeps the picture off the chip's DC point), and a line of
+  processing threads), tune beside the channel (keeps the picture off the chip's DC point), gain (automatic, or by hand for a very close transmitter), and a line of
   numbers (USB speed, processing load, drops, restarts).
 
 The status at the top left says what the adapter is doing. Nothing there needs attention unless it says so:

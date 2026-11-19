@@ -89,10 +89,13 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
             testRequested = true
             if (::link.isInitialized && link.state == UsbLink.State.RUNNING) startTest()
         }
-        if (i.hasExtra("gain")) {
-            val g = i.getFloatExtra("gain", -1f).toDouble()
-            engine.setGain(g)
-            engine.log("debug: gain ${if (g < 0) "AGC" else "$g dB"}")
+        if (i.hasExtra("gain")) {   // the same as the menu's Gain: below 0 automatic, else that many dB
+            val g = i.getFloatExtra("gain", -1f)
+            settings.gainAuto = g < 0
+            if (g >= 0) settings.gainDb = g.coerceAtMost(Settings.GAIN_MAX)
+            settings.save()
+            engine.log("debug: gain ${if (g < 0) "automatic" else "$g dB"}")
+            applySignal()
             retune()
         }
         if (i.hasExtra("record")) {
@@ -158,6 +161,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         val rate = if (settings.rate40) 1 else 2
         if (rate != appliedRate) engine.setWatchRate(rate)
         appliedRate = rate
+        engine.setGain(if (settings.gainAuto) -1.0 else settings.gainDb.toDouble())
         engine.setDiversity(settings.diversity)
         return engine.setOffsetTuning(settings.offsetTune)
     }

@@ -60,6 +60,8 @@ class Settings(private val prefs: SharedPreferences) {
     var rate40 = prefs.getBoolean("rate40", true)
     var diversity = prefs.getBoolean("diversity", false)
     var offsetTune = prefs.getBoolean("offset_tune", true)
+    var gainAuto = prefs.getBoolean("gain_auto", true)       // the chip's own gain control
+    var gainDb = prefs.getFloat("gain_db", 30f)              // when it is not: 0..GAIN_MAX
 
     val aspect get() = if (wide) 16f / 9f else 4f / 3f
     /** Fraction of the screen width each eye's picture moves toward the middle. */
@@ -74,6 +76,7 @@ class Settings(private val prefs: SharedPreferences) {
             .putBoolean("smooth_lines", smoothLines).putBoolean("sparkle_repair", sparkleRepair)
             .putBoolean("comb", colourComb)
             .putBoolean("rate40", rate40).putBoolean("diversity", diversity).putBoolean("offset_tune", offsetTune)
+            .putBoolean("gain_auto", gainAuto).putFloat("gain_db", gainDb)
             .apply()
     }
 
@@ -84,5 +87,6 @@ class Settings(private val prefs: SharedPreferences) {
         const val SCALE_MIN = 0.5f
         const val SCALE_MAX = 1.5f
         const val EYE_SHIFT_MAX = 0.08f
+        const val GAIN_MAX = 45f
     }
 }

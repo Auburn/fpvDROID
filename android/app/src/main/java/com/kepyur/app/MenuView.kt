@@ -106,6 +106,8 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     private lateinit var cleanOsdRow: SettingRow
 
     // signal page
+    private lateinit var gainRow: SettingRow
+    private lateinit var gainDivider: View
     private val stats = label(ctx, "", 12f, Skin.TEXT_3)
 
     // Everything the pages read while they are built has to be declared above this point: Kotlin runs property
@@ -442,9 +444,37 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         p.addView(SettingRow(context, "Tune beside the channel", "Keeps the picture clear of the chip's blind spot: no stripes at the left edge, no ghost outlines",
             Toggle(context, s.offsetTune) { v -> s.offsetTune = v; s.save(); on.onSignal(retune = true) }))
         p.addView(divider(context))
+        p.addView(SettingRow(context, "Gain", "Automatic suits most flying. By hand for a transmitter so close that it washes the picture out",
+            Segmented(context, listOf("Auto", "Manual"), if (s.gainAuto) 0 else 1) { i ->
+                s.gainAuto = i == 0
+                s.save()
+                showGainRow()
+                on.onSignal(retune = true)
+            }.sized(dpi(170f))))
+        gainDivider = divider(context)
+        p.addView(gainDivider)
+        gainRow = SettingRow(context, "Manual gain", gainWords(),
+            Slider(context, 0f, Settings.GAIN_MAX, s.gainDb, 30f) { v, done ->
+                s.gainDb = v.roundToInt().toFloat()
+                gainRow.detailView.text = gainWords()
+                if (done) {   // a retune interrupts the picture: once, when the finger lifts
+                    s.save()
+                    on.onSignal(retune = true)
+                }
+            }.sized(dpi(216f)))
+        p.addView(gainRow)
+        showGainRow()
+        p.addView(divider(context))
         stats.setLineSpacing(dp(3f), 1f)
         p.addView(stats, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dpi(12f) })
         return p
+    }
+
+    private fun gainWords() = "${s.gainDb.roundToInt()} dB"
+
+    private fun showGainRow() {
+        gainRow.visibility = if (s.gainAuto) View.GONE else View.VISIBLE
+        gainDivider.visibility = gainRow.visibility
     }
 
     private fun <T : View> T.sized(width: Int): T = apply { layoutParams = LinearLayout.LayoutParams(width, dpi(38f)) }
