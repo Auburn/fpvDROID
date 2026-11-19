@@ -41,7 +41,13 @@ a **MENU** button (bottom centre) for three seconds; Back does the same.
 
 The status at the top left says what the adapter is doing. Nothing there needs attention unless it says so:
 a radio that does not start, or stops delivering samples, is closed and started again by itself, on the
-channel it was on.
+channel it was on. When the picture goes away for such a reason while the menu is closed (the adapter
+unplugged, the radio being started again), the menu opens by itself to say so, and closes again when the
+picture is back unless it was touched meanwhile. After 30 s in the background the adapter is let go; it is
+opened and tuned again when the app returns.
+
+Dragging the Size or Eye spacing slider makes the menu step aside and shows the picture sharp, so the
+change can be judged as it is made.
 
 ## Web version
 
