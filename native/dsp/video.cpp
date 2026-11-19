@@ -30,18 +30,6 @@ bool smooth_lines_on() { return g_smooth.load(std::memory_order_relaxed); }
 
 namespace {
 
-inline float fast_atan2(float y, float x) {
-  const float ax = std::fabs(x), ay = std::fabs(y);
-  const float mx = std::max(ax, ay), mn = std::min(ax, ay);
-  const float a = mn / (mx + 1e-20f);
-  const float s = a * a;
-  float r = ((-0.0464964749f * s + 0.15931422f) * s - 0.327622764f) * s * a + a;
-  if (ay > ax) r = 1.57079637f - r;
-  if (x < 0) r = 3.14159274f - r;
-  if (y < 0) r = -r;
-  return r;
-}
-
 struct Biquad {  // RBJ low-pass
   float b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0, z1 = 0, z2 = 0;
   void design(double fc, double fs, double q = 0.7071) {
@@ -822,19 +810,23 @@ private:
     return too_long || lost > 0.08 * aw;
   }
 
-  float ring_mean(double from, double to) {
+  // The mean of luma_ring over [from, to) into out; false when that stretch is not in the ring. (Not a NaN
+  // return: this file is built with -ffast-math, under which a test for NaN may be compiled away.)
+  bool ring_mean(double from, double to, float &out) {
     const int64_t i0 = static_cast<int64_t>(from), i1 = static_cast<int64_t>(to);
-    if (i1 >= static_cast<int64_t>(n) || static_cast<int64_t>(n) - i0 > static_cast<int64_t>(ring_mask)) return NAN;
+    if (i1 >= static_cast<int64_t>(n) || static_cast<int64_t>(n) - i0 > static_cast<int64_t>(ring_mask)) return false;
     float s = 0;
     for (int64_t i = i0; i < i1; i++) s += luma_ring[i & ring_mask];
-    return sign * s / static_cast<float>(i1 - i0);
+    out = sign * s / static_cast<float>(i1 - i0);
+    return true;
   }
 
   void measure_levels(double ls) {
     const double us = 1e-6 * fs;
-    const float t = ring_mean(ls + 1.2 * us, ls + 3.6 * us);  // hsync is 4.7 us
-    const float b = ring_mean(ls + 5.8 * us, ls + 8.8 * us);  // back porch (burst averages out)
-    if (std::isnan(t) || std::isnan(b) || b - t < 0.05f) return;
+    float t, b;
+    if (!ring_mean(ls + 1.2 * us, ls + 3.6 * us, t)) return;  // hsync is 4.7 us
+    if (!ring_mean(ls + 5.8 * us, ls + 8.8 * us, b)) return;  // back porch (burst averages out)
+    if (b - t < 0.05f) return;
     const float a = gated_lines < 64 ? 0.1f : 1.f / 64;
     tip += a * (t - tip);
     blank += a * (b - blank);
@@ -1013,7 +1005,7 @@ void FrontEnd::set_shift(double s) {
 DecoderStats FrontEnd::stats() const { return _dec->stats(); }
 
 namespace {
-// branch-free atan2 (same polynomial as fast_atan2) so the discriminator loop vectorises
+// branch-free atan2 (a polynomial, max error ~1e-4 rad) so the discriminator loop vectorises
 inline float atan2_bf(float y, float x) {
   const float ax = std::fabs(x), ay = std::fabs(y);
   const float mx = ax > ay ? ax : ay, mn = ax > ay ? ay : ax;
