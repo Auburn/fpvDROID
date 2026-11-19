@@ -182,7 +182,9 @@ int main(int argc, char **argv) {
         const double sat = 100 - S.setup;
         double chroma;
         if (pal) {
-          const double vs = ((line_h / 2) % 2) ? -1 : 1;  // V switch
+          // V switch: the lines whose burst is at 135 degrees (-U + V, above) carry V as it is, the others
+          // (225 degrees) carry it inverted
+          const double vs = ((line_h / 2) % 2) ? 1 : -1;
           chroma = c.u * std::sin(w_sc * t) + vs * c.v * std::cos(w_sc * t);
         } else {
           chroma = c.u * std::sin(w_sc * t) + c.v * std::cos(w_sc * t);

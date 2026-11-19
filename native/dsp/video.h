@@ -125,8 +125,10 @@ private:
   std::vector<float> _dbuf;
   std::vector<uint8_t> _badbuf;
   Decoder *_dec;
-  std::vector<float> _env;  // sparkle repair: each output sample's envelope (power) ...
-  float _pref = 0;          // ... and its recent level
+  // sparkle repair, on demod()'s thread: each output sample's envelope (power), with the end of the last call's
+  // kept in front; the discriminator output of those kept samples; the envelope's recent level
+  std::vector<float> _env, _dtail;
+  float _pref = 0;
 };
 
 }  // namespace kp
