@@ -99,6 +99,12 @@ public:
     rep_fwd_c = std::max(1, static_cast<int>(std::lround(1.2e-6 * fs)));
     rep_fwd_low = std::max(1, static_cast<int>(std::lround(0.6e-6 * fs)));
     rep_fwd_wide = std::max(1, static_cast<int>(std::lround(0.15e-6 * fs)));
+    // ... and where in that stretch a click is big in chroma: the low-pass's main lobe, 0.3 to 0.75 us after
+    // the run's first mark; the swing back after it is small (patch_line, two clicks close together). 0.3, not
+    // 0.25: with the lobe taken one sample wider at 20 MS/s, patching such a pair as one was no gain in most
+    // modes (more pixels visibly wrong, measured)
+    rep_lobe0 = static_cast<int>(std::lround(0.3e-6 * fs));
+    rep_lobe1 = std::min(rep_fwd_c, static_cast<int>(std::lround(0.75e-6 * fs)));
     // adaptive fade behind the 3-line comb (draw_line): the chroma low-pass's main lobe, as three points
     fade_back = std::max(1, static_cast<int>(std::lround(0.4e-6 * fs)));
     fade_step = std::max(1, static_cast<int>(std::lround(0.2e-6 * fs)));
@@ -194,10 +200,12 @@ public:
           } else {
             csrc = 0.5f * (d - (p0.d + (p1.d - p0.d) * fr));
             csrc *= 1.f - fade;
-            // While the fade is complete (a whole line under a horizontal edge, the first line of every field)
-            // the chroma low-pass is fed exact zeros, and within a few hundred samples its state decays into
-            // denormal numbers, which x86 computes some hundred times slower: 9 % of the decode time on the
-            // bench's test picture. Looked at every 64 samples, it never gets that far.
+            // While the fade is complete (a whole line under a horizontal edge; the first picture line of every
+            // field too: top_line() works that line's colour out again afterwards, with filters of its own,
+            // but this one still runs through the line here) the chroma low-pass is fed exact zeros, and
+            // within a few hundred samples its state decays into denormal numbers, which x86 computes some
+            // hundred times slower: 9 % of the decode time on the bench's test picture. Looked at every 64
+            // samples, it never gets that far.
             if (fade < 1.f) chroma_quiet = 0;
             else if ((++chroma_quiet & 63) == 0)
               for (Biquad *b : {&cl_r1, &cl_r2, &cl_i1, &cl_i2}) b->settle();
@@ -327,6 +335,7 @@ private:
   // Sparkle repair (set_repair): the front end's click marks alongside luma_ring; see patch_line / mend_rows.
   std::vector<uint8_t> bad_ring;
   int rep_fwd_c = 24, rep_fwd_low = 12, rep_fwd_wide = 3;  // samples a click lasts in chroma / the comb's taps
+  int rep_lobe0 = 6, rep_lobe1 = 15;  // chroma: where the click's main lobe is, in samples after a run's first mark
   int64_t bad_from = -1;  // first of the badly hit rows waiting for a good row below
   uint64_t mend_field = ~0ull;
   int mend_cur = -1;
@@ -637,6 +646,7 @@ private:
     }
     if (k < 0 || k >= std_->active) return;
     if (locked_line) measure_levels(ls);
+    if (luma_comb) top_line(ls, k);
     const bool hit = repair && patch_line(ls);
     bool pal_v = false;
     const bool col = o.colour && locked_line && burst(ls, pal_v);
@@ -655,6 +665,7 @@ private:
     cur.epoch = comb_epoch;
     if (k >= 0 && k < std_->active) {
       if (locked_line) measure_levels(ls);
+      if (luma_comb) top_line(ls, k);
       cur.hit = repair && patch_line(ls);  // before this line is anyone's neighbour
       bool pal_v = false;
       cur.col = o.colour && locked_line && burst(ls, pal_v);
@@ -796,6 +807,83 @@ private:
     }
   }
 
+  // The top of the picture with the luma comb. The first picture line of a field has blanking above it, not
+  // picture, and the luma comb works each line out against the line before. Against blanking it leaves half of
+  // the colour in the brightness as dots, and the adaptive comb, which sees a line that differs all the way
+  // along, fades the colour out as it does under any horizontal edge: the top rows of every frame came out grey.
+  // There is nothing above that line to keep rainbows off, so its picture is worked out again here, from what
+  // the comb's ring holds of it, the way the decoder does without the luma comb: brightness through the notch
+  // (which the adaptive comb falls back to there anyway), colour straight from the signal, not faded. Only the
+  // picture's own stretch of that one line is replaced and nothing in push() changes: levels, burst and every
+  // other line come out exactly as they did.
+  // Which line that is depends on the camera and on where the field was found to start: the first drawn row
+  // (k = 0) or one of the next few, with blank rows above it. So it is looked for: the first of rows 0..kTopRows
+  // that has picture (it averages kTopPicture sync depths above blanking or more: the level from which the
+  // adaptive comb starts to see a difference) while every row above it, and the line before row 0, averages
+  // within kTopBlank sync depths of blanking. The second limit is the tighter one on purpose: black picture
+  // sits 7.5 IRE (0.19 sync depths) above blanking, and a row under black rows of picture is a line inside the
+  // picture, which keeps the comb's fade. (A camera that sends black at the blanking level cannot be told
+  // apart this way: under up to kTopRows black rows at the top of its picture, the first brighter row is taken
+  // for the top line and drawn as without the luma comb.) A field that begins with
+  // the standard's half line has it just above row 0 here: then row 0 has blanking above its left half only,
+  // and only that half is done (to the middle, where the half line's picture has begun and the comb is right
+  // again). A line further down that follows a dark line is not touched: there the fade is Play RX's trade.
+  static constexpr int kTopRows = 4;
+  static constexpr float kTopPicture = 0.25f, kTopBlank = 0.10f;
+  void top_line(double ls, int64_t k) {
+    if (k > kTopRows) return;
+    const double a0 = std_->a0_us * 1e-6 * fs, aw = std_->aw_us * 1e-6 * fs;
+    // no picture over the part [x0, x1) of the width of the line that starts at l?
+    const auto blanking = [&](double l, double x0, double x1, float limit = kTopBlank) {
+      float m;
+      return ring_mean(l + a0 + aw * x0, l + a0 + aw * x1, m) && (m - blank) * inv_depth < limit;
+    };
+    if (blanking(ls, 0, 1, kTopPicture)) return;
+    for (int64_t up = 2; up <= k + 1; up++)  // the rows above the line before, and the line before row 0
+      if (!blanking(ls - static_cast<double>(up) * T, 0, 1)) return;
+    const bool whole = blanking(ls - T, 0, 1);
+    if (!whole && (k > 0 || !blanking(ls - T, 0, 0.4))) return;
+    // The whole line: from the first good point patch_line may take (8 samples ahead of the picture) to its
+    // last one in luma (20 after it; those of its chroma patches further on lie in blanking, where there is no
+    // colour either way). The left half: to the middle, the last kBlend samples blended into what push() made.
+    // The filters start kWarm samples ahead, in the sync pulse, and have settled long before the picture.
+    constexpr int kWarm = 128, kBlend = 32;
+    const int64_t s0 = static_cast<int64_t>(ls + a0) - 8;
+    const int64_t s1 = whole ? static_cast<int64_t>(ls + a0 + aw) + 21 : static_cast<int64_t>(ls + a0 + 0.5 * aw);
+    const int64_t back = static_cast<int64_t>(n) - (s0 - kWarm);
+    if (s1 >= static_cast<int64_t>(n) || back > static_cast<int64_t>(ring_mask) - 32) return;
+    const auto fresh = [](Biquad b) {
+      b.z1 = b.z2 = 0;
+      return b;
+    };
+    Biquad nt = fresh(luma_notch_w), r1 = fresh(cl_r1), r2 = fresh(cl_r2), i1 = fresh(cl_i1), i2 = fresh(cl_i2);
+    // Colour: only the adaptive comb on its own takes it from the line difference and fades it (push). Otherwise
+    // chroma_ring already has it straight from the signal; with the 3-line comb the fade is only noted, and
+    // draw_line uses it where that comb finds no matching line below either, which is left as it is. The
+    // oscillator turns by comb_w per sample: back to where it was at the first sample.
+    const bool chroma = o.colour && adaptive && !comb;
+    const std::complex<double> was = std::polar(1.0, -comb_w * static_cast<double>(back));
+    cf osc = lo * cf(static_cast<float>(was.real()), static_cast<float>(was.imag()));
+    // push()'s line difference reads the line before between two samples, which takes 3 % off the subcarrier
+    // and turns it by half a degree. The burst went through it and the picture's colour is measured against
+    // the burst, so this line's colour gets the same, or it would come out that much more saturated than the
+    // rest: half of (1 - the subcarrier as read prev_back samples back, prev_fr of the way to the next sample).
+    const std::complex<double> prev = std::polar(1.0, -comb_w * static_cast<double>(prev_back)) *
+                                      ((1.0 - prev_fr) + static_cast<double>(prev_fr) * std::polar(1.0, comb_w));
+    const cf gain(static_cast<float>(0.5 * (1.0 - prev.real())), static_cast<float>(-0.5 * prev.imag()));
+    for (int64_t i = s0 - kWarm; i < s1; i++) {
+      const CombTap &t = comb_ring[i & ring_mask];
+      const float y = nt.run(t.wide);
+      const float mix = whole ? 1.f : std::min(1.f, static_cast<float>(s1 - i) * (1.f / kBlend));
+      if (i >= s0) luma_ring[i & ring_mask] += (y - luma_ring[i & ring_mask]) * mix;
+      if (!chroma) continue;
+      const cf c = t.d * std::conj(osc);
+      osc *= lo_step;
+      const cf uv(r2.run(r1.run(c.real())), i2.run(i1.run(c.imag())));
+      if (i >= s0) chroma_ring[i & ring_mask] += (uv * gain - chroma_ring[i & ring_mask]) * mix;
+    }
+  }
+
   // Sparkle repair: up to 3 badly hit rows in a row are redrawn from the good rows above and below them in the
   // same field (blended by distance), once the row below has come in. Nothing older is used, so there is no
   // tearing in motion; a longer run is left as it is.
@@ -855,8 +943,37 @@ private:
       }
     };
     const bool taps = luma_comb && static_cast<int64_t>(n) - (s0 - kBack - back2) <= static_cast<int64_t>(ring_mask);
-    int64_t lost = 0;
-    bool too_long = false;
+    // Two clicks close together. A patch ends on a point taken to be good: kFwd samples after its marked run in
+    // luma, rep_fwd_c in chroma. It is not good when another click shows there: the patch then ramped to a wrong
+    // value and the next one started from that ramp, a streak as bright as the click it was meant to remove.
+    // Such runs are patched as one, from before the first to after the last. A later click shows at the good
+    // point
+    //  - in luma, when its run begins up to kFwd - rise samples after this one's end: a click shows `rise`
+    //    samples after its first mark (which is 2 ahead of it): at once through the comb's wide filter, a
+    //    sample later through the notch's low-pass;
+    //  - in chroma, when the good point falls in the main lobe of the low-pass's answer to it, rep_lobe0 to
+    //    rep_lobe1 after its first mark. A click that began earlier than that has swung back by then: little is
+    //    left of it, and one longer patch across both did no better. Except with the adaptive comb on its own:
+    //    there a click also fades the colour around it for as long as its low band lasts, and any click that
+    //    began in the stretch before the lobe counts as well.
+    // chain() gives the end of the last marked run that belongs with the run ending at e: a later run that begins
+    // from..upto samples after it, and on from that one's end; e itself for a click on its own, which is patched
+    // exactly as before. Luma and chroma chain separately, so that no more of either is drawn over than has to
+    // be. The comb's taps have no good points to spoil.
+    const int rise = luma_comb ? 2 : 3;
+    const int c_from = adaptive && !comb ? 0 : rep_fwd_c - rep_lobe1, c_upto = rep_fwd_c - rep_lobe0;
+    const auto chain = [&](int64_t e, int from, int upto) {
+      for (;;) {
+        const int64_t last = std::min<int64_t>(e + upto, s1 - 1);  // a run begins before s1, as below
+        int64_t q = e + from;
+        while (q <= last && !(bad_ring[q & ring_mask] && !bad_ring[(q - 1) & ring_mask])) q++;
+        if (q > last) return e;
+        while (q < s1 + kFwd && bad_ring[q & ring_mask]) q++;
+        e = q;
+      }
+    };
+    int64_t lost = 0, luma_end = s0, chroma_end = s0;  // ..._end: the end of the chain the last patch covers
+    bool too_long = false, luma_fits = true, chroma_fits = true;
     for (int64_t i = s0; i < s1;) {
       if (!bad_ring[i & ring_mask]) {
         i++;
@@ -865,10 +982,24 @@ private:
       int64_t j = i;
       while (j < s1 + kFwd && bad_ring[j & ring_mask]) j++;
       lost += j - i;
-      // the limit is on the luma patch, as it always was; chroma's longer spread does not count against it
-      if (j - i + kBack + kFwd <= kMaxRun) {
-        ramp(luma_ring, i - kBack, j + kFwd);
-        ramp(chroma_ring, i - kBack, j + rep_fwd_c);
+      // the limit is on the luma patch, as it always was; chroma's longer spread does not count against it. A
+      // chain too long for one patch: this run is patched on its own, as every run was before chains were
+      // looked for (the next run then starts a chain of its own), and the row counts as badly hit. Leaving
+      // the whole chain alone would leave the comb's taps as they are too, and the click in the line below.
+      const auto fits = [&](int64_t e) { return e - i + kBack + kFwd <= kMaxRun; };
+      if (i >= luma_end) {
+        luma_end = chain(j, 1, kFwd - rise);
+        if (!fits(luma_end)) luma_end = j, too_long = true;
+        luma_fits = fits(luma_end);
+        if (luma_fits) ramp(luma_ring, i - kBack, luma_end + kFwd);
+      }
+      if (i >= chroma_end) {
+        chroma_end = chain(j, c_from, c_upto);
+        if (!fits(chroma_end)) chroma_end = j, too_long = true;
+        chroma_fits = fits(chroma_end);
+        if (chroma_fits) ramp(chroma_ring, i - kBack, chroma_end + rep_fwd_c);
+      }
+      if (luma_fits && chroma_fits) {
         if (taps) {
           // The comb's look at the line before: left as it is, the next line would take half the click from
           // here (its luma through the comb, its colour through the adaptive comb's line difference) and
