@@ -34,6 +34,9 @@ constexpr int kSettleBanks = 40;     // ~8 ms after a retune (chip AGC)
 // transfers/s against the 24.4k needed); a healthy one runs minutes without one.
 constexpr int64_t kSnrEveryMs = 500;  // live SNR while watching (~2 % of a core at 20 MS/s)
 constexpr double kSnrSpan = 8e6;      // +- span the BW20 RX filter passes flat (-3 dB at ~9.2 MHz)
+// Off-centre tuning: how far beside the pilot the hardware centre goes (Radio::offset_centre). The video swings
+// about +-2.5 MHz around its carrier; this keeps that clear of the DC point and inside the flat band.
+constexpr double kOffsetAim40 = 6e6, kOffsetAim20 = 4e6;
 constexpr int kFallbackFaults = 3;
 constexpr int64_t kFallbackWindowMs = 5000;
 
@@ -68,6 +71,11 @@ bool Radio::superspeed() const {
   return _superspeed;
 }
 
+bool Radio::dead() const {
+  std::lock_guard<std::mutex> l(_m);
+  return _dead;
+}
+
 void Radio::open(int fd) {
   close();
   auto log = std::make_shared<Logger>();
@@ -97,6 +105,7 @@ void Radio::open(int fd) {
     _req_hz = s.freq;
     _req_rate = s.rate_sel;
     _fallback = false;
+    _dead = false;
   }
   _banks = 0;
   _dropped = 0;
@@ -163,9 +172,37 @@ void Radio::on_bank(const uint8_t *b, size_t n, uint64_t seq, uint32_t gen, doub
   _qcv.notify_one();
 }
 
-void Radio::tune(double hz, int rate_sel) {
+// The hardware centre on the 5 MHz grid (where the chip's 40 MHz channels put it) whose distance from the pilot is
+// nearest the aim, either side.
+double Radio::offset_centre(double hz, double fs) {
+  const double aim = fs >= 40e6 ? kOffsetAim40 : kOffsetAim20;
+  const double c0 = std::round(hz / 5e6) * 5e6;
+  double best = c0, err = 1e18;
+  for (int k = -3; k <= 3; k++) {
+    const double c = c0 + k * 5e6, e = std::fabs(std::fabs(hz - c) - aim);
+    if (e < err) err = e, best = c;
+  }
+  return best;
+}
+
+bool Radio::set_offset_tuning(bool on) {
+  std::lock_guard<std::mutex> l(_m);
+  if (_offset == on) return false;
+  _offset = on;
+  return true;
+}
+
+void Radio::tune(double hz, int rate_sel, bool watching) {
   wsdr::RxSettings s = _rx->settings();
   s.freq = hz;
+  {
+    std::lock_guard<std::mutex> l(_m);
+    // recomputed on every watching tune, so a 20 MS/s fallback gets the centre for its own rate
+    s.centre = watching && _offset ? offset_centre(hz, wsdr::Receiver::rate_of(rate_sel)) : 0;
+  }
+  if (s.centre > 0)
+    KP_LOGI("radio: hardware centre %.0f MHz (pilot %+.1f MHz beside it, off the DC point)", s.centre / 1e6,
+            (hz - s.centre) / 1e6);
   s.rate_sel = rate_sel;
   s.wide = true;
   {
@@ -223,6 +260,13 @@ void Radio::set_comb(bool on) {
   _comb = on;
 }
 
+void Radio::set_combine(bool on) { _combine = on; }
+
+Radio::ComboStatus Radio::combine_status() {
+  std::lock_guard<std::mutex> l(_m);
+  return _comb_status;
+}
+
 void Radio::record(double seconds, const std::string &prefix) {
   std::lock_guard<std::mutex> l(_m);
   _rec_req_s = seconds;
@@ -245,6 +289,19 @@ void Radio::unpack(const Bank &b, std::vector<cf> &out) {
   }
 }
 
+void Radio::unpack_b(const Bank &b, std::vector<cf> &out) {
+  const size_t ns = b.data.size() / 8;
+  out.resize(ns);
+  const uint8_t *p = b.data.data();
+  for (size_t i = 0; i < ns; i++) {
+    uint64_t w;
+    std::memcpy(&w, p + 8 * i, 8);
+    // path B: I [35:24], Q [47:36] (kDmaBothPaths8822b), sign-extended like la_i / la_q
+    out[i] = cf(static_cast<float>(wsdr::la_i(w >> 24)), static_cast<float>(wsdr::la_q(w >> 24)));
+  }
+  _iqb_fresh = true;
+}
+
 void Radio::dsp_loop() {
   boost_thread("dsp");
   Bank b;
@@ -253,9 +310,13 @@ void Radio::dsp_loop() {
     {
       std::unique_lock<std::mutex> l(_qm);
       _qcv.wait_for(l, std::chrono::milliseconds(200), [&] { return !_q.empty() || _stop; });
+      if (_stop) break;  // close(): stops the receiver too, which is not a death
       if (_q.empty()) {
         if (_rx && !_rx->status().running) {
           KP_LOGE("radio: receiver stopped: %s", _rx->status().error.c_str());
+          // nothing restarts it from here: say so, so the app can reopen the adapter
+          std::lock_guard<std::mutex> m(_m);
+          _dead = true;
           break;
         }
         continue;
@@ -293,13 +354,14 @@ void Radio::dsp_loop() {
         }
         KP_LOGI("radio: watch %.3f MHz at %.0f MS/s", hz / 1e6, wsdr::Receiver::rate_of(rate) / 1e6);
         _watch_faults.clear();
+        _combiner.reset();  // a new carrier: no weights or noise estimates from the last one
         _snr_psd.reset();
         _snr_t_ms = 0;
         {
           std::lock_guard<std::mutex> l(_m);
           _snr_db = -1;
         }
-        tune(hz, rate);
+        tune(hz, rate, true);
       } else if (mode == Mode::Scan) {
         _plan = scan_plan();
         _step = 0;
@@ -368,11 +430,11 @@ bool Radio::watch_fault(double hz) {
   _watch_faults.clear();
   _fe.reset();
   _fe_gen = ~0u;
-  tune(hz, 2);
+  tune(hz, 2, true);  // as a watch: off-centre tuning picks the centre for 20 MS/s
   return true;
 }
 
-void Radio::measure_snr(const std::vector<cf> &iq, double fs) {
+void Radio::measure_snr(const std::vector<cf> &iq, double fs, double shift_hz) {
   if (!_snr_psd) {
     if (now_ms() - _snr_t_ms < kSnrEveryMs) return;
     _snr_psd = std::make_unique<Psd>(1024);
@@ -382,7 +444,11 @@ void Radio::measure_snr(const std::vector<cf> &iq, double fs) {
   _snr_psd->add(iq.data(), iq.size());
   _snr_have += iq.size();
   if (_snr_have < _snr_need) return;
-  const float snr = carrier_snr(_snr_psd->db(), fs, std::min(kSnrSpan, 0.4 * fs));
+  // Around the carrier (at shift_hz: beside the centre with off-centre tuning), within the band the RX filter
+  // passes: the BW40 DFIR's +-kEdge at 40 MS/s, the BW20 set's +-kSnrSpan at 20 MS/s. With the carrier at the
+  // centre this is the +-kSnrSpan it always was.
+  const double pass = fs >= 40e6 ? kEdge : std::min(kSnrSpan, 0.4 * fs);
+  const float snr = carrier_snr(_snr_psd->db(), fs, std::min(kSnrSpan, 0.4 * fs), shift_hz, pass);
   _snr_psd.reset();
   _snr_t_ms = now_ms();
   std::lock_guard<std::mutex> l(_m);
@@ -413,26 +479,53 @@ void Radio::handle_watch(Bank &b) {
     if (watch_fault(req)) return;
   }
   _fe_gen = b.gen;
+  _iqb_fresh = false;
   unpack(b, _iq);
-  measure_snr(_iq, b.fs);
-  record_bank(b);
+  measure_snr(_iq, b.fs, b.shift_hz);  // path A, as without combining
+  record_bank(b);  // both paths as they came in
+  // two-antenna video: B turned into step with A and both weighted by their SNR, in place of A
+  const bool comb = _combine.load();
+  if (comb != _combine_was) {
+    _combiner.reset();
+    _combine_was = comb;
+    KP_LOGI("radio: video antennas %s", comb ? "A + B combined" : "A only");
+  }
+  if (comb) {
+    if (!_iqb_fresh) unpack_b(b, _iqb);
+    _combiner.process(_iq.data(), _iqb.data(), std::min(_iq.size(), _iqb.size()));
+  }
+  const int64_t tnow = now_ms();
+  if (tnow - _comb_t0_ms >= 1000) {
+    _comb_t0_ms = tnow;
+    ComboStatus cs;
+    cs.on = comb;
+    if (comb) cs.s = _combiner.take_stats();
+    std::lock_guard<std::mutex> l(_m);
+    _comb_status = cs;
+  }
   std::vector<float> d;
+  std::vector<uint8_t> bad;
   {
     std::lock_guard<std::mutex> l(_dqm);
     if (!_dpool.empty()) {
       d = std::move(_dpool.back());
       _dpool.pop_back();
     }
+    if (!_bpool.empty()) {
+      bad = std::move(_bpool.back());
+      _bpool.pop_back();
+    }
   }
-  _fe->demod(_iq.data(), _iq.size(), d);
+  _fe->demod(_iq.data(), _iq.size(), d, &bad);  // bad stays empty while sparkle repair is off
   {
     std::lock_guard<std::mutex> l(_dqm);
     if (_dq.size() >= 128) {  // ~26 ms behind: drop the oldest (the decoder re-phases)
       _dpool.push_back(std::move(_dq.front().d));
+      _bpool.push_back(std::move(_dq.front().bad));
       _dq.pop_front();
       _ddropped++;
     }
-    _dq.push_back(DBlock{_fe, std::move(d)});
+    _dq.push_back(DBlock{_fe, std::move(d), std::move(bad)});
   }
   _dqcv.notify_one();
 }
@@ -455,6 +548,8 @@ void Radio::record_bank(const Bank &b) {
       return;
     }
     std::setvbuf(_rec, nullptr, _IOFBF, 1 << 20);
+    _rec_b = std::fopen((prefix + "_b.cs16").c_str(), "wb");
+    if (_rec_b) std::setvbuf(_rec_b, nullptr, _IOFBF, 1 << 20);
     _rec_prefix = prefix;
     _rec_left = static_cast<uint64_t>(secs * b.fs);
     _rec_samples = 0;
@@ -470,14 +565,27 @@ void Radio::record_bank(const Bank &b) {
     buf[2 * i + 1] = static_cast<int16_t>(static_cast<int>(_iq[i].imag()) * 16);
   }
   std::fwrite(buf.data(), 4, ns, _rec);
+  if (_rec_b) {
+    if (!_iqb_fresh) unpack_b(b, _iqb);
+    for (size_t i = 0; i < ns; i++) {
+      buf[2 * i] = static_cast<int16_t>(static_cast<int>(_iqb[i].real()) * 16);
+      buf[2 * i + 1] = static_cast<int16_t>(static_cast<int>(_iqb[i].imag()) * 16);
+    }
+    std::fwrite(buf.data(), 4, ns, _rec_b);
+  }
   _rec_left -= ns;
   _rec_samples += ns;
   if (_rec_left == 0) {
     std::fclose(_rec);
     _rec = nullptr;
+    const bool with_b = _rec_b != nullptr;
+    if (_rec_b) std::fclose(_rec_b), _rec_b = nullptr;
+    const std::string base = _rec_prefix.substr(_rec_prefix.find_last_of("/\\") + 1);
     if (FILE *j = std::fopen((_rec_prefix + ".json").c_str(), "w")) {
       std::fprintf(j, "{\"format\":\"cs16\",\"sample_rate\":%.0f,\"centre_hz\":%.0f,\"shift_hz\":%.0f,\"samples\":%llu,"
-                   "\"source\":\"kepyur watch\"}\n", _rec_fs, _rec_centre, _rec_shift, (unsigned long long)_rec_samples);
+                   "\"source\":\"kepyur watch\"", _rec_fs, _rec_centre, _rec_shift, (unsigned long long)_rec_samples);
+      if (with_b) std::fprintf(j, ",\"path_b\":\"%s_b.cs16\"", base.c_str());  // beside it, as Play RX writes it
+      std::fprintf(j, "}\n");
       std::fclose(j);
     }
     KP_LOGI("record: done, %llu samples -> %s.cs16", (unsigned long long)_rec_samples, _rec_prefix.c_str());
@@ -504,11 +612,12 @@ void Radio::decode_loop() {
       _frames_at_last = 0;
       _fps_t0_ms = now_ms();
     }
-    cur->decode(blk.d.data(), blk.d.size());
+    cur->decode(blk.d.data(), blk.d.size(), blk.bad.size() == blk.d.size() ? blk.bad.data() : nullptr);
     busy += std::chrono::duration<double>(std::chrono::steady_clock::now() - ta).count();
     {
       std::lock_guard<std::mutex> l(_dqm);
       if (_dpool.size() < 256) _dpool.push_back(std::move(blk.d));
+      if (_bpool.size() < 256) _bpool.push_back(std::move(blk.bad));
     }
     const int64_t t = now_ms();
     if (t - _fps_t0_ms >= 1000) {
@@ -692,13 +801,21 @@ std::string Radio::status_json() {
     << ",\"dropped\":" << _dropped.load() << ",\"decode_dropped\":" << _ddropped.load()
     << ",\"restarts\":" << rs.restarts << ",\"dsp_load\":" << _load << ",\"decode_load\":" << _dload
     << ",\"watch_msps\":" << (_mode == Mode::Watch ? wsdr::Receiver::rate_of(_req_rate) / 1e6 : 0)
-    << ",\"fallback\":" << (_fallback ? "true" : "false");
+    << ",\"fallback\":" << (_fallback ? "true" : "false") << ",\"dead\":" << (_dead ? "true" : "false")
+    << ",\"offset_tuning\":" << (_offset ? "true" : "false") << ",\"centre_hz\":" << rs.centre_hz;
   if (_mode == Mode::Watch && _snr_db >= 0) o << ",\"snr_db\":" << _snr_db;
   if (_mode == Mode::Scan) o << ",\"scan_step\":" << _step << ",\"scan_steps\":" << _plan.size();
   o << ",\"video\":{\"locked\":" << (!_vstats.acquiring && _vstats.lock_recent > 0.5f ? "true" : "false")
     << ",\"lock\":" << _vstats.lock_recent << ",\"std\":" << jstr(_vstats.std_name) << ",\"fps\":" << _fps
     << ",\"acquisitions\":" << _vstats.acquisitions << ",\"losses\":" << _vstats.losses
-    << ",\"rephases\":" << _vstats.rephases << ",\"colour\":" << (_vstats.colour ? "true" : "false") << "}";
+    << ",\"rephases\":" << _vstats.rephases << ",\"clicks_repaired\":" << _vstats.clicks_repaired
+    << ",\"lines_mended\":" << _vstats.lines_mended << ",\"colour\":" << (_vstats.colour ? "true" : "false") << "}";
+  {
+    const auto &d = _comb_status.s;
+    o << ",\"antennas\":{\"combine\":" << (_comb_status.on ? "true" : "false") << ",\"snr_a\":" << d.snr_a_db
+      << ",\"snr_b\":" << d.snr_b_db << ",\"snr_c\":" << d.snr_c_db << ",\"b_share\":" << d.b_share
+      << ",\"a_fade\":" << d.a_fade << ",\"rescued\":" << d.rescued << ",\"coherence\":" << d.coherence << "}";
+  }
   o << ",\"test\":" << (_test_result.empty() ? "null" : _test_result);
   o << ",\"pilots\":[";
   const int64_t t = now_ms();

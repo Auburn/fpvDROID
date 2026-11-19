@@ -1,6 +1,9 @@
 // A stand-in for wsdr::Receiver that plays a recording back as a live, tunable 8812BU (kp_sim only).
 // The recording's VTX stays at its real frequency: tuning elsewhere moves it in the band, and a step far
 // from it shows only noise. Bank pacing is real time. Env: KP_SIM_FILE (.cs16, 40 MS/s, centre 5770 MHz).
+// RxSettings::centre is honoured like the chip does (the hardware centre moves beside the pilot, shift_hz = freq -
+// centre, and the recording moves with the centre), and path B carries path A turned by 90 degrees at half
+// amplitude (a perfectly coherent second antenna, for the combiner).
 #include <chrono>
 #include <cmath>
 #include <complex>
@@ -129,7 +132,8 @@ void Receiver::worker() {
       m = {};
       m.gen = ++_gen;
       m.fs = rate_of(s.rate_sel);
-      m.centre_hz = std::lround(s.freq / 5e6) * 5e6;
+      // the chip's 40 MHz channels put the centre on the 5 MHz grid, nearest RxSettings::centre if one is set
+      m.centre_hz = std::lround((s.centre > 0 ? s.centre : s.freq) / 5e6) * 5e6;
       m.shift_hz = s.freq - m.centre_hz;
       seq = 0;
       t_next = std::chrono::steady_clock::now();
@@ -161,9 +165,14 @@ void Receiver::worker() {
       }
       re = re / dec + 3 * nd(rng);  // a little noise so empty steps have a floor
       im = im / dec + 3 * nd(rng);
-      const uint64_t li = static_cast<uint64_t>(static_cast<int>(std::lround(re)) & 0xFFF);
-      const uint64_t lq = static_cast<uint64_t>(static_cast<int>(std::lround(im)) & 0xFFF);
-      const uint64_t w = li | (lq << 12);
+      const int ai = static_cast<int>(std::lround(re)), aq = static_cast<int>(std::lround(im));
+      const uint64_t li = static_cast<uint64_t>(ai & 0xFFF);
+      const uint64_t lq = static_cast<uint64_t>(aq & 0xFFF);
+      // path B (kDmaBothPaths8822b: I [35:24], Q [47:36]) = j * A / 2, from A's integers (the sim thread has no
+      // time to spare: it barely keeps a real-time 40 MS/s)
+      const uint64_t bi = static_cast<uint64_t>((-aq >> 1) & 0xFFF);
+      const uint64_t bq = static_cast<uint64_t>((ai >> 1) & 0xFFF);
+      const uint64_t w = li | (lq << 12) | (bi << 24) | (bq << 36);
       std::memcpy(bank.data() + 8 * i, &w, 8);
     }
     ph = std::arg(lo);

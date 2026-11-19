@@ -3,6 +3,8 @@
 //   watch  - tune to one pilot and decode its video (frames to the FrameSink)
 //   test   - stream at a given rate and only count banks (USB/controller soak, no DSP)
 // The Receiver's sink only copies banks into a queue (wifi-sdr rule); everything else runs on the DSP thread.
+// Two-antenna combining, off-centre tuning and the sparkle repair plumbing come from Play RX
+// (github.com/scerstt/PlayRX, GPL-2.0), a Windows receiver built on kepyur.
 #pragma once
 #include <atomic>
 #include <condition_variable>
@@ -14,6 +16,7 @@
 #include <thread>
 #include <vector>
 
+#include "combine.h"
 #include "spectrum.h"
 #include "video.h"
 
@@ -45,6 +48,9 @@ public:
   void close();
   bool is_open() const;
   bool superspeed() const;
+  // The DSP thread has stopped because the receiver did (the adapter was lost, or its stream kept failing): the
+  // Radio still reads as open, but nothing more will come until open() again (which clears this).
+  bool dead() const;
 
   // Then watch prefer_hz if found (or, with nothing found, anyway), else the previous pilot again, else the
   // strongest found. prefer_hz 0: the pilot being watched.
@@ -60,7 +66,23 @@ public:
   // NTSC chroma comb (DecoderOpts::comb), taken at the next watch(): fewer rainbows on fine detail and OSD
   // text, ~15 % more decode CPU. Off by default. Android: Native.setComb (the "comb" debug extra).
   void set_comb(bool on);
-  // Debug: save the next `seconds` of watched IQ as PREFIX.cs16 + PREFIX.json (kp_replay reads them).
+  // Off-centre tuning (watch only): the hardware centre on the 5 MHz grid ~6 MHz (40 MS/s) / ~4 MHz (20 MS/s) to
+  // one side of the pilot, so the video never sits on the chip's DC point: its DC filter eats whatever brightness
+  // lands there and rings when the picture moves off it (stripes at the left edge, ghost outlines). Off by
+  // default; taken at the next watch(). True when it changed (call watch() again to retune now).
+  bool set_offset_tuning(bool on);
+  // The hardware centre off-centre tuning picks for a pilot at hz, streaming at fs.
+  static double offset_centre(double hz, double fs);
+  // Two-antenna video: true = paths A and B combined before demodulation (combine.h), false = A only. Takes
+  // effect at once (no retune).
+  void set_combine(bool on);
+  struct ComboStatus {
+    bool on = false;
+    Combiner::Stats s;  // the last second
+  };
+  ComboStatus combine_status();
+  // Debug: save the next `seconds` of watched IQ as PREFIX.cs16 + PREFIX.json (kp_replay reads them), and path B
+  // as PREFIX_b.cs16.
   void record(double seconds, const std::string &prefix);
 
   std::string status_json();   // for the UI (polled)
@@ -77,15 +99,17 @@ private:
   void dsp_loop();
   void decode_loop();
   void on_bank(const uint8_t *b, size_t n, uint64_t seq, uint32_t gen, double fs, double centre, double shift);
-  void tune(double hz, int rate_sel);
+  // watching: off-centre tuning applies (the hardware centre recomputed for this rate)
+  void tune(double hz, int rate_sel, bool watching = false);
   void handle_watch(Bank &b);
   bool watch_fault(double hz);
-  void measure_snr(const std::vector<cf> &iq, double fs);
+  void measure_snr(const std::vector<cf> &iq, double fs, double shift_hz);
   void record_bank(const Bank &b);
   void handle_scan(Bank &b);
   void handle_test(Bank &b);
   void scan_step_done();
   void unpack(const Bank &b, std::vector<cf> &out);
+  void unpack_b(const Bank &b, std::vector<cf> &out);  // path B
 
   FrameSink _frames;
   std::unique_ptr<wsdr::Receiver> _rx;
@@ -99,10 +123,12 @@ private:
   double _gain_db = -1;
   bool _comb = false;
   bool _watch_comb = false;  // _comb as of the current watch (DSP thread only)
+  bool _offset = false;      // off-centre tuning
+  bool _dead = false;        // the DSP thread exited because the receiver stopped (cleared by open())
   // recording (DSP thread writes; the request is under _m)
   double _rec_req_s = 0;
   std::string _rec_req_prefix;
-  FILE *_rec = nullptr;
+  FILE *_rec = nullptr, *_rec_b = nullptr;  // path A (PREFIX.cs16) and B (PREFIX_b.cs16)
   std::string _rec_prefix;
   uint64_t _rec_left = 0, _rec_samples = 0;
   double _rec_fs = 0, _rec_centre = 0, _rec_shift = 0;
@@ -125,12 +151,14 @@ private:
   struct DBlock {
     std::shared_ptr<FrontEnd> fe;
     std::vector<float> d;
+    std::vector<uint8_t> bad;  // sparkle repair marks (empty while it is off)
   };
   std::thread _decoder;
   std::mutex _dqm;
   std::condition_variable _dqcv;
   std::deque<DBlock> _dq;
   std::vector<std::vector<float>> _dpool;
+  std::vector<std::vector<uint8_t>> _bpool;  // DBlock::bad, recycled like _dpool
   std::atomic<uint64_t> _ddropped{0};
   double _dload = 0;
 
@@ -145,7 +173,14 @@ private:
   int64_t _snr_t_ms = 0;
   float _snr_db = -1;  // < 0: none yet (under _m)
   double _fe_fs = 0, _fe_shift = 0;
-  std::vector<cf> _iq;
+  std::vector<cf> _iq, _iqb;
+  bool _iqb_fresh = false;  // _iqb holds this bank's path B (unpacked only when combining or recording needs it)
+  // two-antenna video
+  std::atomic<bool> _combine{false};
+  bool _combine_was = false;  // what the last bank did (the combiner restarts on a change)
+  Combiner _combiner;
+  int64_t _comb_t0_ms = 0;
+  ComboStatus _comb_status;  // under _m
   // scan
   std::vector<double> _plan;
   size_t _step = 0;
