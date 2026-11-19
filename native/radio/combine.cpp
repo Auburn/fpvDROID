@@ -42,13 +42,18 @@ float sum(const float *s) {
 Combiner::Combiner(double fs)
     : _fs(fs), _lag(std::clamp(static_cast<int>(std::lround(kLeadB * fs)), 1 - kMaxLag, kMaxLag - 1)) {}
 
-void Combiner::cut() {
-  std::fill(std::begin(_tail_a), std::end(_tail_a), cf{});
-  std::fill(std::begin(_tail_b), std::end(_tail_b), cf{});
-}
+void Combiner::cut() { _cut = true; }
 
 void Combiner::process(cf *a, const cf *b, size_t n) {
   if (n == 0) return;
+  if (_cut) {
+    // Nothing to delay the leading path with: its first sample held, for the few samples that takes. Not zeros:
+    // the carrier has a constant envelope, and a step up from nothing reads as noise on that path (on a strong
+    // signal it lost a third of its weight for the first 10 ms).
+    std::fill(std::begin(_tail_a), std::end(_tail_a), a[0]);
+    std::fill(std::begin(_tail_b), std::end(_tail_b), b[0]);
+    _cut = false;
+  }
   measure_lag(a, b, n);
   // the last kMaxLag samples of each path up to the end of this call, as they came in (a is overwritten below)
   cf ta[kMaxLag], tb[kMaxLag];

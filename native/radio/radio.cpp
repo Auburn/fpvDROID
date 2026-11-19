@@ -119,7 +119,10 @@ void Radio::open(int fd) {
   _banks = 0;
   _dropped = 0;
   _stop = false;
-  _rx = std::move(rx);
+  {
+    std::lock_guard<std::mutex> l(_rxm);
+    _rx = std::move(rx);
+  }
   _ddropped = 0;
   _dsp = std::thread([this] { dsp_loop(); });
   _decoder = std::thread([this] { decode_loop(); });
@@ -143,9 +146,16 @@ void Radio::close() {
   // a recording cut short by the close: what was written stays (no .json: kp_replay then needs --fs)
   if (_rec) std::fclose(_rec), _rec = nullptr;
   if (_rec_b) std::fclose(_rec_b), _rec_b = nullptr;
-  if (_rx) {
-    _rx->close();
-    _rx.reset();
+  // out of status_json()'s sight first, then closed: closing can take a while, and a status poll (the app's
+  // main thread) must not wait for it
+  std::unique_ptr<wsdr::Receiver> rx;
+  {
+    std::lock_guard<std::mutex> l(_rxm);
+    rx = std::move(_rx);
+  }
+  if (rx) {
+    rx->close();
+    rx.reset();
     KP_LOGI("radio: closed");
   }
   std::lock_guard<std::mutex> l(_m);
@@ -233,8 +243,11 @@ void Radio::tune(double hz, int rate_sel, bool watching) {
   _req_rate = rate_sel;
 }
 
+// The four mode calls do nothing on a radio that is not open, and that is decided under the lock open() and
+// close() set _open under: a call that races a close can no longer leave the closed radio in its mode.
 void Radio::scan(double prefer_hz) {
   std::lock_guard<std::mutex> l(_m);
+  if (!_open) return;
   _resume_hz = prefer_hz > 0 ? prefer_hz : _mode == Mode::Watch ? _watch_hz : 0;
   _mode = Mode::Scan;
   _mode_epoch++;
@@ -242,6 +255,7 @@ void Radio::scan(double prefer_hz) {
 
 void Radio::watch(double hz) {
   std::lock_guard<std::mutex> l(_m);
+  if (!_open) return;
   _watch_hz = hz;
   _mode = Mode::Watch;
   _mode_epoch++;
@@ -249,6 +263,7 @@ void Radio::watch(double hz) {
 
 void Radio::stream_test(int rate_sel, double seconds) {
   std::lock_guard<std::mutex> l(_m);
+  if (!_open) return;
   _mode = Mode::Test;
   _mode_epoch++;
   _req_rate = rate_sel;
@@ -257,6 +272,7 @@ void Radio::stream_test(int rate_sel, double seconds) {
 
 void Radio::idle() {
   std::lock_guard<std::mutex> l(_m);
+  if (!_open) return;
   _mode = Mode::Idle;
   _mode_epoch++;
 }
@@ -855,7 +871,10 @@ static std::string jstr(const std::string &s) {
 std::string Radio::status_json() {
   std::ostringstream o;
   wsdr::RxStatus rs;
-  if (_rx) rs = _rx->status();
+  {
+    std::lock_guard<std::mutex> l(_rxm);
+    if (_rx) rs = _rx->status();
+  }
   std::lock_guard<std::mutex> l(_m);
   // A JSON number or nothing: a nan or inf printed as it comes is not JSON, and a reader may choke on it or,
   // worse, take it for a string (Android's does).

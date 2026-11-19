@@ -5,7 +5,8 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
 
 apply() {  # submodule dir, patch, a file in it and a piece of text the patch adds to that file
-  local dir=$1 patch=$2 marker_file=$3 marker=$4
+  local dir patch=$2 marker_file=$3 marker=$4
+  dir=$(cd "$1" && pwd -P)  # as it really is (a link resolved), like patches.cmake: the ceiling below is its parent
   # git must look for a repository in $dir and no further up: where $dir is a plain directory inside some other
   # repository (vendored, or unpacked from an archive in a checkout), git apply takes the patch's paths as
   # relative to that repository's top, skips every one and reports success, the reverse check included.

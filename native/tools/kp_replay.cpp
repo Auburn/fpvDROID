@@ -1,7 +1,11 @@
 // kp_replay: run kepyur's scanner DSP and video decoder over a recording (.cs16 + .json from wsdr_probe,
 // or .sigmf-data + .sigmf-meta) and print lock numbers. The bench for lock robustness.
 //
-//   kp_replay REC.cs16 [--offset HZ] [--start S] [--seconds S] [--cnr DB] [--frames] [--woven] [--comb] [-v]
+//   kp_replay REC.cs16 [--offset HZ] [--start S] [--seconds S] [--cnr DB] [--fs HZ] [--mix HZ] [--as20]
+//             [--frames] [--woven] [--comb] [--luma-comb] [--adaptive] [--smooth] [--repair] [-v]
+//   --comb: the 3-line colour comb. --luma-comb, --adaptive, --smooth, --repair: the picture switches of video.h
+//   (comb filter, clean OSD edges, smooth lines, sparkle repair). --as20: as the adapter delivers it at 20 MS/s.
+//   --mix HZ: the recording shifted by HZ first (scanner edge tests). --fs HZ: for a recording without a .json.
 //   kp_replay REC.cs16 --frames | ffplay -f rawvideo -pixel_format rgb0 -video_size 720x480 -i -
 #include <chrono>
 #include <cmath>
@@ -39,7 +43,7 @@ int main(int argc, char **argv) {
     else if (k == "--cnr") cnr = std::atof(v());
     else if (k == "--fs") fs = std::atof(v());
     else if (k == "--mix") mix = std::atof(v());
-    else if (k == "--as20") as20 = true;  // emulate the adapter at 20 MS/s: ~18.4 MHz filter, decimate by 2  // shift the recording by HZ (scanner edge tests)
+    else if (k == "--as20") as20 = true;  // emulate the adapter at 20 MS/s: ~18.4 MHz filter, decimate by 2
     else if (k == "--frames") frames = true;
     else if (k == "--woven") woven = true;
     else if (k == "--comb") comb = true;
@@ -50,7 +54,8 @@ int main(int argc, char **argv) {
     else if (k == "-v") set_log_debug(true);
     else if (k[0] != '-') file = k;
     else {
-      std::fprintf(stderr, "usage: kp_replay REC.cs16 [--offset HZ] [--start S] [--seconds S] [--cnr DB] [--frames] [--woven] [--comb] [-v]\n");
+      std::fprintf(stderr, "usage: kp_replay REC.cs16 [--offset HZ] [--start S] [--seconds S] [--cnr DB] [--fs HZ] [--mix HZ]\n"
+                           "       [--as20] [--frames] [--woven] [--comb] [--luma-comb] [--adaptive] [--smooth] [--repair] [-v]\n");
       return 2;
     }
   }

@@ -367,7 +367,8 @@ std::unique_ptr<Screen> g_screen;
 std::unique_ptr<Radio> g_radio;
 // Keeps an open and a close from overlapping. Only the worker that opens and closes takes it: the mode calls (scan,
 // watch, idle, streamTest) come from the main thread, which must never wait out a radio bring-up, and they need
-// no more than the radio's own lock (each only sets the mode; an open or close in progress sets it again when done).
+// no more than the radio's own lock (each only sets the mode, the radio ignores them while it is not open, and
+// an open or close sets the mode itself when it is done).
 std::mutex g_api;
 
 // ---- test picture ----

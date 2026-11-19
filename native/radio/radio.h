@@ -118,6 +118,7 @@ private:
 
   FrameSink _frames;
   std::unique_ptr<wsdr::Receiver> _rx;
+  std::mutex _rxm;  // _rx itself (open and close replace it; status_json reads it from another thread)
   mutable std::mutex _m;  // mode, pilots, status fields below
   Mode _mode = Mode::Idle;
   uint64_t _mode_epoch = 0;  // bumped on every mode change; the DSP thread restarts its state
@@ -205,7 +206,8 @@ private:
   // test
   uint64_t _test_banks = 0, _test_gaps = 0, _test_last_seq = 0, _test_runs = 0;
   uint32_t _test_gen = 0;
-  int64_t _test_t0_ms = 0, _test_end_ms = 0;
+  int64_t _test_t0_ms = 0;
+  std::atomic<int64_t> _test_end_ms{0};  // set by stream_test() on the caller's thread
   double _test_fs = 0;
   std::string _test_result;
   // load

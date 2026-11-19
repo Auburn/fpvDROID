@@ -75,6 +75,7 @@ private:
   int _lag;                    // B leads A by this many samples
   bool _lag_measured = false;
   cf _tail_a[kMaxLag] = {}, _tail_b[kMaxLag] = {};  // each path's last samples of the previous process()
+  bool _cut = true;            // there was no previous one to follow on from (the start, or cut())
   double _q[kLags] = {};       // the measurement under way: |correlation|^2 at each lag, summed over its slices,
   double _qp = 0;              // and (power of A) * (power of B) likewise: the two paths' coherence is _q / _qp
   int _slices = 0;
