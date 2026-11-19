@@ -65,6 +65,11 @@ struct Biquad {  // RBJ low-pass
     z2 = b2 * x - a2 * y;
     return y;
   }
+  // For a filter that is being fed zeros: once its state has died away to nothing (far below anything that could
+  // reach a pixel), make it exactly zero, before it gets down to denormal numbers.
+  void settle() {
+    if (std::fabs(z1) < 1e-25f && std::fabs(z2) < 1e-25f) z1 = z2 = 0;
+  }
 };
 
 }  // namespace
@@ -189,6 +194,13 @@ public:
           } else {
             csrc = 0.5f * (d - (p0.d + (p1.d - p0.d) * fr));
             csrc *= 1.f - fade;
+            // While the fade is complete (a whole line under a horizontal edge, the first line of every field)
+            // the chroma low-pass is fed exact zeros, and within a few hundred samples its state decays into
+            // denormal numbers, which x86 computes some hundred times slower: 9 % of the decode time on the
+            // bench's test picture. Looked at every 64 samples, it never gets that far.
+            if (fade < 1.f) chroma_quiet = 0;
+            else if ((++chroma_quiet & 63) == 0)
+              for (Biquad *b : {&cl_r1, &cl_r2, &cl_i1, &cl_i2}) b->settle();
           }
         }
       }
@@ -268,7 +280,7 @@ private:
     bool col = false;  // drawn in colour
     bool ok = false;   // usable as a neighbour: locked, in colour, burst on the PLL's predicted phase
     bool hit = false;  // sparkle repair: still badly hit after patching (mend_rows)
-    bool fade = false; // adaptive comb: fade_ring holds this line's fade
+    bool fade = false;  // adaptive comb: fade_ring holds this line's fade
     uint64_t epoch = 0;
     double phase = 0;  // c_phase and c_mag after this line's burst: it is drawn after the next line's
     float mag = 0;
@@ -310,6 +322,7 @@ private:
   uint64_t prev_back = 1;  // the line before: ring sample n - prev_back, and prev_fr of the way to the next one
   float prev_fr = 0, inv_depth = 1;  // inv_depth: 1 / sync depth
   float vdiff = 0;
+  int chroma_quiet = 0;  // samples in a row with the colour faded out completely
   double cdel_comb = 0;
   // Sparkle repair (set_repair): the front end's click marks alongside luma_ring; see patch_line / mend_rows.
   std::vector<uint8_t> bad_ring;
@@ -696,7 +709,8 @@ private:
         float m = 0, orr = 0, oi = 0;
         const double p = ls + a0 + step * h, pc = p + cdel;
         const int64_t i0 = static_cast<int64_t>(p + 0.5), j0 = static_cast<int64_t>(pc);
-        if (j0 + Ti + 3 < static_cast<int64_t>(n) && static_cast<int64_t>(n) - (i0 - Ti) <= static_cast<int64_t>(ring_mask) - 8) {
+        if (j0 + Ti + 3 < static_cast<int64_t>(n) &&
+            static_cast<int64_t>(n) - (i0 - Ti) <= static_cast<int64_t>(ring_mask) - 8) {
           // a neighbour's weight: 1 while its luma here is within kCombFull of this line's, 0 past kCombNone
           const float y0 = luma_ring[i0 & ring_mask];
           const float wu = up ? std::clamp(w1 - std::fabs(luma_ring[(i0 - Ti) & ring_mask] - y0) * wk, 0.f, 1.f) : 0.f;
@@ -822,18 +836,25 @@ private:
     constexpr int kBack = 3, kFwd = 8, kMaxRun = 64;  // luma: filter spread (samples) either side; longest patch
     // a run may end kFwd past s1, and the furthest patch ends on the sample its own spread after that
     const int reach = kFwd + std::max({kFwd, rep_fwd_c, rep_fwd_low, rep_fwd_wide});
-    if (s1 + reach >= static_cast<int64_t>(n) || static_cast<int64_t>(n) - s0 > static_cast<int64_t>(ring_mask) - 32) return false;
+    if (s1 + reach >= static_cast<int64_t>(n) || static_cast<int64_t>(n) - s0 > static_cast<int64_t>(ring_mask) - 32)
+      return false;
     // [a, b) of a ring becomes a straight line between the samples either side of it, a - 1 and b
     const auto ramp = [&](auto &ring, int64_t a, int64_t b) {
       const auto va = ring[(a - 1) & ring_mask], vb = ring[b & ring_mask];
       const float inv = 1.f / static_cast<float>(b - a + 1);
       for (int64_t q = a; q < b; q++) ring[q & ring_mask] = va + (vb - va) * (static_cast<float>(q - a + 1) * inv);
     };
-    const auto ramp_tap = [&](float CombTap::*v, int64_t a, int64_t b) {
-      const float va = comb_ring[(a - 1) & ring_mask].*v, vb = comb_ring[b & ring_mask].*v;
-      const float inv = 1.f / static_cast<float>(b - a + 1);
-      for (int64_t q = a; q < b; q++) comb_ring[q & ring_mask].*v = va + (vb - va) * (static_cast<float>(q - a + 1) * inv);
+    // [a, b) of one of the comb's taps from the same place two lines earlier (2 T back, between two samples)
+    const double up2 = std::ceil(2 * T);
+    const int64_t back2 = static_cast<int64_t>(up2);
+    const float fr2 = static_cast<float>(up2 - 2 * T);
+    const auto two_up = [&](float CombTap::*v, int64_t a, int64_t b) {
+      for (int64_t q = a; q < b; q++) {
+        const float x0 = comb_ring[(q - back2) & ring_mask].*v, x1 = comb_ring[(q - back2 + 1) & ring_mask].*v;
+        comb_ring[q & ring_mask].*v = x0 + (x1 - x0) * fr2;
+      }
     };
+    const bool taps = luma_comb && static_cast<int64_t>(n) - (s0 - kBack - back2) <= static_cast<int64_t>(ring_mask);
     int64_t lost = 0;
     bool too_long = false;
     for (int64_t i = s0; i < s1;) {
@@ -848,14 +869,17 @@ private:
       if (j - i + kBack + kFwd <= kMaxRun) {
         ramp(luma_ring, i - kBack, j + kFwd);
         ramp(chroma_ring, i - kBack, j + rep_fwd_c);
-        if (luma_comb) {
+        if (taps) {
           // The comb's look at the line before: left as it is, the next line would take half the click from
           // here (its luma through the comb, its colour through the adaptive comb's line difference) and
           // show it again one line down, where nothing is marked. That line reads these samples a line
           // period after they came in; this runs well before, as soon as the next line's sync has passed.
-          ramp_tap(&CombTap::d, i - 1, j + rep_fwd_wide);
-          ramp_tap(&CombTap::wide, i - 1, j + rep_fwd_wide);
-          ramp_tap(&CombTap::low, i - kBack, j + rep_fwd_low);
+          // The stand-in is the line two up, whose colour has the same phase (a straight line would have
+          // no colour, and the line below would lose half of its own there); where that line looks
+          // different, the adaptive comb sees it in the low band like any other difference.
+          two_up(&CombTap::d, i - 1, j + rep_fwd_wide);
+          two_up(&CombTap::wide, i - 1, j + rep_fwd_wide);
+          two_up(&CombTap::low, i - kBack, j + rep_fwd_low);
         }
         clicks_repaired++;
       } else {
@@ -1168,13 +1192,17 @@ void FrontEnd::demod(const cf *xs, size_t n, std::vector<float> &out, std::vecto
   //    stretch of picture at an echo's notch lasts longer;
   //  - its area is near one turn, not merely above a part of one;
   //  - it is abrupt: some sample of it is kJump away from the level either side. A click's turn comes within
-  //    a sample or two (8-14 MHz at 20 MS/s, measured on noise); a picture edge crossing a notch can pass the
-  //    first two tests, but is slower than that.
+  //    a sample or two (8-14 MHz at 20 MS/s, measured on noise). A picture edge crossing a notch, or a thin
+  //    white stroke of OSD text whose brightness sits on one, can pass the first two tests but stays under
+  //    that: black to white is 5.3 MHz at 8 MHz deviation, and the echo's own phase swing adds up to 2.5 when
+  //    it is 3 dB under the direct signal. (With a stronger echo, or over a strongly coloured background,
+  //    such strokes can still be taken for clicks. 7 MHz would find 2 % more of the real clicks and take
+  //    two to three times as many strokes; 9 MHz would lose a tenth of the clicks.)
   if (rep && _env.size() > hist) {
     constexpr float kDip = 0.12f;  // -9 dB
     constexpr size_t kWiden = 2;
     constexpr double kSlip = 0.7, kSlipMax = 1.5;  // turns
-    constexpr float kJump = 6.f;  // MHz
+    constexpr float kJump = 8.f;  // MHz
     const size_t max_dip = std::max<size_t>(1, static_cast<size_t>(std::lround(0.4e-6 * _fs_out)));
     const size_t M = _env.size(), N = M - hist;  // N == out.size()
     double m = 0;

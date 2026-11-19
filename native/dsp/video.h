@@ -76,14 +76,16 @@ bool luma_comb_on();
 
 // Adaptive comb (NTSC, with the luma comb on). The comb separates colour from brightness by comparing each line
 // with the one before; where that line is clearly different (OSD text, horizons) it leaves a halo and false
-// colour. There the brightness falls back to the notch filter and the colour is faded out.
+// colour. There the brightness falls back to the notch filter and the colour is faded out. With the 3-line
+// chroma comb (DecoderOpts::comb) the colour is only faded where that comb finds no matching line below either.
 void set_adaptive_comb(bool on);
 bool adaptive_comb_on();
 
 // Sparkle repair. The white / black sparkles of a weak signal are FM "clicks": the carrier's envelope collapses
-// and its phase slips a turn. The front end marks those instants; the decoder, which draws each line about a
-// line after it arrives, patches the picture over each mark (a straight line between the good points either
-// side; sync is left alone) and redraws a badly hit line from the lines above and below it.
+// for a moment and its phase slips a turn. The front end marks those instants (a longer dip of the envelope, as
+// an echo makes at one brightness, is not one); the decoder, which draws each line about a line after it
+// arrives, patches the picture over each mark (a straight line between the good points either side; sync is
+// left alone) and redraws a badly hit line from the lines above and below it.
 void set_repair(bool on);
 bool repair_on();
 
