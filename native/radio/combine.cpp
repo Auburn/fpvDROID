@@ -54,9 +54,9 @@ void Combiner::process(cf *a, const cf *b, size_t n) {
     //    first blocks, so the held sample itself, whose phase is wrong, carries next to no weight.
     //  - After a cut() on a running combiner: zeros. The weights are already at their values there, and a held
     //    sample would be added to the other path at full weight and the wrong phase (the carrier turns by up to
-    //    36 degrees a sample): the sum collapses, a click the demodulator turns into a damaged line. With
-    //    zeros those few samples are the other path alone at its own weight and the right phase, and the
-    //    estimates do not notice a step that short.
+    //    36 degrees a sample at 40 MS/s, twice that at 20): the sum collapses, a click the demodulator turns
+    //    into a damaged line. With zeros those few samples are the other path alone at its own weight and the
+    //    right phase, and the estimates do not notice a step that short.
     std::fill(std::begin(_tail_a), std::end(_tail_a), _init ? cf{} : a[0]);
     std::fill(std::begin(_tail_b), std::end(_tail_b), _init ? cf{} : b[0]);
     _cut = false;

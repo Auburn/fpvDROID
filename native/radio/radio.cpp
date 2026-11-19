@@ -255,6 +255,10 @@ void Radio::scan(double prefer_hz) {
   _resume_hz = prefer_hz > 0 ? prefer_hz : _mode == Mode::Watch ? _watch_hz : 0;
   _mode = Mode::Scan;
   _mode_epoch++;
+  // the status says "scan" from here on: its progress with it, not what the scan before left (the DSP thread
+  // sets both again when it takes the scan up)
+  _step = 0;
+  _plan_n = scan_plan().size();
 }
 
 void Radio::watch(double hz) {
@@ -360,6 +364,7 @@ void Radio::dsp_loop() {
       // started: this thread runs before that call, and a receiver not yet running is not one that stopped.
       if (_started && _rx) {
         const wsdr::RxStatus st = _rx->status();
+        if (_stop) break;  // close() got in between: it stopped the receiver itself
         if (!st.running) {
           KP_LOGE("radio: receiver stopped: %s", st.error.c_str());
           // nothing restarts it from here: say so, so the app can reopen the adapter

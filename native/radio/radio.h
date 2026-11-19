@@ -194,7 +194,8 @@ private:
   ComboStatus _comb_status;  // under _m
   // scan
   std::vector<double> _plan;
-  // atomic: status_json() reads the scan's progress while the DSP thread moves it on (_plan_n: _plan.size())
+  // atomic: status_json() reads the scan's progress while the DSP thread moves it on, and scan() sets it back
+  // to the start for the status to show until that thread takes the new scan up (_plan_n: _plan.size())
   std::atomic<size_t> _step{0}, _plan_n{0};
   int _settle = 0;
   uint64_t _cap_last_seq = 0;
