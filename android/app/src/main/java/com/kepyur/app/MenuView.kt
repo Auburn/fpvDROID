@@ -1,0 +1,426 @@
+package com.kepyur.app
+
+import android.annotation.SuppressLint
+import android.content.Context
+import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
+import android.text.TextUtils
+import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
+import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.roundToInt
+
+enum class Tone { IDLE, BUSY, LIVE, WARN, ERROR }
+
+/** A signal a scan found. */
+data class Found(val mhz: Double, val name: String, val snrDb: Float, val std: String)
+
+/** What the menu shows about the adapter and the radio; everything else on it is a [Settings] value. */
+data class MenuState(
+    val tone: Tone = Tone.IDLE,
+    val headline: String = "",
+    val detail: String = "",
+    /** What tapping the status does ("Try again"); null: nothing. */
+    val action: String? = null,
+    /** The radio is up: picking a channel and scanning do something now. */
+    val radioReady: Boolean = false,
+    val scanning: Boolean = false,
+    val scanStep: Int = 0,
+    val scanSteps: Int = 0,
+    val found: List<Found> = emptyList(),
+    /** A line of numbers for the Signal tab (USB speed, sample rate, CPU, drops). */
+    val stats: String = "",
+)
+
+/**
+ * The menu: everything the app has to offer, over the blurred picture. A rail on the left (status, the four
+ * tabs, Close) and the chosen tab's settings on the right. It changes [Settings] itself and tells the
+ * [Listener] which kind of thing changed; it knows nothing of the radio.
+ */
+@SuppressLint("ViewConstructor")
+class MenuView(ctx: Context, private val s: Settings, private val on: Listener) : FrameLayout(ctx) {
+    interface Listener {
+        /** A channel was picked ([Settings.channelMhz] and [Settings.band] are already set). */
+        fun onTune()
+        fun onScan()
+        /** A view setting changed (aspect, scaling, size, goggles). */
+        fun onView()
+        /** A picture switch changed. [rebuild]: one the decoder only takes when the channel is tuned again. */
+        fun onPicture(rebuild: Boolean)
+        /** A signal setting changed. [retune]: it applies on the next tune. */
+        fun onSignal(retune: Boolean)
+        fun onStatusAction()
+        fun onClose()
+    }
+
+    private var state = MenuState()
+    private var tab = 0
+
+    // rail
+    private val dot = View(ctx)
+    private val headline = label(ctx, "", 16f, Skin.TEXT, medium = true)
+    private val detail = label(ctx, "", 12.5f, Skin.TEXT_2)
+    private val action = label(ctx, "", 12.5f, Skin.ACCENT, medium = true)
+    private val tabNames = listOf("Channel", "View", "Picture", "Signal")
+    private val tabViews = ArrayList<TextView>()
+    private val pages = ArrayList<View>()
+
+    // channel page
+    private lateinit var bandPicker: Segmented
+    private val bandName = label(ctx, "", 12.5f, Skin.TEXT_2)
+    private val tiles = List(8) { ChannelTile(ctx) }
+    private lateinit var scanButton: PillButton
+    private val scanText = label(ctx, "", 12.5f, Skin.TEXT_2)
+    private val foundRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+    private var foundShown: List<Found>? = null
+
+    // view page
+    private lateinit var fitRow: SettingRow
+    private lateinit var sizeRow: SettingRow
+    private lateinit var eyeRow: SettingRow
+    private lateinit var eyeDivider: View
+
+    // picture page
+    private lateinit var cleanOsdRow: SettingRow
+
+    // signal page
+    private val stats = label(ctx, "", 12f, Skin.TEXT_3)
+
+    init {
+        setBackgroundColor(Skin.SCRIM)
+        isClickable = true   // touches stop here: nothing behind the menu reacts
+        val row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        row.addView(buildRail(), LinearLayout.LayoutParams(dpi(196f), -1))
+        val card = FrameLayout(ctx).apply {
+            background = rounded(Skin.PANEL, dp(22f), Skin.STROKE, dpi(1f))
+            clipToOutline = true
+        }
+        pages += scrolling(buildChannelPage())
+        pages += scrolling(buildViewPage())
+        pages += scrolling(buildPicturePage())
+        pages += scrolling(buildSignalPage())
+        for (p in pages) card.addView(p, LayoutParams(-1, -1))
+        // the settings read best at a moderate width: on a very wide screen the card stops growing
+        val holder = object : FrameLayout(ctx) {
+            override fun onMeasure(w: Int, h: Int) {
+                val cap = dpi(720f)
+                card.layoutParams.width = if (MeasureSpec.getSize(w) > cap) cap else LayoutParams.MATCH_PARENT
+                super.onMeasure(w, h)
+            }
+        }
+        holder.addView(card, LayoutParams(-1, -1))
+        row.addView(holder, LinearLayout.LayoutParams(0, -1, 1f).apply { marginStart = dpi(14f) })
+        addView(row, LayoutParams(-1, -1))
+        val base = dpi(18f)
+        row.setPadding(base, base, base, base)
+        setOnApplyWindowInsetsListener { _, insets ->
+            // keep clear of a camera cutout at either end (the picture runs under it, the menu does not)
+            val cut = insets.displayCutout
+            row.setPadding(max(base, (cut?.safeInsetLeft ?: 0) + dpi(8f)), base, max(base, (cut?.safeInsetRight ?: 0) + dpi(8f)), base)
+            insets
+        }
+        showTab(0, animate = false)
+        syncChannel()
+        render(state)
+    }
+
+    // ------------------------------------------------------------------------------------------ rail
+    private fun buildRail(): View {
+        val rail = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+        rail.addView(label(context, "KEPYUR", 11f, Skin.TEXT_3, medium = true).apply { letterSpacing = 0.32f },
+            LinearLayout.LayoutParams(-2, -2).apply { marginStart = dpi(14f); topMargin = dpi(4f) })
+
+        val status = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dpi(14f), dpi(10f), dpi(8f), dpi(10f))
+            setOnClickListener { if (state.action != null) on.onStatusAction() }
+        }
+        val first = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        dot.background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Skin.TEXT_3) }
+        first.addView(dot, LinearLayout.LayoutParams(dpi(8f), dpi(8f)).apply { marginEnd = dpi(8f) })
+        headline.maxLines = 1
+        headline.ellipsize = TextUtils.TruncateAt.END
+        first.addView(headline, LinearLayout.LayoutParams(0, -2, 1f))
+        status.addView(first)
+        detail.maxLines = 4
+        detail.ellipsize = TextUtils.TruncateAt.END
+        detail.setLineSpacing(dp(2f), 1f)
+        status.addView(detail, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dpi(6f) })
+        status.addView(action, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dpi(6f) })
+        rail.addView(status, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dpi(6f) })
+
+        for ((i, name) in tabNames.withIndex()) {
+            val t = label(context, name, 15f, Skin.TEXT_2).apply {
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dpi(14f), 0, dpi(14f), 0)
+                isClickable = true
+                setOnClickListener { showTab(i) }
+            }
+            tabViews += t
+            rail.addView(t, LinearLayout.LayoutParams(-1, dpi(42f)).apply { topMargin = if (i == 0) dpi(6f) else dpi(2f) })
+        }
+        rail.addView(View(context), LinearLayout.LayoutParams(-1, 0, 1f))
+        rail.addView(PillButton(context, "Close menu", primary = true).apply { setOnClickListener { on.onClose() } },
+            LinearLayout.LayoutParams(-1, dpi(46f)).apply { topMargin = dpi(8f) })
+        return rail
+    }
+
+    fun showTab(index: Int, animate: Boolean = true) {
+        tab = index
+        for ((i, t) in tabViews.withIndex()) {
+            val sel = i == index
+            t.background = if (sel) rounded(Skin.FILL_STRONG, dp(13f)) else null
+            t.setTextColor(if (sel) Skin.TEXT else Skin.TEXT_2)
+            t.typeface = if (sel) Skin.MEDIUM else Skin.REGULAR
+        }
+        for ((i, p) in pages.withIndex()) {
+            p.animate().cancel()
+            if (i == index) {
+                p.visibility = View.VISIBLE
+                if (animate) {
+                    p.alpha = 0f
+                    p.translationY = dp(6f)
+                    p.animate().alpha(1f).translationY(0f).setDuration(160).start()
+                } else {
+                    p.alpha = 1f
+                    p.translationY = 0f
+                }
+            } else {
+                p.visibility = View.GONE
+            }
+        }
+    }
+
+    private fun scrolling(content: View) = ScrollView(context).apply {
+        isVerticalScrollBarEnabled = false
+        overScrollMode = View.OVER_SCROLL_NEVER
+        isFillViewport = true
+        addView(content, ViewGroup.LayoutParams(-1, -2))
+    }
+
+    private fun page() = LinearLayout(context).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dpi(22f), dpi(16f), dpi(22f), dpi(16f))
+    }
+
+    // ------------------------------------------------------------------------------------------ channel
+    private fun buildChannelPage(): View {
+        val p = page()
+        val head = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        head.addView(caption(context, "Band"), LinearLayout.LayoutParams(0, -2, 1f))
+        head.addView(bandName)
+        p.addView(head)
+        bandPicker = Segmented(context, Channels.bands.map { it.first.toString() }, bandIndex()) { i ->
+            s.band = Channels.bands[i].first
+            s.save()
+            syncChannel()
+        }
+        p.addView(bandPicker, LinearLayout.LayoutParams(-1, dpi(38f)).apply { topMargin = dpi(8f) })
+        for (r in 0 until 2) {
+            val line = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
+            for (c in 0 until 4) {
+                val tile = tiles[r * 4 + c]
+                tile.setOnClickListener {
+                    val ch = tile.channel ?: return@setOnClickListener
+                    s.channelMhz = ch.mhz
+                    s.band = ch.band
+                    s.save()
+                    syncChannel()
+                    on.onTune()
+                }
+                line.addView(tile, LinearLayout.LayoutParams(0, dpi(60f), 1f).apply { if (c > 0) marginStart = dpi(8f) })
+            }
+            p.addView(line, LinearLayout.LayoutParams(-1, -2).apply { topMargin = if (r == 0) dpi(12f) else dpi(8f) })
+        }
+        val scan = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        scanButton = PillButton(context, "Scan").apply { setOnClickListener { on.onScan() } }
+        scan.addView(scanButton, LinearLayout.LayoutParams(-2, dpi(40f)))
+        scan.addView(scanText, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dpi(14f) })
+        val chips = HorizontalScrollView(context).apply {
+            isHorizontalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+            addView(foundRow)
+        }
+        scan.addView(chips, LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dpi(12f) })
+        p.addView(scan, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dpi(14f) })
+        return p
+    }
+
+    private fun bandIndex() = Channels.bands.indexOfFirst { it.first == s.band }.coerceAtLeast(0)
+
+    /** The picker follows [Settings.band] / [Settings.channelMhz] (after a tap here, or when a scan chose a channel). */
+    fun syncChannel() {
+        bandPicker.select(bandIndex())
+        bandName.text = Channels.bands[bandIndex()].second
+        val list = Channels.of(s.band)
+        for ((i, tile) in tiles.withIndex()) {
+            tile.channel = list[i]
+            tile.chosen = list[i].mhz == s.channelMhz
+            tile.bars = barsOn(list[i])
+        }
+    }
+
+    private fun barsOn(ch: Channel): Int {
+        val f = state.found.filter { abs(it.mhz - ch.mhz) < 4 }.maxByOrNull { it.snrDb } ?: return 0
+        return barsFor(f.snrDb).coerceAtLeast(1)
+    }
+
+    // ------------------------------------------------------------------------------------------ view
+    private val fitWords = listOf(
+        "The whole picture, black bars where the screen is wider",
+        "Pulled to the shape of the screen",
+        "Fills the screen, the picture's edges cut off",
+    )
+
+    private fun buildViewPage(): View {
+        val p = page()
+        p.addView(SettingRow(context, "Aspect ratio", "How the camera's picture is shaped",
+            Segmented(context, listOf("4:3", "16:9"), if (s.wide) 1 else 0) { i -> s.wide = i == 1; changedView() }
+                .sized(dpi(150f))))
+        p.addView(divider(context))
+        fitRow = SettingRow(context, "Scaling", fitWords[s.fit],
+            Segmented(context, listOf("Fit", "Stretch", "Crop"), s.fit) { i ->
+                s.fit = i
+                fitRow.detailView.text = fitWords[i]
+                changedView()
+            }.sized(dpi(216f)))
+        p.addView(fitRow)
+        p.addView(divider(context))
+        sizeRow = SettingRow(context, "Size", sizeWords(),
+            Slider(context, Settings.SCALE_MIN, Settings.SCALE_MAX, s.scale, 1f) { v, done ->
+                s.scale = v
+                sizeRow.detailView.text = sizeWords()
+                changedView(save = done)
+            }.sized(dpi(216f)))
+        p.addView(sizeRow)
+        p.addView(divider(context))
+        p.addView(SettingRow(context, "Goggles", "The picture twice, side by side, for goggles that hold a phone",
+            Toggle(context, s.goggles) { v ->
+                s.goggles = v
+                showEyeRow()
+                changedView()
+            }))
+        eyeDivider = divider(context)
+        p.addView(eyeDivider)
+        eyeRow = SettingRow(context, "Eye spacing", "Slide until the two pictures become one",
+            Slider(context, -1f, 1f, s.eyeSpacing, 0f) { v, done -> s.eyeSpacing = v; changedView(save = done) }.sized(dpi(216f)))
+        p.addView(eyeRow)
+        showEyeRow()
+        return p
+    }
+
+    private fun sizeWords() = "${(s.scale * 100).roundToInt()}% of the screen"
+
+    private fun showEyeRow() {
+        eyeRow.visibility = if (s.goggles) View.VISIBLE else View.GONE
+        eyeDivider.visibility = eyeRow.visibility
+    }
+
+    private fun changedView(save: Boolean = true) {
+        if (save) s.save()
+        on.onView()
+    }
+
+    // ------------------------------------------------------------------------------------------ picture
+    private fun buildPicturePage(): View {
+        val p = page()
+        fun toggle(title: String, words: String, value: Boolean, rebuild: Boolean = false, set: (Boolean) -> Unit) =
+            SettingRow(context, title, words, Toggle(context, value) { v ->
+                set(v)
+                s.save()
+                on.onPicture(rebuild)
+            })
+        p.addView(toggle("Comb filter", "A sharper picture with no echo after edges (NTSC cameras)", s.lumaComb) {
+            s.lumaComb = it
+            cleanOsdRow.setAvailable(it)
+        })
+        p.addView(divider(context))
+        cleanOsdRow = toggle("Clean OSD edges", "No rainbow fringe or halo around text and sharp edges. Needs the comb filter", s.cleanOsd) { s.cleanOsd = it }
+        cleanOsdRow.setAvailable(s.lumaComb)
+        p.addView(cleanOsdRow)
+        p.addView(divider(context))
+        p.addView(toggle("Smooth lines", "A steady picture with clean diagonals instead of stair steps", s.smoothLines) { s.smoothLines = it })
+        p.addView(divider(context))
+        p.addView(toggle("Sparkle repair", "Patches the white and black sparkles of a weak signal", s.sparkleRepair) { s.sparkleRepair = it })
+        p.addView(divider(context))
+        p.addView(toggle("Colour comb", "Fewer rainbows on fine detail, at the cost of more processing (NTSC cameras)", s.colourComb, rebuild = true) { s.colourComb = it })
+        return p
+    }
+
+    // ------------------------------------------------------------------------------------------ signal
+    private fun buildSignalPage(): View {
+        val p = page()
+        p.addView(SettingRow(context, "Sample rate", "40 hears more of the channel. 20 is easier on the USB link, and is used by itself when 40 keeps dropping out",
+            Segmented(context, listOf("40", "20"), if (s.rate40) 0 else 1) { i ->
+                s.rate40 = i == 0
+                s.save()
+                on.onSignal(retune = true)
+            }.sized(dpi(130f))))
+        p.addView(divider(context))
+        p.addView(SettingRow(context, "Diversity", "Both of the adapter's antennas combined, so a fade on one is covered by the other",
+            Toggle(context, s.diversity) { v -> s.diversity = v; s.save(); on.onSignal(retune = false) }))
+        p.addView(divider(context))
+        p.addView(SettingRow(context, "Tune beside the channel", "Keeps the picture clear of the chip's blind spot: no stripes at the left edge, no ghost outlines",
+            Toggle(context, s.offsetTune) { v -> s.offsetTune = v; s.save(); on.onSignal(retune = true) }))
+        p.addView(divider(context))
+        stats.setLineSpacing(dp(3f), 1f)
+        p.addView(stats, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dpi(12f) })
+        return p
+    }
+
+    private fun <T : View> T.sized(width: Int): T = apply { layoutParams = LinearLayout.LayoutParams(width, dpi(38f)) }
+
+    // ------------------------------------------------------------------------------------------ state
+    fun render(st: MenuState) {
+        val foundChanged = st.found != state.found
+        state = st
+        (dot.background as GradientDrawable).setColor(when (st.tone) {
+            Tone.LIVE -> Skin.ACCENT
+            Tone.BUSY -> Color.WHITE
+            Tone.WARN -> Skin.WARN
+            Tone.ERROR -> Skin.ERROR
+            Tone.IDLE -> Skin.TEXT_3
+        })
+        if (headline.text.toString() != st.headline) headline.text = st.headline
+        if (detail.text.toString() != st.detail) detail.text = st.detail
+        detail.visibility = if (st.detail.isEmpty()) View.GONE else View.VISIBLE
+        action.text = st.action ?: ""
+        action.visibility = if (st.action == null) View.GONE else View.VISIBLE
+
+        scanButton.isEnabled = st.radioReady && !st.scanning
+        scanButton.text = if (st.scanning) "Scanning" else "Scan"
+        val words = when {
+            st.scanning -> "${st.scanStep} of ${st.scanSteps}"
+            !st.radioReady -> ""
+            st.found.isEmpty() -> "Looks for video on every channel"
+            else -> ""
+        }
+        if (scanText.text.toString() != words) scanText.text = words
+        scanText.visibility = if (words.isEmpty()) View.GONE else View.VISIBLE
+        if (foundChanged || foundShown == null) {
+            foundShown = st.found
+            foundRow.removeAllViews()
+            for (f in st.found.sortedByDescending { it.snrDb }) {
+                val ch = Channels.nearest(f.mhz, s.band)
+                val chip = FoundChip(context, ch?.name ?: "${f.mhz.roundToInt()}", barsFor(f.snrDb).coerceAtLeast(1))
+                chip.setOnClickListener {
+                    s.channelMhz = ch?.mhz ?: f.mhz.roundToInt()
+                    if (ch != null) s.band = ch.band
+                    s.save()
+                    syncChannel()
+                    on.onTune()
+                }
+                foundRow.addView(chip, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dpi(8f) })
+            }
+            for ((i, tile) in tiles.withIndex()) tile.bars = barsOn(Channels.of(s.band)[i])
+        }
+        if (stats.text.toString() != st.stats) stats.text = st.stats
+    }
+}
