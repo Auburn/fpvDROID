@@ -105,6 +105,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
             if (g >= 0) settings.gainDb = g.coerceAtMost(Settings.GAIN_MAX)
             settings.save()
             engine.log("debug: gain ${if (g < 0) "automatic" else "$g dB"}")
+            if (::menu.isInitialized) menu.syncGain()
             applySignal()
             retune()
         }
@@ -128,8 +129,12 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
             showMenuForTrouble()
         }
         // back from the background, where decoding was stopped
-        if (link.state == UsbLink.State.RUNNING && !testRunning) {
-            if (scanOnReturn) onScan() else if (mode == "idle") tune(fresh = true)
+        if (link.state == UsbLink.State.RUNNING) {
+            if (!testRunning) {
+                if (scanOnReturn) onScan() else if (mode == "idle") tune(fresh = true)
+            }
+        } else {
+            showMenuForTrouble()   // the adapter went, or the radio died, while nobody was looking
         }
     }
 
@@ -399,7 +404,10 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         if (testRunning && mode == "idle") {
             s.optJSONObject("test")?.let { if (it.optBoolean("done")) { testResults.add(it.toString()); nextTest() } }
         }
-        if (mode == "watch" && locked) matchDisplayTo(v?.optString("std") ?: "")
+        if (mode == "watch" && locked) {
+            matchDisplayTo(v?.optString("std") ?: "")
+            noVideoFound = false   // there is a picture after all: what the scan missed no longer matters
+        }
 
         // is the phone keeping up? (dropped blocks, or a thread with no time to spare)
         val now = android.os.SystemClock.elapsedRealtime()
@@ -425,7 +433,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
             }
         }
         val base = MenuState(radioReady = !testRunning, scanning = mode == "scan", scanStep = s.optInt("scan_step"),
-            scanSteps = s.optInt("scan_steps"), found = found, stats = stats)
+            scanSteps = s.optInt("scan_steps"), found = found, scanFoundNothing = noVideoFound, stats = stats)
         return when (mode) {
             "scan" -> base.copy(tone = Tone.BUSY, headline = "Scanning", detail = "Looking for video on every channel.")
             "test" -> {
@@ -445,6 +453,8 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
                     append(" · %.0f fps".format(v?.num("fps") ?: 0.0))
                     if (s.has("snr_db")) append(" · %.0f dB".format(s.num("snr_db")))
                 })
+                noVideoFound -> base.copy(tone = Tone.BUSY, headline = where,
+                    detail = "The scan found no video. Still looking on this channel…")
                 else -> base.copy(tone = Tone.BUSY, headline = where, detail = "Looking for a picture…")
             }
             else -> base.copy(tone = Tone.IDLE, headline = "Ready",

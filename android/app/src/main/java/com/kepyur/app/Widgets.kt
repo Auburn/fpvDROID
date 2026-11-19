@@ -408,8 +408,9 @@ class Slider(
             else -> return super.performAccessibilityAction(action, arguments)
         }
         val v = to.coerceIn(min, max)
-        if (v != value) {
-            move(v)
+        if (v != value) {   // a step, done in one: not a drag in progress followed by its end
+            value = v
+            invalidate()
             onChange(v, true)
         }
         return true

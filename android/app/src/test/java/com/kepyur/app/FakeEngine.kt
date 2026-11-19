@@ -1,5 +1,6 @@
 package com.kepyur.app
 
+import android.os.SystemClock
 import android.view.Surface
 import org.json.JSONArray
 import org.json.JSONObject
@@ -63,8 +64,22 @@ class FakeEngine : Engine {
     var locked = false
     var videoStd = "NTSC"
     var dropped = 0L
+    /** Blocks lost on the USB link itself ("stream_dropped" in the status). */
+    var streamDropped = 0L
     var dspLoad = 0.3
     val pilots = ArrayList<Pilot>()
+    /**
+     * When each pilot (by frequency) was last seen, on the fake clock: as the real radio, which keeps every pilot it has
+     * ever seen and reports "age_s", the whole seconds since it last saw each. A pilot added to [pilots] by hand has
+     * age 0 (always fresh). [agePilots] makes them all older at once.
+     */
+    val seenAt = HashMap<Double, Long>()
+
+    @Synchronized
+    fun agePilots(seconds: Long) {
+        val now = SystemClock.elapsedRealtime()
+        for (p in pilots) seenAt[p.mhz] = (seenAt[p.mhz] ?: now) - seconds * 1000
+    }
     /** The stream test's result object ("test" in the status), null until a test has run. */
     var testResult: JSONObject? = null
     private var resumeHz = 0.0
@@ -89,6 +104,7 @@ class FakeEngine : Engine {
         for (f in found) {
             pilots.removeAll { abs(it.mhz - f.mhz) < 4 }
             pilots += f
+            seenAt[f.mhz] = SystemClock.elapsedRealtime()
         }
         pilots.sortByDescending { it.snr }
         var next = 0.0
@@ -216,6 +232,7 @@ class FakeEngine : Engine {
         o.put("fs", 40e6)
         o.put("banks", banks)
         o.put("dropped", dropped)
+        o.put("stream_dropped", streamDropped)
         o.put("decode_dropped", 0)
         o.put("restarts", 0)
         o.put("dsp_load", dspLoad)
@@ -239,7 +256,7 @@ class FakeEngine : Engine {
         o.put("test", testResult ?: JSONObject.NULL)
         o.put("pilots", JSONArray().apply {
             for (p in pilots) put(JSONObject().apply {
-                put("mhz", p.mhz); put("name", p.name); put("std", p.std); put("snr", p.snr); put("age_s", 0)
+                put("mhz", p.mhz); put("name", p.name); put("std", p.std); put("snr", p.snr); put("age_s", seenAt[p.mhz]?.let { (SystemClock.elapsedRealtime() - it) / 1000 } ?: 0L)
             })
         })
         return o.toString()

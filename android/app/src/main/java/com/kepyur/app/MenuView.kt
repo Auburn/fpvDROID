@@ -39,6 +39,8 @@ data class MenuState(
     val scanStep: Int = 0,
     val scanSteps: Int = 0,
     val found: List<Found> = emptyList(),
+    /** The last scan has ended and saw nothing. */
+    val scanFoundNothing: Boolean = false,
     /** A line of numbers for the Signal tab (USB speed, sample rate, CPU, drops). */
     val stats: String = "",
 )
@@ -116,6 +118,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
 
     // signal page
     private lateinit var gainRow: SettingRow
+    private lateinit var gainPicker: Segmented
     private var gainApplied = s.gainDb   // the manual gain the radio was last told
     private lateinit var gainDivider: View
     private val stats = label(ctx, "", 12.5f, Skin.TEXT_2)
@@ -528,13 +531,14 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         p.addView(SettingRow(context, "Tune beside the channel", "Keeps the picture clear of the chip's blind spot: no stripes at the left edge, no ghost outlines",
             Toggle(context, s.offsetTune) { v -> s.offsetTune = v; s.save(); on.onSignal(retune = true) }))
         p.addView(divider(context))
+        gainPicker = Segmented(context, listOf("Auto", "Manual"), if (s.gainAuto) 0 else 1) { i ->
+            s.gainAuto = i == 0
+            s.save()
+            showGainRow()
+            on.onSignal(retune = true)
+        }.sized(dpi(170f))
         p.addView(SettingRow(context, "Gain", "Automatic suits most flying. By hand for a transmitter so close that it washes the picture out",
-            Segmented(context, listOf("Auto", "Manual"), if (s.gainAuto) 0 else 1) { i ->
-                s.gainAuto = i == 0
-                s.save()
-                showGainRow()
-                on.onSignal(retune = true)
-            }.sized(dpi(170f))))
+            gainPicker))
         gainDivider = divider(context)
         p.addView(gainDivider)
         gainRow = SettingRow(context, "Manual gain", gainWords(),
@@ -557,6 +561,15 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     }
 
     private fun gainWords() = "${s.gainDb.roundToInt()} dB"
+
+    /** The gain was set from outside the menu (the debug extra): its controls follow [Settings]. */
+    fun syncGain() {
+        gainApplied = s.gainDb
+        (gainRow.control as Slider).set(s.gainDb)
+        gainRow.detailView.text = gainWords()
+        gainPicker.select(if (s.gainAuto) 0 else 1, animate = false)
+        showGainRow()
+    }
 
     private fun showGainRow() {
         val was = gainRow.visibility
@@ -603,6 +616,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         val words = when {
             st.scanning -> "${st.scanStep} of ${st.scanSteps}"
             !st.radioReady -> ""
+            st.scanFoundNothing -> "No video found on any channel"
             st.found.isEmpty() -> "Looks for video on every channel"
             else -> ""
         }
