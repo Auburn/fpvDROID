@@ -124,11 +124,13 @@ void Radio::open(int fd) {
     _rx = std::move(rx);
   }
   _ddropped = 0;
+  _started = false;
   _dsp = std::thread([this] { dsp_loop(); });
   _decoder = std::thread([this] { decode_loop(); });
   _rx->start([this](const uint8_t *b, size_t n, const wsdr::BankMeta &m) {
     on_bank(b, n, m.seq, m.gen, m.fs, m.centre_hz, m.shift_hz);
   });
+  _started = true;
 }
 
 void Radio::close() {
@@ -158,9 +160,11 @@ void Radio::close() {
     rx.reset();
     KP_LOGI("radio: closed");
   }
-  std::lock_guard<std::mutex> l(_m);
-  _open = false;
-  _mode = Mode::Idle;
+  {
+    std::lock_guard<std::mutex> l(_m);
+    _open = false;
+    _mode = Mode::Idle;
+  }
   std::lock_guard<std::mutex> q(_qm);
   _q.clear();
 }
@@ -340,22 +344,31 @@ void Radio::dsp_loop() {
   Bank b;
   _load_t0_ms = now_ms();
   while (!_stop) {
+    bool none;
     {
       std::unique_lock<std::mutex> l(_qm);
       _qcv.wait_for(l, std::chrono::milliseconds(200), [&] { return !_q.empty() || _stop; });
       if (_stop) break;  // close(): stops the receiver too, which is not a death
-      if (_q.empty()) {
-        if (_rx && !_rx->status().running) {
-          KP_LOGE("radio: receiver stopped: %s", _rx->status().error.c_str());
+      none = _q.empty();
+      if (!none) {
+        b = std::move(_q.front());
+        _q.pop_front();
+      }
+    }
+    if (none) {
+      // Outside the queue's lock: _m is never taken while holding it. And only once open() has the receiver
+      // started: this thread runs before that call, and a receiver not yet running is not one that stopped.
+      if (_started && _rx) {
+        const wsdr::RxStatus st = _rx->status();
+        if (!st.running) {
+          KP_LOGE("radio: receiver stopped: %s", st.error.c_str());
           // nothing restarts it from here: say so, so the app can reopen the adapter
           std::lock_guard<std::mutex> m(_m);
           _dead = true;
           break;
         }
-        continue;
       }
-      b = std::move(_q.front());
-      _q.pop_front();
+      continue;
     }
     const auto t0 = std::chrono::steady_clock::now();
     Mode mode;
@@ -397,6 +410,7 @@ void Radio::dsp_loop() {
         tune(hz, rate, true);
       } else if (mode == Mode::Scan) {
         _plan = scan_plan();
+        _plan_n = _plan.size();
         _step = 0;
         _cap.clear();
         _settle = -1;
@@ -892,7 +906,7 @@ std::string Radio::status_json() {
     << ",\"fallback\":" << (_fallback ? "true" : "false") << ",\"dead\":" << (_dead ? "true" : "false")
     << ",\"offset_tuning\":" << (_offset ? "true" : "false") << ",\"centre_hz\":" << num(rs.centre_hz);
   if (_mode == Mode::Watch && _snr_db >= 0) o << ",\"snr_db\":" << num(_snr_db);
-  if (_mode == Mode::Scan) o << ",\"scan_step\":" << _step << ",\"scan_steps\":" << _plan.size();
+  if (_mode == Mode::Scan) o << ",\"scan_step\":" << _step.load() << ",\"scan_steps\":" << _plan_n.load();
   o << ",\"video\":{\"locked\":" << (!_vstats.acquiring && _vstats.lock_recent > 0.5f ? "true" : "false")
     << ",\"lock\":" << num(_vstats.lock_recent) << ",\"std\":" << jstr(_vstats.std_name) << ",\"fps\":" << num(_fps)
     << ",\"acquisitions\":" << _vstats.acquisitions << ",\"losses\":" << _vstats.losses

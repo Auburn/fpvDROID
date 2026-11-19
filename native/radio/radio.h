@@ -152,6 +152,7 @@ private:
 
   std::thread _dsp;
   std::atomic<bool> _stop{false};
+  std::atomic<bool> _started{false};  // open() has the receiver started: only then can it be found stopped
 
   // decode thread: watch mode runs demod on the DSP thread and the video decoder here (two cores)
   struct DBlock {
@@ -193,7 +194,8 @@ private:
   ComboStatus _comb_status;  // under _m
   // scan
   std::vector<double> _plan;
-  size_t _step = 0;
+  // atomic: status_json() reads the scan's progress while the DSP thread moves it on (_plan_n: _plan.size())
+  std::atomic<size_t> _step{0}, _plan_n{0};
   int _settle = 0;
   uint64_t _cap_last_seq = 0;
   uint32_t _cap_gen = 0;
