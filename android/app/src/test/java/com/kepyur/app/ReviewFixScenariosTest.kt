@@ -697,6 +697,19 @@ class ReviewFixScenariosTest : AppHarness() {
         assertEquals(State.RUNNING, link.state)
     }
 
+    // ------------------------------------------------------------------------------------------ 11. no shared storage
+    @Test
+    fun theLogGoesToThePrivateFolderWhenSharedStorageIsNotThere() {
+        // Android answers null for the shared folder while its volume is not mounted (the first seconds after a
+        // boot, for one): the app used to stop on that at launch
+        val noStorage = object : android.content.ContextWrapper(app) {
+            override fun getExternalFilesDir(type: String?): java.io.File? = null
+        }
+        assertEquals(app.filesDir, noStorage.dataDir())
+        assertEquals(app.getExternalFilesDir(null), app.dataDir())
+        assertNotEquals(app.filesDir, app.dataDir())
+    }
+
     @Test
     fun oneLateUsbBlockNowAndThenIsNotThePhoneFailingToKeepUp() {
         running()

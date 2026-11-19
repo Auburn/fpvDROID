@@ -2,6 +2,7 @@ package com.kepyur.app
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.hardware.usb.UsbManager
@@ -21,6 +22,7 @@ import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
 import org.json.JSONObject
+import java.io.File
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -31,6 +33,13 @@ import kotlin.math.roundToInt
  *
  * USB stream test (for the first hardware check):  adb shell am start -n com.kepyur.app/.MainActivity --es mode usbtest
  */
+/**
+ * Where the log and the recordings go: the app's folder on shared storage (Android/data/com.kepyur.app/files,
+ * readable over USB without root), or its private folder when shared storage is not there. Android answers null
+ * then, which happens: for the first seconds after a boot, and whenever the volume is not mounted.
+ */
+internal fun Context.dataDir(): File = getExternalFilesDir(null) ?: filesDir
+
 class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     private val ui = Handler(Looper.getMainLooper())
     private val engine = Engine.get()
@@ -77,7 +86,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         settings = Settings(this)
-        engine.init(getExternalFilesDir(null)!!.absolutePath + "/kepyur.log")
+        engine.init(dataDir().absolutePath + "/kepyur.log")
         engine.log("start, ${Build.MANUFACTURER} ${Build.MODEL} Android ${Build.VERSION.RELEASE}")
         applyPicture()
         applySignal()
@@ -116,7 +125,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         if (i.hasExtra("record")) {
             val secs = i.getFloatExtra("record", 3f).toDouble()
             val name = "rec-" + java.text.SimpleDateFormat("HHmmss", java.util.Locale.US).format(java.util.Date())
-            engine.record(secs, getExternalFilesDir(null)!!.absolutePath + "/" + name)
+            engine.record(secs, dataDir().absolutePath + "/" + name)
         }
     }
 

@@ -138,8 +138,10 @@ private:
 
   // EGL sorts the configs that match by colour depth, deepest first, so the first one is 10-bit wherever the
   // driver has such a config. The picture is 8-bit, and its buffer format then follows the phone, with a 2-bit
-  // alpha the compositor may not put on an overlay. Take plain 8-bit colour with nothing else (opaque if there
-  // is such a config); only a driver that has none gets its first choice.
+  // alpha the compositor may not put on an overlay. Of the configs that are exactly 8 bits a colour, take the
+  // one with the least besides: no multisampling first (it costs the GPU on every frame), then opaque, then no
+  // depth or stencil buffer (memory only; the emulator's EGL has no config without them). Only a driver with no
+  // 8-bit config at all gets its first choice.
   static EGLConfig pick_config(EGLDisplay dpy) {
     const EGLint attr[] = {EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
                            EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_NONE};
@@ -153,21 +155,20 @@ private:
       return v;
     };
     EGLConfig best = all[0];
-    int best_rank = 2;  // 0: alpha 0, 1: alpha 8, 2: the driver's first choice
-    for (EGLint i = 0; i < n && best_rank > 0; i++) {
+    int best_cost = 1 << 30;  // of an 8-bit config; lower is better, the driver's order decides between equals
+    for (EGLint i = 0; i < n; i++) {
       const EGLConfig c = all[i];
-      if (get(c, EGL_RED_SIZE) != 8 || get(c, EGL_GREEN_SIZE) != 8 || get(c, EGL_BLUE_SIZE) != 8 ||
-          get(c, EGL_DEPTH_SIZE) != 0 || get(c, EGL_STENCIL_SIZE) != 0 || get(c, EGL_SAMPLE_BUFFERS) != 0 ||
-          get(c, EGL_SAMPLES) > 0)
-        continue;
+      if (get(c, EGL_RED_SIZE) != 8 || get(c, EGL_GREEN_SIZE) != 8 || get(c, EGL_BLUE_SIZE) != 8) continue;
       const EGLint a = get(c, EGL_ALPHA_SIZE);
-      const int rank = a == 0 ? 0 : a == 8 ? 1 : 2;
-      if (rank < best_rank) best = c, best_rank = rank;
+      const int cost = (get(c, EGL_SAMPLE_BUFFERS) != 0 || get(c, EGL_SAMPLES) > 0 ? 100 : 0) +
+                       (a == 0 ? 0 : a == 8 ? 10 : 20) + (get(c, EGL_DEPTH_SIZE) != 0 ? 2 : 0) +
+                       (get(c, EGL_STENCIL_SIZE) != 0 ? 1 : 0);
+      if (cost < best_cost) best = c, best_cost = cost;
     }
     KP_LOGI("screen: EGL config R%d G%d B%d A%d, depth %d, stencil %d, samples %d, native visual 0x%x%s",
             get(best, EGL_RED_SIZE), get(best, EGL_GREEN_SIZE), get(best, EGL_BLUE_SIZE), get(best, EGL_ALPHA_SIZE),
             get(best, EGL_DEPTH_SIZE), get(best, EGL_STENCIL_SIZE), get(best, EGL_SAMPLES),
-            get(best, EGL_NATIVE_VISUAL_ID), best_rank == 2 ? " (no plain 8-bit one: the driver's first)" : "");
+            get(best, EGL_NATIVE_VISUAL_ID), best_cost == 1 << 30 ? " (no 8-bit one: the driver's first)" : "");
     return best;
   }
 
