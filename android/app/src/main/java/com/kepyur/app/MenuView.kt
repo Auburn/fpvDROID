@@ -117,6 +117,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     private lateinit var cleanOsdRow: SettingRow
 
     // signal page
+    private lateinit var offsetRow: SettingRow
     private lateinit var gainRow: SettingRow
     private lateinit var gainPicker: Segmented
     private var gainApplied = s.gainDb   // the manual gain the radio was last told
@@ -522,14 +523,18 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
             Segmented(context, listOf("40 MS/s", "20 MS/s"), if (s.rate40) 0 else 1) { i ->
                 s.rate40 = i == 0
                 s.save()
+                offsetRow.setAvailable(s.rate40)
                 on.onSignal(retune = true)
             }.sized(dpi(184f))))
         p.addView(divider(context))
         p.addView(SettingRow(context, "Diversity", "Both of the adapter's antennas combined, so a fade on one is covered by the other",
             Toggle(context, s.diversity) { v -> s.diversity = v; s.save(); on.onSignal(retune = false) }))
         p.addView(divider(context))
-        p.addView(SettingRow(context, "Tune beside the channel", "Keeps the picture clear of the chip's blind spot: no stripes at the left edge, no ghost outlines",
-            Toggle(context, s.offsetTune) { v -> s.offsetTune = v; s.save(); on.onSignal(retune = true) }))
+        // at 20 MS/s the stream is too narrow to sit beside the channel, and the radio stays centred whatever this says
+        offsetRow = SettingRow(context, "Tune beside the channel", "Keeps the picture clear of the chip's blind spot: no stripes at the left edge, no ghost outlines. Needs sample rate 40",
+            Toggle(context, s.offsetTune) { v -> s.offsetTune = v; s.save(); on.onSignal(retune = true) })
+        offsetRow.setAvailable(s.rate40)
+        p.addView(offsetRow)
         p.addView(divider(context))
         gainPicker = Segmented(context, listOf("Auto", "Manual"), if (s.gainAuto) 0 else 1) { i ->
             s.gainAuto = i == 0

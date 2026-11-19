@@ -696,4 +696,32 @@ class ReviewFixScenariosTest : AppHarness() {
         assertNotEquals(MainActivity.OVERLOAD_ADVICE, detail)
         assertEquals(State.RUNNING, link.state)
     }
+
+    @Test
+    fun oneLateUsbBlockNowAndThenIsNotThePhoneFailingToKeepUp() {
+        running()
+        advance(6000)
+        // one block the adapter's stream gave up on, then another well apart: any phone stalls for a moment
+        fake.streamDropped = 1
+        advance(500)
+        assertTrue("it is counted: ${statsText()}", statsText().contains(" 1 dropped"))
+        assertNotEquals(MainActivity.OVERLOAD_ADVICE, detail)
+        advance(8000)
+        fake.streamDropped = 2
+        advance(500)
+        assertNotEquals(MainActivity.OVERLOAD_ADVICE, detail)
+
+        // several close together are another matter
+        advance(8000)
+        fake.streamDropped = 5
+        advance(500)
+        assertEquals(MainActivity.OVERLOAD_ADVICE, detail)
+
+        // and one block lost in the queue behind the link always is: that is the phone's own processing
+        advance(8000)
+        assertNotEquals(MainActivity.OVERLOAD_ADVICE, detail)
+        fake.dropped = 1
+        advance(500)
+        assertEquals(MainActivity.OVERLOAD_ADVICE, detail)
+    }
 }

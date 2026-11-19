@@ -222,13 +222,34 @@ class MainActivityScenariosTest : AppHarness() {
         assertTrue(savedSettings().diversity)
 
         fake.clearCalls()
+        pick(control("Sample rate") as Segmented, 0, 2)   // back to 40
+        assertChanges(call("setWatchRate", 1), auto, call("setDiversity", true), call("setOffsetTuning", true), call("watch", f2, false))
+
+        fake.clearCalls()
         click(control("Tune beside the channel"))
         assertChanges(auto, call("setDiversity", true), call("setOffsetTuning", false), call("watch", f2, false))
         assertFalse(savedSettings().offsetTune)
+    }
 
+    @Test
+    fun tuningBesideTheChannelIsOnlyOfferedAtSampleRate40() {
+        running()
+        showTab("Signal")
+        val toggle = control("Tune beside the channel")
+        val row = toggle.parent as SettingRow
+        assertTrue("offered at 40", toggle.isEnabled)
+
+        pick(control("Sample rate") as Segmented, 1, 2)   // 20 MS/s: the radio stays on the channel whatever it says
+        assertFalse("not at 20", toggle.isEnabled)
         fake.clearCalls()
-        pick(control("Sample rate") as Segmented, 0, 2)   // back to 40
-        assertChanges(call("setWatchRate", 1), auto, call("setDiversity", true), call("setOffsetTuning", false), call("watch", f2, false))
+        row.performClick()   // the row itself, which works its switch
+        toggle.performClick()
+        settle()
+        assertTrue("a dead control changes nothing: ${fake.calls}", fake.calls.none { it.name == "setOffsetTuning" })
+        assertTrue(savedSettings().offsetTune)
+
+        pick(control("Sample rate") as Segmented, 0, 2)
+        assertTrue("offered again at 40", toggle.isEnabled)
     }
 
     @Test

@@ -57,6 +57,10 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     private var noVideoFound = false       // the last scan came back empty
     private var lastDropped = 0L
     private var overloadedUntil = 0L
+    // blocks the adapter's stream gave up on (collected too late): the count at the last poll, and for each poll of
+    // the last LATE_WINDOW_MS when it was and what the count was before it (see refresh())
+    private var lastLate = 0L
+    private val lateMarks = ArrayDeque<Pair<Long, Long>>()
     private var frameRateFor = ""
     private var appliedRate = 0
     private var scanOnReturn = false       // a scan is owed: the first one, or one the background cut short
@@ -288,6 +292,8 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         applyPicture()
         applySignal()
         lastDropped = 0
+        lastLate = 0
+        lateMarks.clear()
         if (menuAuto) closeMenu()   // it only came up to say the picture was away
         when {
             testRequested -> startTest()
@@ -409,13 +415,22 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
             noVideoFound = false   // there is a picture after all: what the scan missed no longer matters
         }
 
-        // is the phone keeping up? (dropped blocks, or a thread with no time to spare)
+        // Is the phone keeping up? A block lost in the queue behind the USB link or before the decoder, or a thread
+        // with no time to spare, says no at once. A block the adapter's stream itself gave up on (collected too
+        // late) does not: any phone stalls for a moment now and then, a few times a minute. LATE_BLOCKS of them
+        // within LATE_WINDOW_MS do.
         val now = android.os.SystemClock.elapsedRealtime()
-        // blocks lost anywhere on the way: on the USB link itself, in the queue behind it, before the decoder
-        val dropped = s.optLong("stream_dropped") + s.optLong("dropped") + s.optLong("decode_dropped")
+        val late = s.optLong("stream_dropped")
+        val queued = s.optLong("dropped") + s.optLong("decode_dropped")
+        val dropped = late + queued   // lost anywhere on the way, for the figures on the Signal tab
         val load = maxOf(s.num("dsp_load"), s.num("decode_load"))
-        if (mode == "watch" && (dropped > lastDropped || load > 0.95)) overloadedUntil = now + 5000
-        lastDropped = dropped
+        if (late < lastLate) lateMarks.clear()   // the count started over
+        lateMarks.addLast(now to minOf(lastLate, late))
+        while (now - lateMarks.first().first > LATE_WINDOW_MS) lateMarks.removeFirst()
+        val lateBurst = late > lastLate && late - lateMarks.first().second >= LATE_BLOCKS
+        lastLate = late
+        if (mode == "watch" && (queued > lastDropped || load > 0.95 || lateBurst)) overloadedUntil = now + 5000
+        lastDropped = queued
         val overloaded = mode == "watch" && now < overloadedUntil
 
         val name = Channels.nearest(watchHz / 1e6, settings.band, Channels.SAME_CHANNEL_MHZ)?.name
@@ -601,6 +616,8 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     companion object {
         const val HINT_MS = 3000L
         const val BACKGROUND_CLOSE_MS = 30000L
+        const val LATE_BLOCKS = 3
+        const val LATE_WINDOW_MS = 5000L
         const val OVERLOAD_ADVICE =
             "The phone is not keeping up. Turn off Clean OSD edges, Colour comb or Diversity, or use sample rate 20."
 
