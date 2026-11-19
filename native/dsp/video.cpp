@@ -972,7 +972,8 @@ private:
         e = q;
       }
     };
-    int64_t lost = 0, luma_end = s0, chroma_end = s0;  // ..._end: the end of the chain the last patch covers
+    // ..._end: the end of the chain the last patch covers; ..._solo: the end of a chain too long for one patch
+    int64_t lost = 0, luma_end = s0, chroma_end = s0, luma_solo = s0, chroma_solo = s0;
     bool too_long = false, luma_fits = true, chroma_fits = true;
     for (int64_t i = s0; i < s1;) {
       if (!bad_ring[i & ring_mask]) {
@@ -983,19 +984,27 @@ private:
       while (j < s1 + kFwd && bad_ring[j & ring_mask]) j++;
       lost += j - i;
       // the limit is on the luma patch, as it always was; chroma's longer spread does not count against it. A
-      // chain too long for one patch: this run is patched on its own, as every run was before chains were
-      // looked for (the next run then starts a chain of its own), and the row counts as badly hit. Leaving
-      // the whole chain alone would leave the comb's taps as they are too, and the click in the line below.
+      // chain too long for one patch: every run of it is patched on its own, exactly as each was before chains
+      // were looked for (..._solo: up to where). Not left alone: the comb's taps would stay as they are too,
+      // and the click would show in the line below. Not a shorter chain from each run in turn: that looked for
+      // one again from every run (slow on a line full of marks) and patched worse than run by run. And the
+      // row does not count as badly hit for it: a few short patches are less than a whole row redrawn.
       const auto fits = [&](int64_t e) { return e - i + kBack + kFwd <= kMaxRun; };
       if (i >= luma_end) {
-        luma_end = chain(j, 1, kFwd - rise);
-        if (!fits(luma_end)) luma_end = j, too_long = true;
+        luma_end = j;
+        if (i >= luma_solo) {
+          const int64_t e = chain(j, 1, kFwd - rise);
+          (fits(e) ? luma_end : luma_solo) = e;
+        }
         luma_fits = fits(luma_end);
         if (luma_fits) ramp(luma_ring, i - kBack, luma_end + kFwd);
       }
       if (i >= chroma_end) {
-        chroma_end = chain(j, c_from, c_upto);
-        if (!fits(chroma_end)) chroma_end = j, too_long = true;
+        chroma_end = j;
+        if (i >= chroma_solo) {
+          const int64_t e = chain(j, c_from, c_upto);
+          (fits(e) ? chroma_end : chroma_solo) = e;
+        }
         chroma_fits = fits(chroma_end);
         if (chroma_fits) ramp(chroma_ring, i - kBack, chroma_end + rep_fwd_c);
       }
