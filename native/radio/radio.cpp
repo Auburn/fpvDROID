@@ -256,7 +256,7 @@ void Radio::scan(double prefer_hz) {
   _mode = Mode::Scan;
   _mode_epoch++;
   // the status says "scan" from here on: its progress with it, not what the scan before left (the DSP thread
-  // sets both again when it takes the scan up)
+  // sets both again when it takes the scan up, and moves the step on only for the scan it is working on)
   _step = 0;
   _plan_n = scan_plan().size();
 }
@@ -416,6 +416,7 @@ void Radio::dsp_loop() {
       } else if (mode == Mode::Scan) {
         _plan = scan_plan();
         _plan_n = _plan.size();
+        _at = 0;
         _step = 0;
         _cap.clear();
         _settle = -1;
@@ -731,8 +732,8 @@ void Radio::decode_loop() {
 }
 
 void Radio::handle_scan(Bank &b) {
-  if (_step >= _plan.size()) return;
-  const double req = _plan[_step];
+  if (_at >= _plan.size()) return;
+  const double req = _plan[_at];
   if (std::fabs(b.centre_hz + b.shift_hz - req) > 1e3 || b.fs != kFs) return;
   if (_settle < 0) {
     _settle = kSettleBanks;
@@ -781,9 +782,9 @@ void Radio::handle_scan(Bank &b) {
 void Radio::scan_step_done() {
   const double centre = _cap_centre;  // the samples are centred on the hardware centre, not the request
   // start the next retune now; the chip settles while this step is analysed
-  _step++;
-  if (_step < _plan.size()) {
-    tune(_plan[_step], 1);
+  _at++;
+  if (_at < _plan.size()) {
+    tune(_plan[_at], 1);
     _settle = -1;
   }
   std::vector<cf> x(_humps.empty() ? 0 : _cap.size());
@@ -806,10 +807,15 @@ void Radio::scan_step_done() {
     pl.seen_ms = now_ms();
     found.push_back(pl);
   }
-  bool done = _step >= _plan.size();
+  const bool done = _at >= _plan.size();
   double next_watch = 0;
   {
     std::lock_guard<std::mutex> l(_m);
+    // A mode call made since this bank's mode was read (from another thread, while this step was analysed)
+    // has the last word: the status shows its progress (a scan called again starts at 0), and the end of
+    // this scan does not put a watch of its own choosing over it. The next bank takes that call up.
+    const bool current = _mode_epoch == _epoch_seen;
+    if (current) _step = _at;
     for (const auto &f : found) {
       auto it = std::find_if(_pilots.begin(), _pilots.end(), [&](const Pilot &p) { return std::fabs(p.mhz - f.mhz) < 4; });
       if (it == _pilots.end()) _pilots.push_back(f);
@@ -817,7 +823,7 @@ void Radio::scan_step_done() {
       else it->seen_ms = f.seen_ms;
     }
     std::sort(_pilots.begin(), _pilots.end(), [](const Pilot &a, const Pilot &b) { return a.snr_db > b.snr_db; });
-    if (done) {
+    if (done && current) {
       // after a scan: the pilot watched before, if still there, else the strongest seen in this scan
       const int64_t scan_start = now_ms() - 60000;
       for (const auto &p : _pilots)
@@ -870,7 +876,8 @@ void Radio::handle_test(Bank &b) {
     << ",\"done\":" << (el * 1000 >= _test_end_ms ? "true" : "false") << "}";
   std::lock_guard<std::mutex> l(_m);
   _test_result = o.str();
-  if (el * 1000 >= _test_end_ms) {
+  // (not over a mode call made since this bank's mode was read: as at the end of a scan)
+  if (el * 1000 >= _test_end_ms && _mode_epoch == _epoch_seen) {
     KP_LOGI("test: result %s", _test_result.c_str());
     _mode = Mode::Idle;
     _mode_epoch++;
