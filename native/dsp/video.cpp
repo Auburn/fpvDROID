@@ -984,11 +984,15 @@ private:
       while (j < s1 + kFwd && bad_ring[j & ring_mask]) j++;
       lost += j - i;
       // the limit is on the luma patch, as it always was; chroma's longer spread does not count against it. A
-      // chain too long for one patch: every run of it is patched on its own, exactly as each was before chains
-      // were looked for (..._solo: up to where). Not left alone: the comb's taps would stay as they are too,
-      // and the click would show in the line below. Not a shorter chain from each run in turn: that looked for
-      // one again from every run (slow on a line full of marks) and patched worse than run by run. And the
-      // row does not count as badly hit for it: a few short patches are less than a whole row redrawn.
+      // chain too long for one patch: in that ring (luma or chroma; the other may still find a chain that fits
+      // among the same runs) every run of it is patched on its own, exactly as each was before chains were
+      // looked for (..._solo: up to where). Not left alone: the comb's taps would stay as they are too, and
+      // the click would show in the line below. Not a shorter chain from each run in turn: that looked for one
+      // again from every run, slow on a line full of marks. And the row does not count as badly hit for it.
+      // That is a trade, measured with marked clicks: redrawing the row from its neighbours hides a dense
+      // burst (eight clicks 8 samples apart) better than these patches do, but for three or four clicks 20
+      // to 24 apart it costs a row of detail where the short patches do less harm. Noise down to a CNR of
+      // 5 dB produced neither.
       const auto fits = [&](int64_t e) { return e - i + kBack + kFwd <= kMaxRun; };
       if (i >= luma_end) {
         luma_end = j;
