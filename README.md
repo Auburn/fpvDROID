@@ -137,7 +137,10 @@ goggles before there is anything to watch.
 
 To see how long a phone's USB link holds up, `--ez soak true` streams at 40 MS/s after every open instead of
 watching; `kepyur.log` then has each stream fault as it happens (with what wifi-sdr itself reports) and the
-adapter's USB 3 power management at every open. `--es env WSDR_URB_DEPTH=512` passes a switch to wifi-sdr.
+adapter's USB 3 power management at every open. `--es env WSDR_URB_DEPTH=512` passes a switch to wifi-sdr
+(several: comma-separated). The app's own: `KP_CONCEAL=0` shows the frames torn by a stream restart, and
+`KP_FAST_CPUS=0` lets Android put the two processing threads on any core (by default they are kept off the
+phone's slowest cores, where they fall behind).
 
 ## Desktop bench
 
