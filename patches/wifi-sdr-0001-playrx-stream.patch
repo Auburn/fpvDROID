@@ -139,18 +139,54 @@ index f107565..e5344db 100644
  
  class Receiver {
 diff --git a/src/session.cpp b/src/session.cpp
-index c876980..3954cb9 100644
+index c876980..e3ec784 100644
 --- a/src/session.cpp
 +++ b/src/session.cpp
-@@ -2,6 +2,7 @@
+@@ -2,6 +2,8 @@
  #include "session.h"
  #include "receiver.h" // model_pid
  
++#include <cstdio>
 +#include <cstdlib>
  #include <stdexcept>
  
  #include "UsbOpen.h"
-@@ -94,6 +95,17 @@ void Session::open(const OpenOpts &o) {
+@@ -9,7 +11,24 @@
+ 
+ namespace wsdr {
+ 
+-
++// kepyur: whether the link is SuperSpeed. libusb asks the kernel, and for a device opened from an fd (Android) it
++// can only do so with USBDEVFS_GET_SPEED, which older kernels lack (an LG G7 on Android 10, kernel 4.9): the speed
++// comes back unknown. Taken as USB 2, a SuperSpeed link then got 4096-byte EP0 block writes (the USB 2 size in
++// Reg), which the chip stalls: LIBUSB_ERROR_PIPE at the streamer's first block, every start. The descriptors say it
++// then: a bulk endpoint's packets are 1024 bytes only at SuperSpeed (512 at high speed), and a USB 3 device reports
++// bcdUSB 0x0300 or above only while it runs at SuperSpeed (0x0210 at high speed).
++static bool superspeed_link(libusb_device_handle *h) {
++  libusb_device *d = libusb_get_device(h);
++  const int sp = libusb_get_device_speed(d);
++  if (sp != LIBUSB_SPEED_UNKNOWN)
++    return sp >= LIBUSB_SPEED_SUPER;
++  const int mps = libusb_get_max_packet_size(d, 0x84); // the bulk-IN the streams read
++  libusb_device_descriptor dd{};
++  const bool ss = mps > 0 ? mps >= 1024 : libusb_get_device_descriptor(d, &dd) == 0 && dd.bcdUSB >= 0x0300;
++  std::fprintf(stderr, "usb: the kernel does not give the link speed; USB %d from the descriptors (bulk-IN packets %d)\n",
++               ss ? 3 : 2, mps);
++  return ss;
++}
+ 
+ static ChannelWidth_t width_of(int bw) {
+   switch (bw) {
+@@ -85,7 +104,7 @@ void Session::open(const OpenOpts &o) {
+   }
+   _s.adopt_handle(h);
+   _s.adopt_lock(lock);
+-  _ss = libusb_get_device_speed(libusb_get_device(h)) >= LIBUSB_SPEED_SUPER;
++  _ss = superspeed_link(h);
+ 
+   devourer::DeviceConfig cfg;
+   cfg.tuning.thermal_track = o.thermal_track;
+@@ -94,6 +113,17 @@ void Session::open(const OpenOpts &o) {
    // users own bulk-IN and want fixed gain. The switch (tuning.j3_runtime_thread, OpenIPC/devourer#498)
    // is required: the pinned devourer (external/devourer) has it, and a build without it must fail.
    cfg.tuning.j3_runtime_thread = false;
