@@ -113,6 +113,10 @@ class UsbLinkScenariosTest : AppHarness() {
         assertTrue("reopened after ${SystemClock.elapsedRealtime() - at} ms", SystemClock.elapsedRealtime() - at <= 600)
         assertEquals(listOf("open", "close", "open"),
             fake.radioCalls().map { it.name }.filter { it == "open" || it == "close" })
+        // the picture is held through it, asked for before the radio is closed
+        val calls = fake.radioCalls().map { it.name }
+        assertEquals(FakeEngine.Call("holdPicture", listOf(UsbLink.HOLD_PICTURE_MS)), fake.last("holdPicture"))
+        assertTrue(calls.toString(), calls.indexOf("holdPicture") < calls.indexOf("close"))
         assertEquals(State.RUNNING, link.state)
         assertEquals(List(2) { FakeEngine.Call("watch", listOf(f2, true)) }, fake.calls("watch"))
         // a gap that fixes itself: the menu stayed closed

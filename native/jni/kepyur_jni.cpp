@@ -78,11 +78,22 @@ public:
     _done.wait_for(l, std::chrono::milliseconds(1500), [&] { return _win_done >= want || _stop; });
   }
 
+  // The picture stays for up to `ms` (dimmed once it is stale, not faded to black), and clear() is ignored meanwhile:
+  // for the few seconds the adapter is opened again after its USB data path wedged. The next frame ends it.
+  void hold(int ms) {
+    {
+      std::lock_guard<std::mutex> l(_m);
+      _hold_until = Clock::now() + std::chrono::milliseconds(std::max(0, ms));
+    }
+    _cv.notify_one();
+  }
+
   // Decode thread: copy and go.
   void post(const Frame &f) {
     {
       std::lock_guard<std::mutex> l(_m);
       if (Clock::now() < _quiet_until) return;
+      _hold_until = {};
       _w = f.width;
       _h = f.height;
       _pending.assign(f.data, f.data + static_cast<size_t>(f.width) * f.height * 4);
@@ -93,10 +104,11 @@ public:
 
   // No picture any more (the radio closed, another channel was asked for): black until the next frame. The
   // decoder may still have a frame of the old picture on its way: frames are refused for a moment (no new
-  // picture can be locked that quickly).
+  // picture can be locked that quickly). Not while a picture is held (hold()).
   void clear() {
     {
       std::lock_guard<std::mutex> l(_m);
+      if (Clock::now() < _hold_until) return;
       _have = false;
       _clear = true;
       _quiet_until = Clock::now() + std::chrono::milliseconds(120);
@@ -137,6 +149,7 @@ private:
   static constexpr float kBlurSeconds = 0.26f;   // backdrop fade
   static constexpr double kStaleSeconds = 1.2;   // no frame for this long: the picture is not live any more ...
   static constexpr float kFadeSeconds = 0.5f;    // ... and fades to black over this
+  static constexpr float kHoldGain = 0.6f;       // ... or only this far while held (hold())
 
   // EGL sorts the configs that match by colour depth, deepest first, so the first one is 10-bit wherever the
   // driver has such a config. The picture is 8-bit, and its buffer format then follows the phone, with a 2-bit
@@ -239,14 +252,18 @@ private:
       bool got = false, cleared = false, animating;
       ViewOpts view;
       float blur_to;
+      float floor;  // what a stale picture fades to: black, or kHoldGain while it is held (hold())
       {
         std::unique_lock<std::mutex> l(_m);
         const auto ready = [&] { return _stop || _win_next_set || _have || _clear || _dirty; };
-        animating = blur != _blur_to || (live ? gain < 1 : gain > 0);
+        floor = Clock::now() < _hold_until ? kHoldGain : 0.f;
+        animating = blur != _blur_to || (live ? gain < 1 : gain > floor);
         if (animating) _cv.wait_for(l, std::chrono::milliseconds(8), ready);
         else if (live) _cv.wait_until(l, t_frame + std::chrono::duration<double>(kStaleSeconds), ready);
+        else if (floor > 0) _cv.wait_until(l, _hold_until, ready);  // then on to black, unless a frame came
         else _cv.wait(l, ready);
         if (_stop) break;
+        floor = Clock::now() < _hold_until ? kHoldGain : 0.f;
         if (_win_next_set) {
           ANativeWindow *nw = _win_next;
           _win_next = nullptr;
@@ -291,7 +308,8 @@ private:
       // ease the backdrop and the picture's fade toward where they should be
       const float bstep = dt / kBlurSeconds, gstep = dt / kFadeSeconds;
       blur = blur < blur_to ? std::min(blur_to, blur + bstep) : std::max(blur_to, blur - bstep);
-      gain = live ? std::min(1.f, gain + 4 * gstep) : std::max(0.f, gain - gstep);
+      if (live) gain = std::min(1.f, gain + 4 * gstep);
+      else if (gain > floor) gain = std::max(floor, gain - gstep);  // a stale picture is never brightened
       if (_surf == EGL_NO_SURFACE || !_gl_ready) {
         if (got) last.swap(px), lw = w, lh = h;
         continue;
@@ -352,6 +370,7 @@ private:
   int _w = 0, _h = 0;
   bool _have = false, _clear = false, _dirty = false, _stop = false;
   std::chrono::steady_clock::time_point _quiet_until{};
+  std::chrono::steady_clock::time_point _hold_until{};
   ViewOpts _view;
   float _blur_to = 0;
   bool _blur_snap = false;
@@ -585,6 +604,11 @@ JNIEXPORT void JNICALL Java_com_kepyur_app_Native_testCard(JNIEnv *, jclass, jbo
 
 JNIEXPORT void JNICALL Java_com_kepyur_app_Native_log(JNIEnv *env, jclass, jstring msg) {
   KP_LOGI("app: %s", jstring_of(env, msg).c_str());
+}
+
+// Keep the picture on screen (dimmed once stale) for up to `ms`, through the close and reopen of a wedged adapter.
+JNIEXPORT void JNICALL Java_com_kepyur_app_Native_holdPicture(JNIEnv *, jclass, jint ms) {
+  if (g_screen) g_screen->hold(ms);
 }
 
 // Debug: an environment switch for wifi-sdr / devourer (WSDR_URB_DEPTH and the like), read at the next open or

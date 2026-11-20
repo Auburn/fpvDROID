@@ -1,5 +1,5 @@
 diff --git a/src/receiver.cpp b/src/receiver.cpp
-index 72e29c5..e594809 100644
+index 72e29c5..a8747bf 100644
 --- a/src/receiver.cpp
 +++ b/src/receiver.cpp
 @@ -3,6 +3,7 @@
@@ -83,7 +83,7 @@ index 72e29c5..e594809 100644
      } else if (++consecutive_faults >= 5) {
        next = RxState::Error;
        why = "stream keeps failing: " + ss.error;
-@@ -333,6 +350,7 @@ void Receiver::worker() {
+@@ -333,10 +350,15 @@ void Receiver::worker() {
        _st.state = next;
        _st.error = why;
        _st.last_fault = why;
@@ -91,6 +91,15 @@ index 72e29c5..e594809 100644
      }
      if (next != RxState::Starting)
        break;
+-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
++    // kepyur: was 100 ms. A restart is a hole in the stream (in the picture) as long as this pause, the next
++    // start's drain and the bring-up of the run add up to; 10 ms brings a restart's hole from ~200 ms to ~55 ms
++    // on a host that restarts every few seconds (Pixel 8 Pro, USB 3), with no more failed starts. The
++    // 5-faults-in-a-row rule above still ends a stream that never runs.
++    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+   }
+ }
+ 
 diff --git a/src/receiver.h b/src/receiver.h
 index f107565..e5344db 100644
 --- a/src/receiver.h
@@ -160,7 +169,7 @@ index c876980..3954cb9 100644
    auto dev = driver.CreateRadio(h, ctx, lock, cfg);
    if (!dev)
 diff --git a/src/stream88xx.cpp b/src/stream88xx.cpp
-index a663615..05114db 100644
+index a663615..1922fb3 100644
 --- a/src/stream88xx.cpp
 +++ b/src/stream88xx.cpp
 @@ -7,6 +7,7 @@
@@ -225,6 +234,15 @@ index a663615..05114db 100644
  } // namespace
  
  StreamStats Stream8822b::run(const std::function<bool(const uint8_t *, const BankInfo &)> &on_bank,
+@@ -124,7 +146,7 @@ StreamStats Stream8822b::run(const std::function<bool(const uint8_t *, const Ban
+     cpu.dmem_write(kRecOff, rec, sizeof rec);
+ 
+     rd.start();
+-    rd.drain(30);
++    rd.drain(10);  // kepyur: was 30 ms; a packet ships in ~40 us (see the Receiver's pause between starts)
+     cpu.start();
+     // Now and then (~1 start in 30, issue #2) the CPU stalls at its first MAC-register access (the LA
+     // arm) until the host itself reads the MAC block; a read of 0x0003 or 0x0080 does not release it.
 @@ -156,11 +178,31 @@ StreamStats Stream8822b::run(const std::function<bool(const uint8_t *, const Ban
      start();
  

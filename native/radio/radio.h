@@ -108,6 +108,7 @@ private:
   void handle_watch(Bank &b);
   bool watch_fault(double hz);
   bool watch_drops(double hz);
+  bool no_fallback() const;
   void fall_back(double hz);
   void measure_snr(const std::vector<cf> &iq, double fs, double shift_hz);
   void record_bank(const Bank &b);
@@ -128,6 +129,9 @@ private:
   int _req_rate = 1;
   int _watch_rate = 1;
   bool _fallback = false;  // 40 MS/s kept faulting during a watch: watch at 20 MS/s until open() / set_watch_rate()
+  // The stream wedged while watching at 20 MS/s after a fallback: on this host 20 MS/s is worse than a 40 MS/s that
+  // restarts, so no more falling back while this Radio lives (it is one for the process; open() keeps it)
+  bool _no_fallback = false;
   double _gain_db = -1;
   bool _comb = false;
   bool _watch_comb = false;  // _comb as of the current watch (DSP thread only)
@@ -162,7 +166,18 @@ private:
     std::shared_ptr<FrontEnd> fe;
     std::vector<float> d;
     std::vector<uint8_t> bad;  // sparkle repair marks (empty while it is off)
+    bool gap = false;          // the stream lost samples before this block (a restart, a dropped bank)
   };
+  // Torn frames are not shown: after a gap in the stream the decoder's next kConcealFrames frames go nowhere, and
+  // the screen keeps the last whole one (KP_CONCEAL=0: shown as before). Set on the decode thread, read by _gate.
+  // At most once every kConcealEveryMs (so at most 4 frames a second hidden).
+  static constexpr int kConcealFrames = 2;
+  static constexpr int64_t kConcealEveryMs = 500;
+  int64_t _conceal_t_ms = 0;  // decode thread only
+  std::atomic<int> _conceal{0};
+  std::atomic<uint64_t> _concealed{0};
+  std::atomic<bool> _conceal_on{true};  // KP_CONCEAL, read at every watch
+  FrameSink _gate;  // what the decoders are given: _frames, minus the frames being concealed
   std::thread _decoder;
   std::mutex _dqm;
   std::condition_variable _dqcv;
@@ -181,6 +196,7 @@ private:
   // the receiver's count of banks its stream dropped mid-run, read every kDropPollMs of this watch at 40 MS/s
   std::deque<std::pair<int64_t, uint64_t>> _drop_marks;  // (ms, count), the last kFallbackWindowMs of them
   int64_t _drop_poll_ms = 0;
+  int64_t _watch_t0_ms = 0;  // when this watch began (its first kFallbackGraceMs do not count towards a fallback)
   uint64_t _watch_seq = 0;  // the last bank this watch took (with _fe_gen: does the next one follow on from it?)
   // live SNR of the watched carrier: a spectrum of kPsdSpan of IQ every kSnrEveryMs
   std::unique_ptr<Psd> _snr_psd;

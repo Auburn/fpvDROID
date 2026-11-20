@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <sstream>
 #include <stdexcept>
@@ -43,6 +44,12 @@ constexpr int64_t kFallbackWindowMs = 5000;
 // window were enough.
 constexpr int kFallbackDrops = 10;
 constexpr int64_t kDropPollMs = 200;  // how often the receiver's count is read
+// Neither counts in the first seconds of a watch. On some hosts a fresh stream starts badly for a while: a Pixel 8 Pro
+// loses the run at bank 51-55 (where the first of the 256 posted reads come round again) for one to four seconds,
+// a restart each time, before it keeps up for good. Counted, three of those used to drop the watch to 20 MS/s within
+// a second, and on that phone 20 MS/s is far worse (its USB path wedges within ~0.2 s, where 40 MS/s runs for many
+// seconds). A link that cannot carry 40 MS/s goes on restarting past the grace, and still falls back.
+constexpr int64_t kFallbackGraceMs = 10000;
 constexpr int64_t kSnrEveryMs = 500;  // live SNR while watching (~2 % of a core at 20 MS/s)
 constexpr double kSnrSpan = 8e6;      // +- span the BW20 RX filter passes flat (-3 dB at ~9.2 MHz)
 // Off-centre tuning at 40 MS/s: how far beside the pilot the hardware centre goes (Radio::offset_centre). The
@@ -66,7 +73,16 @@ std::vector<double> scan_plan() {
 }
 }  // namespace
 
-Radio::Radio(FrameSink frames) : _frames(std::move(frames)) {}
+Radio::Radio(FrameSink frames) : _frames(std::move(frames)) {
+  _gate = [this](const Frame &f) {
+    if (_conceal.load(std::memory_order_relaxed) > 0) {
+      _conceal--;
+      _concealed++;
+      return;
+    }
+    _frames(f);
+  };
+}
 
 Radio::~Radio() { close(); }
 
@@ -125,6 +141,8 @@ void Radio::open(int fd) {
     _rx = std::move(rx);
   }
   _ddropped = 0;
+  _conceal = 0;
+  _concealed = 0;
   _faults_seen = 0;
   _started = false;
   _dsp = std::thread([this] { dsp_loop(); });
@@ -374,6 +392,10 @@ void Radio::dsp_loop() {
           std::lock_guard<std::mutex> m(_m);
           _dead = true;
           _wedged = st.wedged;
+          if (st.wedged && _fallback && _mode == Mode::Watch && !_no_fallback) {
+            _no_fallback = true;
+            KP_LOGW("radio: wedged at 20 MS/s after falling back from 40: no more falling back this session");
+          }
           break;
         }
       }
@@ -408,8 +430,13 @@ void Radio::dsp_loop() {
           _watch_comb = _comb;  // a decoder rebuilt later in this watch (fallback, shift) keeps it
         }
         KP_LOGI("radio: watch %.3f MHz at %.0f MS/s", hz / 1e6, wsdr::Receiver::rate_of(rate) / 1e6);
+        {
+          const char *e = std::getenv("KP_CONCEAL");
+          _conceal_on = !(e && *e == '0');
+        }
         _watch_faults.clear();
         _drop_marks.clear();
+        _watch_t0_ms = now_ms();
         _snr_psd.reset();
         _snr_t_ms = 0;
         {
@@ -461,13 +488,14 @@ void Radio::dsp_loop() {
       _load_t0_ms = t;
       if (++_status_ticks % 5 == 0 && _mode == Mode::Watch)
         KP_LOGI("status: watch %.1f MHz, cpu demod %.0f%% decode %.0f%%, dropped stream %llu usb %llu decode %llu, "
-                "restarts %llu, %s %s lock %.2f fps %.0f, acq %llu lost %llu rephase %llu", _watch_hz / 1e6,
+                "restarts %llu, %s %s lock %.2f fps %.0f, acq %llu lost %llu rephase %llu, torn frames hidden %llu",
+                _watch_hz / 1e6,
                 _load * 100, _dload * 100, (unsigned long long)(_rx ? _rx->status().mid_drops : 0),
                 (unsigned long long)_dropped.load(), (unsigned long long)_ddropped.load(),
                 (unsigned long long)(_rx ? _rx->status().restarts : 0), _vstats.std_name,
                 _vstats.colour ? "colour" : "grey", _vstats.lock_recent, _fps,
                 (unsigned long long)_vstats.acquisitions, (unsigned long long)_vstats.losses,
-                (unsigned long long)_vstats.rephases);
+                (unsigned long long)_vstats.rephases, (unsigned long long)_concealed.load());
     }
   }
 }
@@ -482,9 +510,11 @@ void Radio::note_faults(const wsdr::RxStatus &st) {
 
 // A stream restart during a watch. At 40 MS/s, kFallbackFaults of them within kFallbackWindowMs switch the
 // watch to 20 MS/s for the rest of the session; true when it did (the bank in hand is from the old stream).
+// Not counted in the first kFallbackGraceMs of the watch, nor once 20 MS/s has wedged here (_no_fallback).
 bool Radio::watch_fault(double hz) {
-  if (_fe_fs != 40e6) return false;
+  if (_fe_fs != 40e6 || no_fallback()) return false;
   const int64_t t = now_ms();
+  if (t - _watch_t0_ms < kFallbackGraceMs) return false;
   _watch_faults.push_back(t);
   while (!_watch_faults.empty() && t - _watch_faults.front() > kFallbackWindowMs) _watch_faults.pop_front();
   if (static_cast<int>(_watch_faults.size()) < kFallbackFaults) return false;
@@ -495,12 +525,17 @@ bool Radio::watch_fault(double hz) {
 }
 
 // The same for banks the stream dropped without restarting: kFallbackDrops of them within kFallbackWindowMs of
-// a watch at 40 MS/s. The receiver counts them as they happen; that count is read every kDropPollMs.
+// a watch at 40 MS/s. The receiver counts them as they happen; that count is read every kDropPollMs. Those dropped
+// in the first kFallbackGraceMs are not counted: the window starts when the grace ends.
 bool Radio::watch_drops(double hz) {
-  if (_fe_fs != 40e6 || !_rx) return false;
+  if (_fe_fs != 40e6 || !_rx || no_fallback()) return false;
   const int64_t t = now_ms();
   if (t - _drop_poll_ms < kDropPollMs) return false;
   _drop_poll_ms = t;
+  if (t - _watch_t0_ms < kFallbackGraceMs) {
+    _drop_marks.clear();
+    return false;
+  }
   const uint64_t count = _rx->status().mid_drops;
   _drop_marks.emplace_back(t, count);
   while (t - _drop_marks.front().first > kFallbackWindowMs) _drop_marks.pop_front();
@@ -510,6 +545,11 @@ bool Radio::watch_drops(double hz) {
           static_cast<unsigned long long>(lost), (t - _drop_marks.front().first) / 1000.0);
   fall_back(hz);
   return true;
+}
+
+bool Radio::no_fallback() const {
+  std::lock_guard<std::mutex> l(_m);
+  return _no_fallback;
 }
 
 // The watch does not hold up at 40 MS/s: at 20 MS/s until open() or set_watch_rate().
@@ -559,7 +599,7 @@ void Radio::handle_watch(Bank &b) {
   if (!_fe || b.fs != _fe_fs || b.shift_hz != _fe_shift) {
     DecoderOpts o;
     o.comb = _watch_comb;
-    _fe = std::make_shared<FrontEnd>(b.fs, b.shift_hz, _frames, o);
+    _fe = std::make_shared<FrontEnd>(b.fs, b.shift_hz, _gate, o);
     _fe_fs = b.fs;
     _fe_shift = b.shift_hz;
     // a new carrier or rate: no weights or noise estimates from the last one, and the paths' time offset is
@@ -574,8 +614,9 @@ void Radio::handle_watch(Bank &b) {
   }
   if (watch_drops(req)) return;
   // After a restart, or banks lost on the way here, this bank does not follow on from the last one: the
-  // combiner must not delay path B with samples from before the hole.
-  if (b.gen != _fe_gen || b.seq != _watch_seq + 1) _combiner.cut();
+  // combiner must not delay path B with samples from before the hole, and the frames around it are torn.
+  const bool gap = b.gen != _fe_gen || b.seq != _watch_seq + 1;
+  if (gap) _combiner.cut();
   _fe_gen = b.gen;
   _watch_seq = b.seq;
   _iqb_fresh = false;
@@ -627,12 +668,16 @@ void Radio::handle_watch(Bank &b) {
   {
     std::lock_guard<std::mutex> l(_dqm);
     if (_dq.size() >= 128) {  // ~26 ms behind: drop the oldest (the decoder re-phases)
+      // Not a gap for concealment: a decoder that falls behind drops blocks many times a second (a hot phone, a
+      // weak signal), and hiding a frame for each would freeze the picture. A stream gap it carried moves on.
+      const bool carried = _dq.front().gap;
       _dpool.push_back(std::move(_dq.front().d));
       _bpool.push_back(std::move(_dq.front().bad));
       _dq.pop_front();
       _ddropped++;
+      if (carried && !_dq.empty()) _dq.front().gap = true;
     }
-    _dq.push_back(DBlock{_fe, std::move(d), std::move(bad)});
+    _dq.push_back(DBlock{_fe, std::move(d), std::move(bad), gap});
   }
   _dqcv.notify_one();
 }
@@ -718,6 +763,16 @@ void Radio::decode_loop() {
       cur = blk.fe;
       _frames_at_last = 0;
       _fps_t0_ms = now_ms();
+    }
+    // the frame this block is in, and the next while the decoder re-phases, are torn: not shown (see _gate). At
+    // most once every kConcealEveryMs: a stream restarting several times a second shows torn frames rather
+    // than a frozen one.
+    if (blk.gap && _conceal_on) {
+      const int64_t t = now_ms();
+      if (t - _conceal_t_ms >= kConcealEveryMs) {
+        _conceal = kConcealFrames;
+        _conceal_t_ms = t;
+      }
     }
     cur->decode(blk.d.data(), blk.d.size(), blk.bad.size() == blk.d.size() ? blk.bad.data() : nullptr);
     busy += std::chrono::duration<double>(std::chrono::steady_clock::now() - ta).count();

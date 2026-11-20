@@ -48,6 +48,8 @@ interface Engine {
     fun testCard(on: Boolean) {}
     /** Debug: an environment switch wifi-sdr / devourer read at the next open or stream start ("" removes it). */
     fun setDebugEnv(key: String, value: String) {}
+    /** Keep the picture on screen, dimmed once stale, for up to [ms] (through a close and reopen); the next frame ends it. */
+    fun holdPicture(ms: Int) {}
     fun log(msg: String)
 
     companion object {
@@ -83,5 +85,6 @@ object Native : Engine {
     external override fun redraw()
     external override fun testCard(on: Boolean)
     external override fun setDebugEnv(key: String, value: String)
+    external override fun holdPicture(ms: Int)
     external override fun log(msg: String)
 }

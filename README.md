@@ -35,7 +35,8 @@ a **MENU** button (bottom centre) for three seconds; Back does the same.
   on fine detail). The first three are on by default. Smooth lines and sparkle repair work on every camera;
   the other three only change an NTSC picture. None adds delay.
 - **Signal** — sample rate (40 MS/s, or 20 for a USB link that cannot carry 40; the app also falls back by
-  itself when 40 keeps restarting or losing blocks), diversity (both antennas combined: fit two; it adds
+  itself when 40 keeps restarting or losing blocks past the first 10 s of watching, and stops doing so for the
+  session once 20 has locked up on that phone, where 20 is the worse of the two), diversity (both antennas combined: fit two; it adds
   about half again to the work of one of the two processing threads), tune beside the channel (keeps the
   picture off the chip's DC point; at 40 MS/s only: at 20 the stream is too narrow and the radio stays on
   the channel), gain (automatic, or by hand for a very close transmitter), and a line of numbers (USB speed,
@@ -45,8 +46,10 @@ The status at the top left says what the adapter is doing. Nothing there needs a
 a radio that does not start, or stops delivering samples, is closed and started again by itself, on the
 channel it was on. On some phones' USB 3 ports (a Pixel 8 Pro's, for one) the chip's USB data path locks up
 every few seconds to minutes (wifi-sdr's "C2H wedge", FINDINGS §4), and only opening the adapter again brings
-it back: that is done at once, a gap of about three seconds without the menu coming up, and when it keeps
-happening the status says that another phone or adapter may hold up better. While watching it also says when the phone is not keeping up, and what to switch off: when
+it back: that is done at once, a gap of about three seconds without the menu coming up (the last picture
+stays up, dimmed, until the new one comes), and when it keeps happening the status says that another phone or
+adapter may hold up better. The shorter stream restarts that some phones make every few seconds leave a hole
+of about 55 ms; the frame torn by one is not shown (the one before it stays up), at most twice a second. While watching it also says when the phone is not keeping up, and what to switch off: when
 a block of samples is lost in the app's own queues, when a processing thread has no time to spare, or when
 the adapter's stream gives up on three blocks within about five seconds (one now and then is normal and is
 only counted, under Signal). When the picture goes away for such a reason while the menu is closed (the adapter
@@ -142,7 +145,7 @@ adapter's USB 3 power management at every open. `--es env WSDR_URB_DEPTH=512` pa
 build/desktop/kp_gen rec/r4 --mhz 5769 --label R4 --cnr 12   # a synthetic transmitter: rec/r4.cs16 + .json
 build/desktop/kp_replay rec/r4.cs16 --luma-comb --adaptive --smooth --repair   # the picture switches (--comb: colour comb)
 KP_SIM_FILE=rec/r4.cs16 build/desktop/kp_sim --scan --offset-tune --diversity   # the radio's switches, no hardware
-KP_SIM_FILE=rec/r4.cs16 KP_SIM_DROP_EVERY=700 build/desktop/kp_sim --watch 5769   # a link that loses every 700th block: falls back to 20 MS/s
+KP_SIM_FILE=rec/r4.cs16 KP_SIM_DROP_EVERY=700 build/desktop/kp_sim --watch 5769   # a link that loses every 700th block: falls back to 20 MS/s (after the 10 s grace)
 KP_SIM_FILE=rec/r4.cs16 build/desktop/kp_sim --watch 5769 --msps 20               # watch at 20 MS/s (kp_live takes --msps too)
 build/desktop/kp_render out.ppm --view 2400x1080 --aspect 16:9 --fit crop --stereo --blur 1   # what a view setting draws
 build/desktop/kp_replay ../vtx-spike/rec/demo.cs16            # lock numbers

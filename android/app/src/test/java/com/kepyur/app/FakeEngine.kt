@@ -216,6 +216,7 @@ class FakeEngine : Engine {
     @Synchronized override fun redraw() = rec("redraw")
     @Synchronized override fun testCard(on: Boolean) = rec("testCard", on)
     @Synchronized override fun log(msg: String) = rec("log", msg)
+    @Synchronized override fun holdPicture(ms: Int) = rec("holdPicture", ms)
 
     @Synchronized override fun status(): String {
         rec("status")

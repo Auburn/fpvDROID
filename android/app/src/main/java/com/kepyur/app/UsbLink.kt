@@ -385,6 +385,7 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
         val minutes = WEDGE_WINDOW_MS / 60000
         engine.log("link: the USB data path wedged ($n in $minutes min): opening the adapter again at once; " +
             status.optString("rx_error"))
+        engine.holdPicture(HOLD_PICTURE_MS)   // the last picture stays, dimmed, until the reopened radio's first frame
         giveUpAdapter()
         reopenNote = if (n >= WEDGE_ADVICE_COUNT)
             "The adapter's USB link locked up $n times in $minutes minutes: starting it again. This phone's USB 3 " +
@@ -453,5 +454,6 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
         const val MAX_SWITCH_REQUESTS = 2   // a link without USB 3 lines would otherwise bounce for ever
         const val WEDGE_WINDOW_MS = 120000L
         const val WEDGE_ADVICE_COUNT = 3    // wedges within WEDGE_WINDOW_MS before the note says what to try
+        const val HOLD_PICTURE_MS = 6000    // a reopen takes ~3 s; the picture goes black if it takes longer than this
     }
 }
