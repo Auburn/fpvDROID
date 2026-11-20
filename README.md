@@ -43,7 +43,10 @@ a **MENU** button (bottom centre) for three seconds; Back does the same.
 
 The status at the top left says what the adapter is doing. Nothing there needs attention unless it says so:
 a radio that does not start, or stops delivering samples, is closed and started again by itself, on the
-channel it was on. While watching it also says when the phone is not keeping up, and what to switch off: when
+channel it was on. On some phones' USB 3 ports (a Pixel 8 Pro's, for one) the chip's USB data path locks up
+every few seconds to minutes (wifi-sdr's "C2H wedge", FINDINGS §4), and only opening the adapter again brings
+it back: that is done at once, a gap of about three seconds without the menu coming up, and when it keeps
+happening the status says that another phone or adapter may hold up better. While watching it also says when the phone is not keeping up, and what to switch off: when
 a block of samples is lost in the app's own queues, when a processing thread has no time to spare, or when
 the adapter's stream gives up on three blocks within about five seconds (one now and then is normal and is
 only counted, under Signal). When the picture goes away for such a reason while the menu is closed (the adapter
@@ -128,6 +131,10 @@ scripts/phone.sh logs NAME  # pull kepyur.log + logcat
 Without an adapter, `adb shell am start -n com.kepyur.app/.MainActivity --ez testcard true` puts a moving test
 picture where the video would be (`false` takes it away): enough to try the view settings, or to line up
 goggles before there is anything to watch.
+
+To see how long a phone's USB link holds up, `--ez soak true` streams at 40 MS/s after every open instead of
+watching; `kepyur.log` then has each stream fault as it happens (with what wifi-sdr itself reports) and the
+adapter's USB 3 power management at every open. `--es env WSDR_URB_DEPTH=512` passes a switch to wifi-sdr.
 
 ## Desktop bench
 

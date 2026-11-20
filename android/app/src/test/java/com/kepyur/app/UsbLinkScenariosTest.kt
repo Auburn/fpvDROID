@@ -1,6 +1,7 @@
 package com.kepyur.app
 
 import android.os.SystemClock
+import android.view.View
 import com.kepyur.app.UsbLink.State
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -97,6 +98,63 @@ class UsbLinkScenariosTest : AppHarness() {
         running()
         fake.dead = true
         assertReopensAndTunesAgain(maxDetectMs = 500)
+    }
+
+    @Test
+    fun wedgedRadioIsReopenedAtOnceQuietlyAndTunedAgain() {
+        running()
+        click(pill("Close menu"))
+        advance(500)
+        assertEquals(View.GONE, menu.visibility)
+        fake.wedged = true
+        val at = SystemClock.elapsedRealtime()
+        // no wait as after a failure: closed and opened again within a status poll or two
+        advanceUntil("the reopen", 1000) { fake.count("open") == 2 }
+        assertTrue("reopened after ${SystemClock.elapsedRealtime() - at} ms", SystemClock.elapsedRealtime() - at <= 600)
+        assertEquals(listOf("open", "close", "open"),
+            fake.radioCalls().map { it.name }.filter { it == "open" || it == "close" })
+        assertEquals(State.RUNNING, link.state)
+        assertEquals(List(2) { FakeEngine.Call("watch", listOf(f2, true)) }, fake.calls("watch"))
+        // a gap that fixes itself: the menu stayed closed
+        assertEquals(View.GONE, menu.visibility)
+    }
+
+    /** The radio wedges with the next open held: one status poll later the worker sits inside that open. */
+    private fun wedgeIntoHeldOpen() {
+        fake.hold()
+        fake.wedged = true
+        looper.idleFor(Duration.ofMillis(300))   // a status poll (no settle: the worker is about to be held)
+        waitUntil("the worker inside the reopen") { fake.insideOpen == 1 }
+    }
+
+    private fun releaseUntilRunning() {
+        fake.release()
+        waitUntil("running again") { link.state == State.RUNNING }
+        settle()
+    }
+
+    @Test
+    fun wedgeWhileOpeningSaysSoAndKeepsHappeningSaysWhatToTry() {
+        running()
+        wedgeIntoHeldOpen()
+        assertEquals(State.OPENING, link.state)
+        assertEquals("The adapter's USB link locked up: starting it again.", link.message)
+        releaseUntilRunning()
+        assertEquals("", link.message)
+        // once more a few seconds later (not held), and then a third time within two minutes: the note says what to try
+        advance(5000)
+        fake.wedged = true
+        advanceUntil("the second reopen", 1000) { fake.count("open") == 3 }
+        assertEquals(State.RUNNING, link.state)
+        advance(5000)
+        wedgeIntoHeldOpen()
+        assertEquals(4, fake.count("open"))
+        assertEquals(State.OPENING, link.state)
+        assertTrue(link.message, link.message.startsWith("The adapter's USB link locked up 3 times in 2 minutes"))
+        releaseUntilRunning()
+        assertEquals("", link.message)
+        // none of it was handled as a failure (no waits, no slower retries)
+        assertEquals(0, fake.calls("log").count { (it.args[0] as String).contains("(failure ") })
     }
 
     @Test

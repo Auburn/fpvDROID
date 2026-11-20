@@ -23,6 +23,7 @@
 
 namespace wsdr {
 class Receiver;
+struct RxStatus;
 }
 
 namespace kp {
@@ -115,6 +116,7 @@ private:
   void scan_step_done();
   void unpack(const Bank &b, std::vector<cf> &out);
   void unpack_b(const Bank &b, std::vector<cf> &out);  // path B
+  void note_faults(const wsdr::RxStatus &st);  // log each stream restart the receiver has made since the last call
 
   FrameSink _frames;
   std::unique_ptr<wsdr::Receiver> _rx;
@@ -131,6 +133,7 @@ private:
   bool _watch_comb = false;  // _comb as of the current watch (DSP thread only)
   bool _offset = false;      // off-centre tuning
   bool _dead = false;        // the DSP thread exited because the receiver stopped (cleared by open())
+  bool _wedged = false;      // ... because the chip's C2H path wedged: only open() again recovers (RxStatus::wedged)
   // recording (DSP thread writes; the request is under _m)
   double _rec_req_s = 0;
   std::string _rec_req_prefix;
@@ -171,6 +174,7 @@ private:
 
   // DSP-thread state
   uint64_t _epoch_seen = ~0ull;
+  uint64_t _faults_seen = 0;  // the receiver's restart count as last logged
   std::shared_ptr<FrontEnd> _fe;
   uint32_t _fe_gen = ~0u;
   std::deque<int64_t> _watch_faults;  // ms of the stream restarts seen in this watch at 40 MS/s

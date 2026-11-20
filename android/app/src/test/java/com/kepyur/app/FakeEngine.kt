@@ -58,6 +58,8 @@ class FakeEngine : Engine {
     /** The bank counter stops (a stream that has silently stalled). */
     var freezeBanks = false
     var dead = false
+    /** The radio stopped because the USB data path wedged ("wedged" in the status, with "dead"). Cleared by [open]. */
+    var wedged = false
     /** null: "streaming" while open, else "closed". */
     var rxState: String? = null
     var rxError = ""
@@ -150,6 +152,7 @@ class FakeEngine : Engine {
                 mode = "idle"
                 banks = 0
                 dead = false
+                wedged = false
                 rxState = null
             }
             return err
@@ -239,7 +242,8 @@ class FakeEngine : Engine {
         o.put("decode_load", dspLoad)
         o.put("watch_msps", if (mode == "watch") 40 else 0)
         o.put("fallback", false)
-        o.put("dead", dead)
+        o.put("dead", dead || wedged)
+        o.put("wedged", wedged)
         o.put("offset_tuning", offset)
         o.put("centre_hz", 0)
         if (mode == "watch" && locked) o.put("snr_db", 27.0)

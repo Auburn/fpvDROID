@@ -46,6 +46,8 @@ interface Engine {
     fun redraw()
     /** Debug: a moving test picture in place of video (no adapter needed), for looking at the screen side alone. */
     fun testCard(on: Boolean) {}
+    /** Debug: an environment switch wifi-sdr / devourer read at the next open or stream start ("" removes it). */
+    fun setDebugEnv(key: String, value: String) {}
     fun log(msg: String)
 
     companion object {
@@ -80,5 +82,6 @@ object Native : Engine {
     external override fun setSurface(surface: Surface?)
     external override fun redraw()
     external override fun testCard(on: Boolean)
+    external override fun setDebugEnv(key: String, value: String)
     external override fun log(msg: String)
 }

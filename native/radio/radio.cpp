@@ -115,6 +115,7 @@ void Radio::open(int fd) {
     _req_rate = s.rate_sel;
     _fallback = false;
     _dead = false;
+    _wedged = false;
   }
   _banks = 0;
   _dropped = 0;
@@ -124,6 +125,7 @@ void Radio::open(int fd) {
     _rx = std::move(rx);
   }
   _ddropped = 0;
+  _faults_seen = 0;
   _started = false;
   _dsp = std::thread([this] { dsp_loop(); });
   _decoder = std::thread([this] { decode_loop(); });
@@ -365,11 +367,13 @@ void Radio::dsp_loop() {
       if (_started && _rx) {
         const wsdr::RxStatus st = _rx->status();
         if (_stop) break;  // close() got in between: it stopped the receiver itself
+        note_faults(st);
         if (!st.running) {
-          KP_LOGE("radio: receiver stopped: %s", st.error.c_str());
-          // nothing restarts it from here: say so, so the app can reopen the adapter
+          KP_LOGE("radio: receiver stopped%s: %s", st.wedged ? " (C2H wedged)" : "", st.error.c_str());
+          // nothing restarts it from here: say so, so the app can reopen the adapter (at once, if it wedged)
           std::lock_guard<std::mutex> m(_m);
           _dead = true;
+          _wedged = st.wedged;
           break;
         }
       }
@@ -449,6 +453,7 @@ void Radio::dsp_loop() {
     }
     _busy_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     const int64_t t = now_ms();
+    if (t - _load_t0_ms >= 1000 && _rx) note_faults(_rx->status());
     if (t - _load_t0_ms >= 1000) {
       std::lock_guard<std::mutex> l(_m);
       _load = _busy_s / ((t - _load_t0_ms) / 1000.0);
@@ -465,6 +470,14 @@ void Radio::dsp_loop() {
                 (unsigned long long)_vstats.rephases);
     }
   }
+}
+
+void Radio::note_faults(const wsdr::RxStatus &st) {
+  if (st.restarts == _faults_seen) return;
+  _faults_seen = st.restarts;
+  KP_LOGW("radio: stream fault %llu (%llu banks so far, %u repeated starts): %s",
+          static_cast<unsigned long long>(st.restarts), static_cast<unsigned long long>(st.banks), st.start_retries,
+          st.last_fault.c_str());
 }
 
 // A stream restart during a watch. At 40 MS/s, kFallbackFaults of them within kFallbackWindowMs switch the
@@ -916,6 +929,7 @@ std::string Radio::status_json() {
     << ",\"restarts\":" << rs.restarts << ",\"dsp_load\":" << num(_load) << ",\"decode_load\":" << num(_dload)
     << ",\"watch_msps\":" << (_mode == Mode::Watch ? wsdr::Receiver::rate_of(_req_rate) / 1e6 : 0)
     << ",\"fallback\":" << (_fallback ? "true" : "false") << ",\"dead\":" << (_dead ? "true" : "false")
+    << ",\"wedged\":" << (_wedged ? "true" : "false")
     << ",\"offset_tuning\":" << (_offset ? "true" : "false") << ",\"centre_hz\":" << num(rs.centre_hz);
   if (_mode == Mode::Watch && _snr_db >= 0) o << ",\"snr_db\":" << num(_snr_db);
   if (_mode == Mode::Scan) o << ",\"scan_step\":" << _step.load() << ",\"scan_steps\":" << _plan_n.load();

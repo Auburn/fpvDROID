@@ -68,6 +68,15 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
     private var askedFor: String? = null
     private var switchRequests = 0
     private var switchDeadline = 0L
+    /** Shown while the adapter is opened again because its USB data path wedged; "" otherwise. */
+    private var reopenNote = ""
+    /** When the data path wedged, over the last [WEDGE_WINDOW_MS] (elapsedRealtime). */
+    private val wedges = ArrayDeque<Long>()
+    /**
+     * The adapter is being opened again, at once, because its USB data path wedged ([reopenAfterWedge]): a gap of a
+     * few seconds that fixes itself, not trouble to open the menu for.
+     */
+    val reopeningAfterWedge get() = reopenNote.isNotEmpty()
     // the bank counter of the last status, and when it last moved (a stream that has silently stopped)
     private var lastBanks = -1L
     private var banksMovedAt = 0L
@@ -106,6 +115,8 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
         askedFor = null
         switchDeadline = 0
         failures = 0
+        reopenNote = ""
+        wedges.clear()
     }
 
     /** The user asked for another go (a tap on the status). */
@@ -178,7 +189,7 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
         val fd = c.fileDescriptor
         val gen = ++generation
         engine.log("adapter ${d.deviceName} ${"%04x:%04x".format(d.vendorId, d.productId)} fd=$fd")
-        set(State.OPENING)
+        set(State.OPENING, reopenNote)
         // bring-up cannot be interrupted from here, but pulling the plug ends it: say so if it drags on
         ui.postDelayed({
             if (gen == generation && state == State.OPENING)
@@ -200,15 +211,18 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
                 }
                 return@execute
             }
+            linkReport(c)
             holder = me   // from here on the native radio is ours to close
             val err = engine.open(fd)
             val fast = err.isEmpty() && engine.superspeed()
             ui.post {
                 if (gen != generation) return@post   // unplugged meanwhile: the close queued behind us tidies up
+                if (err.isNotEmpty() || !fast) reopenNote = ""   // trouble of another kind: said as such
                 when {
                     err.isNotEmpty() -> failLater("The radio did not start: $err")
                     !fast -> set(State.USB2)
                     else -> {
+                        reopenNote = ""
                         // failures is not forgotten yet: a radio that opens and then never streams is still failing
                         lastBanks = -1
                         banksMovedAt = SystemClock.elapsedRealtime()
@@ -219,6 +233,40 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
                     }
                 }
             }
+        }
+    }
+
+    /**
+     * For the log, on the worker before the radio opens: the USB 3 link's power management as the adapter reports it
+     * (GET_STATUS: whether the host let it start U1 / U2 itself; the BOS descriptor: its exit latencies). A phone that
+     * puts the link to sleep is one thing to rule out when the stream keeps failing.
+     */
+    private fun linkReport(c: UsbDeviceConnection) {
+        try {
+            fun status(): String {
+                val b = ByteArray(2)
+                val n = c.controlTransfer(0x80, 0 /* GET_STATUS */, 0, 0, b, 2, 500)
+                if (n != 2) return "GET_STATUS failed ($n)"
+                val s = b[0].toInt() and 0xff
+                return "U1 ${if (s and 4 != 0) "on" else "off"}, U2 ${if (s and 8 != 0) "on" else "off"}, " +
+                    "LTM ${if (s and 16 != 0) "on" else "off"} (status 0x%02x)".format(s)
+            }
+            val bos = ByteArray(64)
+            val n = c.controlTransfer(0x80, 6 /* GET_DESCRIPTOR */, 0x0f shl 8 /* BOS */, 0, bos, bos.size, 500)
+            var lat = "no BOS ($n)"
+            var i = 5
+            while (n >= 5 && i + 2 < n) {
+                val len = bos[i].toInt() and 0xff
+                if (len < 3) break
+                // SuperSpeed USB device capability: bU1DevExitLat at +7, wU2DevExitLat at +8
+                if ((bos[i + 2].toInt() and 0xff) == 3 && i + 9 < n)
+                    lat = "exit latency U1 ${bos[i + 7].toInt() and 0xff} us, U2 " +
+                        "${(bos[i + 8].toInt() and 0xff) or ((bos[i + 9].toInt() and 0xff) shl 8)} us"
+                i += len
+            }
+            engine.log("usb link: ${status()}; $lat")
+        } catch (e: Exception) {
+            engine.log("usb link: report failed: $e")
         }
     }
 
@@ -254,6 +302,7 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
      */
     private fun failLater(msg: String) {
         engine.log("link: $msg (failure ${failures + 1})")
+        reopenNote = ""
         giveUpAdapter()
         failures++
         val persistent = failures >= PERSISTENT_FAILURES
@@ -303,6 +352,10 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
             lastBanks = banks
             banksMovedAt = now
         }
+        if (status.optBoolean("wedged")) {
+            reopenAfterWedge(status)
+            return
+        }
         val rx = status.optString("rx_state")
         val why = when {
             status.optBoolean("dead") || rx == "lost" ->
@@ -315,6 +368,30 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
             }
         }
         failLater("The radio stopped: $why.")
+    }
+
+    /**
+     * The chip's USB data path has wedged (wifi-sdr's C2H wedge, which the radio reports as "wedged"): on some USB 3
+     * ports (a Pixel 8 Pro's, for one) it happens every few seconds to minutes, and only opening the adapter again
+     * brings it back. That takes about three seconds, so it is done at once: not as a failure (no wait, nothing
+     * counted towards slower retries), and quietly ([reopeningAfterWedge]). When it keeps happening, [message] says
+     * that this phone and this adapter do not get on.
+     */
+    private fun reopenAfterWedge(status: JSONObject) {
+        val now = SystemClock.elapsedRealtime()
+        wedges.addLast(now)
+        while (now - wedges.first() > WEDGE_WINDOW_MS) wedges.removeFirst()
+        val n = wedges.size
+        val minutes = WEDGE_WINDOW_MS / 60000
+        engine.log("link: the USB data path wedged ($n in $minutes min): opening the adapter again at once; " +
+            status.optString("rx_error"))
+        giveUpAdapter()
+        reopenNote = if (n >= WEDGE_ADVICE_COUNT)
+            "The adapter's USB link locked up $n times in $minutes minutes: starting it again. This phone's USB 3 " +
+                "port and this adapter do not get on; another phone or adapter may hold up better."
+        else "The adapter's USB link locked up: starting it again."
+        state = State.WAITING   // quietly: connect() says OPENING (with the note) straight away
+        connect(force = true)
     }
 
     // ---------------------------------------------------------------------------------------- broadcasts
@@ -335,6 +412,7 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
                     giveUpAdapter()
                     failures = 0
                     askedFor = null
+                    reopenNote = ""
                     if (switching) awaitSwitch() else { switchRequests = 0; set(State.NO_ADAPTER) }
                 }
                 UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
@@ -373,5 +451,7 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
         const val STALL_MS = 4000L
         const val SLOW_OPEN_MS = 25000L
         const val MAX_SWITCH_REQUESTS = 2   // a link without USB 3 lines would otherwise bounce for ever
+        const val WEDGE_WINDOW_MS = 120000L
+        const val WEDGE_ADVICE_COUNT = 3    // wedges within WEDGE_WINDOW_MS before the note says what to try
     }
 }

@@ -5,12 +5,14 @@
 #include <android/native_window.h>
 #include <android/native_window_jni.h>
 #include <jni.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <memory>
@@ -405,6 +407,36 @@ std::string jstring_of(JNIEnv *env, jstring s) {
   if (p) env->ReleaseStringUTFChars(s, p);
   return out;
 }
+
+// wifi-sdr reports what its stream does (a start that had to be repeated, a bank dropped, where the chip's CPU got
+// to) on stderr, which Android sends nowhere. Into the log with it, a line at a time.
+void forward_stderr() {
+  int p[2];
+  if (pipe(p) != 0) return;
+  if (dup2(p[1], STDERR_FILENO) < 0) {
+    close(p[0]);
+    close(p[1]);
+    return;
+  }
+  close(p[1]);
+  setvbuf(stderr, nullptr, _IOLBF, 0);
+  std::thread([fd = p[0]] {
+    std::string line;
+    char buf[512];
+    for (;;) {
+      const ssize_t n = read(fd, buf, sizeof buf);
+      if (n <= 0) return;
+      for (ssize_t i = 0; i < n; i++) {
+        if (buf[i] != '\n') {
+          line += buf[i];
+          continue;
+        }
+        if (!line.empty()) KP_LOGW("wsdr: %s", line.c_str());
+        line.clear();
+      }
+    }
+  }).detach();
+}
 }  // namespace
 
 // Native is a Kotlin object: these are its instance methods, and the second argument is that one instance
@@ -422,6 +454,7 @@ JNIEXPORT void JNICALL Java_com_kepyur_app_Native_init(JNIEnv *env, jclass, jstr
   set_log_sink(file_sink);
   static std::once_flag made;
   std::call_once(made, [] {
+    forward_stderr();
     g_screen = std::make_unique<Screen>();
     g_radio = std::make_unique<Radio>([](const Frame &f) { g_screen->post(f); });
   });
@@ -552,6 +585,16 @@ JNIEXPORT void JNICALL Java_com_kepyur_app_Native_testCard(JNIEnv *, jclass, jbo
 
 JNIEXPORT void JNICALL Java_com_kepyur_app_Native_log(JNIEnv *env, jclass, jstring msg) {
   KP_LOGI("app: %s", jstring_of(env, msg).c_str());
+}
+
+// Debug: an environment switch for wifi-sdr / devourer (WSDR_URB_DEPTH and the like), read at the next open or
+// stream start. An empty value removes it.
+JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setDebugEnv(JNIEnv *env, jclass, jstring key, jstring value) {
+  const std::string k = jstring_of(env, key), v = jstring_of(env, value);
+  if (k.empty()) return;
+  if (v.empty()) unsetenv(k.c_str());
+  else setenv(k.c_str(), v.c_str(), 1);
+  KP_LOGI("debug: env %s=%s", k.c_str(), v.c_str());
 }
 
 }  // extern "C"

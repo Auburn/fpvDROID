@@ -1,5 +1,5 @@
 diff --git a/src/receiver.cpp b/src/receiver.cpp
-index 72e29c5..7265e8f 100644
+index 72e29c5..e594809 100644
 --- a/src/receiver.cpp
 +++ b/src/receiver.cpp
 @@ -3,6 +3,7 @@
@@ -71,8 +71,28 @@ index 72e29c5..7265e8f 100644
        meta.seq = seq++;
        {
          std::lock_guard<std::mutex> l(_m);
+@@ -323,6 +335,11 @@ void Receiver::worker() {
+     if (!_s->reg().alive()) {
+       next = RxState::Lost;
+       why = "adapter lost: " + ss.error;
++    } else if (ss.wedged) {
++      // kepyur: no restart brings a wedged C2H engine back (stream88xx.cpp, c2h_wedged): stop now, and say why, so
++      // that the owner opens the adapter again instead of waiting out five more failed starts
++      next = RxState::Error;
++      why = "stream wedged, open the adapter again: " + ss.error;
+     } else if (++consecutive_faults >= 5) {
+       next = RxState::Error;
+       why = "stream keeps failing: " + ss.error;
+@@ -333,6 +350,7 @@ void Receiver::worker() {
+       _st.state = next;
+       _st.error = why;
+       _st.last_fault = why;
++      _st.wedged = ss.wedged;
+     }
+     if (next != RxState::Starting)
+       break;
 diff --git a/src/receiver.h b/src/receiver.h
-index f107565..9135833 100644
+index f107565..e5344db 100644
 --- a/src/receiver.h
 +++ b/src/receiver.h
 @@ -47,6 +47,9 @@ inline uint16_t model_pid(uint16_t vid, uint16_t pid) {
@@ -95,7 +115,7 @@ index f107565..9135833 100644
    uint32_t gen = 0;      // stream run (changes on every restart: reset DSP state when it does)
    uint32_t cfg = 0;      // settings generation (changes only when the caller changed settings)
    double fs = 0;         // sample rate
-@@ -102,6 +106,10 @@ struct RxStatus {
+@@ -102,6 +106,13 @@ struct RxStatus {
    bool settling = false; // a settings change is waiting to be applied (the run above is about to end)
    bool gapped = false;   // the current run is gapped (BankMeta::gapped)
    unsigned start_retries = 0; // stream starts repeated because the first packet never came (issue #2)
@@ -103,6 +123,9 @@ index f107565..9135833 100644
 +  // first few of a run / late or overrun mid-run (the run goes on; before, each of these ended it and showed in
 +  // restarts). Since open().
 +  uint64_t start_late_skips = 0, mid_drops = 0;
++  // kepyur: the worker ended (state Error) because the 8822B's C2H engine wedged (stream88xx.cpp, c2h_wedged).
++  // Nothing short of opening the adapter again recovers it; until open(), this stays set.
++  bool wedged = false;
  };
  
  class Receiver {
@@ -137,10 +160,18 @@ index c876980..3954cb9 100644
    auto dev = driver.CreateRadio(h, ctx, lock, cfg);
    if (!dev)
 diff --git a/src/stream88xx.cpp b/src/stream88xx.cpp
-index a663615..9a7ef5e 100644
+index a663615..05114db 100644
 --- a/src/stream88xx.cpp
 +++ b/src/stream88xx.cpp
-@@ -27,6 +27,7 @@ constexpr uint32_t kBankC2h[2] = {0x16000u, 0x06000u}; // TXFF 0x20000 / 0x30000
+@@ -7,6 +7,7 @@
+ #include <cstring>
+ #include <optional>
+ #include <stdexcept>
++#include <thread>
+ 
+ #include "bulkin88xx.h"
+ #include "c2h88xx.h"
+@@ -27,6 +28,7 @@ constexpr uint32_t kBankC2h[2] = {0x16000u, 0x06000u}; // TXFF 0x20000 / 0x30000
  constexpr uint8_t kSentinel[8] = {0xE1, 0xF1, 0x47, 0x5E, 0xA5, 0xA5, 0xA5, 0xA5}; // stream8822b.S
  
  constexpr unsigned kStartRetries = 2;
@@ -148,7 +179,53 @@ index a663615..9a7ef5e 100644
  
  size_t chunk_off(int k) { return Stream8822b::kPrefix + static_cast<size_t>(k) * Stream8822b::kChunk; }
  
-@@ -156,11 +157,31 @@ StreamStats Stream8822b::run(const std::function<bool(const uint8_t *, const Ban
+@@ -53,21 +55,41 @@ uint8_t fill(int bank, size_t i) { // synthetic pattern
+ }
+ 
+ // Where the CPU program got to, for a missed first packet: its DMEM state block (magic, seq, state,
+-// t_arm), the chip clock, the C2H trigger and the LA engine.
++// t_arm), the chip clock, the C2H trigger and the LA engine. kepyur: and the RX DMA registers the C2H wedge
++// is known by (notes/c2h-wedge-handoff.md: r288 BIT7 overflow, r280 / r10c / r284 / r290 as left).
+ std::string chip_state(Reg &r, Cpu8822b &cpu) {
+   try {
+     const uint32_t now = r.r32(0x0568);
+     uint32_t s[5];
+     cpu.dmem_read(kStateOff, s, sizeof s);
+-    char b[160];
+-    std::snprintf(b, sizeof b, "; magic %08x seq %u state %u t_arm %u now %u r294 %08x r7c0 %08x", s[0], s[1],
+-                  s[2], s[4], now, r.r32(0x0294), r.r32(0x07C0));
++    char b[320];
++    std::snprintf(b, sizeof b,
++                  "; magic %08x seq %u state %u t_arm %u now %u r294 %08x r7c0 %08x r288 %08x r284 %08x r280 %08x "
++                  "r10c %08x r290 %08x",
++                  s[0], s[1], s[2], s[4], now, r.r32(0x0294), r.r32(0x07C0), r.r32(0x0288), r.r32(0x0284),
++                  r.r32(0x0280), r.r32(0x010C), r.r32(0x0290));
+     return b;
+   } catch (const std::exception &e) {
+     return std::string("; state unreadable: ") + e.what();
+   }
+ }
+ 
++// kepyur: the C2H engine has wedged (FINDINGS §4, notes/c2h-wedge-handoff.md, signature (a)): no packet has come
++// for a whole timeout, yet the request last written to 0x294 is still pending (BIT16). A working engine takes a
++// request in ~40 us; this one never will. A new start, an endpoint clear_halt and the register pokes tried so far
++// do not bring it back; only a fresh bring-up (Session::open) does. It depends on the USB 3 host: never on most,
++// every few seconds on one AMD xHCI controller, every few seconds to minutes on a Pixel 8 Pro. Read twice, apart.
++bool c2h_wedged(Reg &r) {
++  try {
++    if (!(r.r32(0x0294) & 0x10000u))
++      return false;
++    std::this_thread::sleep_for(std::chrono::milliseconds(2));
++    return (r.r32(0x0294) & 0x10000u) != 0;
++  } catch (...) {
++    return false; // the chip does not answer: not this (an unplug, which the Receiver reports as Lost)
++  }
++}
++
+ } // namespace
+ 
+ StreamStats Stream8822b::run(const std::function<bool(const uint8_t *, const BankInfo &)> &on_bank,
+@@ -156,11 +178,31 @@ StreamStats Stream8822b::run(const std::function<bool(const uint8_t *, const Ban
      start();
  
      const double budget5 = static_cast<double>(period5) - guard5;
@@ -180,7 +257,21 @@ index a663615..9a7ef5e 100644
        BankInfo bi;
        bi.seq = seq;
        bi.bank = b;
-@@ -200,12 +221,30 @@ StreamStats Stream8822b::run(const std::function<bool(const uint8_t *, const Ban
+@@ -174,6 +216,13 @@ StreamStats Stream8822b::run(const std::function<bool(const uint8_t *, const Ban
+             stopped = true;
+             break;
+           }
++          // kepyur: a wedged C2H engine is not worth another start (see c2h_wedged): say so at once, and the
++          // Receiver gives up on the run so that its owner can open the adapter afresh
++          if (c2h_wedged(r)) {
++            st.wedged = true;
++            throw std::runtime_error("C2H wedged (bank " + std::to_string(seq) + " part " + std::to_string(part) +
++                                     ")" + chip_state(r, cpu));
++          }
+           const std::string why = first ? chip_state(r, cpu) : ""; // mid-stream the chip may not answer
+           if (retry) {
+             std::fprintf(stderr, "stream: no first packet in %u ms, starting again%s\n", first_ms, why.c_str());
+@@ -200,12 +249,30 @@ StreamStats Stream8822b::run(const std::function<bool(const uint8_t *, const Ban
            rd.release();
            continue;
          }
@@ -214,7 +305,7 @@ index a663615..9a7ef5e 100644
          if (!trailer) {
            std::memcpy(bank.data() + chunk_off(part), d.data + 24, kChunk);
          } else {
-@@ -217,15 +256,35 @@ StreamStats Stream8822b::run(const std::function<bool(const uint8_t *, const Ban
+@@ -217,15 +284,35 @@ StreamStats Stream8822b::run(const std::function<bool(const uint8_t *, const Ban
            bi.late_us = static_cast<int32_t>(stamp[2] - stamp[1]) / 5.0;
            bi.ship_us = static_cast<int32_t>(stamp[3] - stamp[2]) / 5.0;
            bi.end_us = static_cast<int32_t>(stamp[3] - stamp[1]) / 5.0;
@@ -254,7 +345,7 @@ index a663615..9a7ef5e 100644
        // sentinel in the last sample. In live data the ADC must have overwritten all of them.
        uint8_t *tail = bank.data() + kBankBytes - 8;
 diff --git a/src/stream88xx.h b/src/stream88xx.h
-index 69c6cb3..884e585 100644
+index 69c6cb3..7ce2fd0 100644
 --- a/src/stream88xx.h
 +++ b/src/stream88xx.h
 @@ -33,6 +33,10 @@ struct StreamCfg {
@@ -268,7 +359,7 @@ index 69c6cb3..884e585 100644
  };
  
  struct BankInfo {
-@@ -51,6 +55,8 @@ struct StreamStats {
+@@ -51,9 +55,12 @@ struct StreamStats {
    unsigned stale = 0;
    unsigned pattern_bad = 0;
    unsigned start_retries = 0; // starts repeated because the first packet never came (issue #2)
@@ -277,6 +368,10 @@ index 69c6cb3..884e585 100644
    double late_max_us = 0, ship_max_us = 0, end_max_us = 0;
    double wall_s = 0;
    std::string error;       // empty unless the stream stopped on a fault
++  bool wedged = false;     // kepyur: the fault was the C2H wedge: only opening the adapter again recovers it
+ };
+ 
+ class Stream8822b {
 diff --git a/src/usbmode.cpp b/src/usbmode.cpp
 index 4c09dbb..6994181 100644
 --- a/src/usbmode.cpp

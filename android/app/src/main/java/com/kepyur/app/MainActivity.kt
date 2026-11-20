@@ -107,10 +107,23 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         if (intent.action == UsbManager.ACTION_USB_DEVICE_ATTACHED) link.onAttachedIntent()
     }
 
-    /** adb shell am start -n com.kepyur.app/.MainActivity [--es mode usbtest] [--ef gain 30] [--ef record 3] [--ez testcard true] */
+    /**
+     * adb shell am start -n com.kepyur.app/.MainActivity [--es mode usbtest] [--ef gain 30] [--ef record 3] [--ez testcard true]
+     * USB debugging: [--es env WSDR_URB_DEPTH=64,OTHER=1] (wifi-sdr / devourer switches, read at the next open or stream
+     * start; KEY= removes one), [--ez soak true] (a 40 MS/s stream test after every open instead of watching: how long
+     * the link holds up, open after open).
+     */
     private fun handleIntent(i: Intent?) {
         i ?: return
         if (i.hasExtra("testcard")) engine.testCard(i.getBooleanExtra("testcard", false))
+        i.getStringExtra("env")?.split(',')?.forEach { kv ->
+            val k = kv.substringBefore('=').trim()
+            if (k.isNotEmpty()) engine.setDebugEnv(k, kv.substringAfter('=', "").trim())
+        }
+        if (i.hasExtra("soak")) {
+            soak = i.getBooleanExtra("soak", false)
+            engine.log("debug: soak $soak")
+        }
         if (i.getStringExtra("mode") == "usbtest") {
             testRequested = true
             if (::link.isInitialized && link.state == UsbLink.State.RUNNING) startTest()
@@ -287,8 +300,9 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
             mode = ""
             testRunning = false
             // the picture has just gone, with nothing on screen to say why: the menu does (and steps aside
-            // again by itself once the radio is back, see onRadioUp)
-            if (wasRunning && foreground) showMenuForTrouble()
+            // again by itself once the radio is back, see onRadioUp). Not for the few seconds of a reopen after the
+            // USB data path wedged: on some phones that comes every minute or so, and fixes itself.
+            if (wasRunning && foreground && !link.reopeningAfterWedge) showMenuForTrouble()
         }
         wasRunning = running
         refresh()
@@ -309,7 +323,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         lateMarks.clear()
         if (menuAuto) closeMenu()   // it only came up to say the picture was away
         when {
-            testRequested -> startTest()
+            testRequested || soak -> startTest()
             !foreground -> {   // it came up with nobody watching: wait, and on return tune, or scan if this is the first run
                 engine.idle()
                 mode = "idle"
@@ -326,8 +340,12 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     private fun startTest() {
         testRequested = false
         testPlan.clear(); testResults.clear()
-        testPlan.add(1 to 60.0)   // 40 MS/s for 60 s
-        testPlan.add(2 to 60.0)   // 20 MS/s for 60 s
+        if (soak) {
+            testPlan.add(1 to SOAK_S)   // 40 MS/s until it fails (the next open starts another)
+        } else {
+            testPlan.add(1 to 60.0)   // 40 MS/s for 60 s
+            testPlan.add(2 to 60.0)   // 20 MS/s for 60 s
+        }
         nextTest()
     }
 
@@ -648,5 +666,8 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
 
         /** The activity whose SurfaceView the native screen is drawing on, by its token (main thread only). */
         private var surfaceOwner: Any? = null
+        /** Debug ("soak" extra): after every open, a 40 MS/s stream test of [SOAK_S] instead of a watch or scan. */
+        private var soak = false
+        const val SOAK_S = 600.0
     }
 }
