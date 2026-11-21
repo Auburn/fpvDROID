@@ -51,7 +51,9 @@ if(KEPYUR_RADIO)
   if(ANDROID)
     target_link_libraries(devourer PUBLIC usb-1.0-static)
   endif()
-  add_library(kepyur_radio STATIC radio/radio.cpp radio/combine.cpp)
+  # web/CMakeLists.txt lists the same sources
+  set(KEPYUR_RADIO_SOURCES radio/radio.cpp radio/combine.cpp radio/thread_placement.cpp)
+  add_library(kepyur_radio STATIC ${KEPYUR_RADIO_SOURCES})
   target_include_directories(kepyur_radio PUBLIC radio)
   target_link_libraries(kepyur_radio PUBLIC kepyur_dsp wsdrcore)
   target_compile_options(kepyur_radio PRIVATE -O2 -Wall -Wextra)
@@ -77,7 +79,7 @@ if(NOT ANDROID)
     # kp_live with a simulated receiver that plays a recording back as a tunable adapter (KP_SIM_FILE):
     # the scan -> pick -> watch flow end to end without hardware. sim_receiver.o supplies every
     # wsdr::Receiver symbol, so the archive's receiver.o is never pulled in.
-    add_executable(kp_sim tools/kp_live.cpp radio/radio.cpp radio/combine.cpp tools/sim_receiver.cpp)
+    add_executable(kp_sim tools/kp_live.cpp ${KEPYUR_RADIO_SOURCES} tools/sim_receiver.cpp)
     target_include_directories(kp_sim PRIVATE radio)
     target_link_libraries(kp_sim PRIVATE kepyur_dsp wsdrcore Threads::Threads)
     target_compile_options(kp_sim PRIVATE -O2 -Wall)

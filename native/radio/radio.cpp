@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -14,10 +13,7 @@
 #include "receiver.h"
 #include "spectrum.h"
 #include "stream88xx.h"
-
-#include <sched.h>
-#include <sys/resource.h>
-#include <unistd.h>
+#include "thread_placement.h"
 
 namespace kp {
 
@@ -58,70 +54,6 @@ constexpr double kSnrSpan = 8e6;      // +- span the BW20 RX filter passes flat 
 // Off-centre tuning at 40 MS/s: how far beside the pilot the hardware centre goes (Radio::offset_centre). The
 // video swings about +-2.5 MHz around its carrier; this keeps that clear of the DC point and inside the flat band.
 constexpr double kOffsetAim40 = 6e6;
-
-// Raise this thread's priority (the USB stream thread must never miss a chip deadline; the DSP thread
-// must keep up). Best effort: logs what the OS allowed.
-void boost_thread(const char *what) {
-  const int tid = static_cast<int>(gettid());
-  const int rc = setpriority(PRIO_PROCESS, tid, -10);
-  KP_LOGI("radio: %s thread %d nice -10: %s", what, tid, rc == 0 ? "ok" : "refused");
-}
-
-// The cores a processing thread is kept on: all but the slowest kind, on a chip with faster ones (each core's
-// cpu_capacity, else its top clock), so long as at least two are left. Empty: no such split, or none readable.
-std::vector<int> fast_cores() {
-  const auto read = [](int c, const char *leaf) {
-    char path[96];
-    std::snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/%s", c, leaf);
-    long v = -1;
-    if (FILE *f = std::fopen(path, "r")) {
-      if (std::fscanf(f, "%ld", &v) != 1) v = -1;
-      std::fclose(f);
-    }
-    return v;
-  };
-  const int n = static_cast<int>(sysconf(_SC_NPROCESSORS_CONF));
-  std::vector<long> cap(std::max(n, 0));
-  for (const char *leaf : {"cpu_capacity", "cpufreq/cpuinfo_max_freq"}) {
-    bool all = n > 0;
-    for (int c = 0; c < n && all; c++) all = (cap[c] = read(c, leaf)) > 0;
-    if (all) break;
-    cap.assign(cap.size(), -1);
-  }
-  if (cap.empty() || cap[0] <= 0) return {};
-  const long slowest = *std::min_element(cap.begin(), cap.end());
-  std::vector<int> out;
-  for (int c = 0; c < n; c++)
-    if (cap[c] > slowest) out.push_back(c);
-  if (out.size() < 2) out.clear();
-  return out;
-}
-
-// Keep this processing thread off the slowest cores (fast_cores). Left to itself, Android now and then runs a
-// thread that is busy half the time on a little core (a Pixel 8 Pro's Cortex-A510s, about a third the speed of
-// its A715s): the decode thread was there 7 % of its time, falling behind each time, and its queue overflowed in
-// bursts with the thread at half load. KP_FAST_CPUS=0 (the "env" debug extra): left to the OS, as before.
-void keep_off_slow_cores(const char *what) {
-#if defined(__linux__)
-  if (const char *e = std::getenv("KP_FAST_CPUS"); e && *e == '0') {
-    KP_LOGI("radio: %s thread left to the OS (KP_FAST_CPUS=0)", what);
-    return;
-  }
-  static const std::vector<int> cores = fast_cores();
-  if (cores.empty()) return;
-  cpu_set_t set;
-  CPU_ZERO(&set);
-  std::string list;
-  for (int c : cores) {
-    CPU_SET(c, &set);
-    list += (list.empty() ? "" : ",") + std::to_string(c);
-  }
-  const int rc = sched_setaffinity(0, sizeof set, &set);
-  KP_LOGI("radio: %s thread on cores %s: %s", what, list.c_str(), rc == 0 ? "ok" : std::strerror(errno));
-#else
-  (void)what;
-#endif
-}
 
 std::vector<double> scan_plan() {
   std::vector<double> p;
