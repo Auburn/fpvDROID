@@ -170,22 +170,22 @@ JNIEXPORT jboolean JNICALL Java_com_kepyur_app_Native_superspeed(JNIEnv *, jclas
 }
 
 JNIEXPORT void JNICALL Java_com_kepyur_app_Native_scan(JNIEnv *, jclass, jdouble prefer_hz) {
-  if (g_radio && g_radio->is_open()) g_radio->scan(prefer_hz);
+  if (g_radio) g_radio->scan(prefer_hz);
   if (g_screen) g_screen->clear();
 }
 
 // fresh: another channel (the old picture goes at once), not the same one again after a settings change
 JNIEXPORT void JNICALL Java_com_kepyur_app_Native_watch(JNIEnv *, jclass, jdouble hz, jboolean fresh) {
-  if (g_radio && g_radio->is_open()) g_radio->watch(hz);
+  if (g_radio) g_radio->watch(hz);
   if (fresh && g_screen) g_screen->clear();
 }
 
 JNIEXPORT void JNICALL Java_com_kepyur_app_Native_idle(JNIEnv *, jclass) {
-  if (g_radio && g_radio->is_open()) g_radio->idle();
+  if (g_radio) g_radio->idle();
 }
 
 JNIEXPORT void JNICALL Java_com_kepyur_app_Native_streamTest(JNIEnv *, jclass, jint rate_sel, jdouble seconds) {
-  if (g_radio && g_radio->is_open()) g_radio->stream_test(rate_sel, seconds);
+  if (g_radio) g_radio->stream_test(rate_sel, seconds);
 }
 
 JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setWatchRate(JNIEnv *, jclass, jint rate_sel) {
