@@ -30,25 +30,6 @@ constexpr double kCapture = 0.09;    // s of IQ per scan step (60 ms acquisition
 constexpr double kPsdSpan = 0.012;   // s of it for the spectrum
 constexpr int kSettleBanks = 40;     // ~8 ms after a retune (chip AGC)
 constexpr int kCapRestarts = 8;      // times a scan step's capture starts over after a gap; then gaps stay in
-// A watch at 40 MS/s that restarts this often falls back to 20 MS/s (same picture: the BW20 RX filter is
-// +-10 MHz either way). A link that cannot carry 40 MS/s restarts every 0.2-0.3 s (Chrome's WebUSB: ~14k
-// transfers/s against the 24.4k needed); a healthy one runs minutes without one.
-constexpr int kFallbackFaults = 3;
-constexpr int64_t kFallbackWindowMs = 5000;
-// So does one whose stream keeps dropping single banks without restarting (collected late or overrun: wifi-sdr
-// RxStatus::mid_drops). At 40 MS/s a bank is 205 us, ~4900 of them a second, and each one lost takes 3 lines out
-// of the picture. A host that stalls now and then loses one to three a minute (Play RX's figure for Windows), at
-// most four at one go (a fifth close behind ends the run): left alone. kFallbackDrops in the window is two a
-// second kept up; before single banks could be dropped each of them was a restart, and three of those in the
-// window were enough.
-constexpr int kFallbackDrops = 10;
-constexpr int64_t kDropPollMs = 200;  // how often the receiver's count is read
-// Neither counts in the first seconds of a watch. On some hosts a fresh stream starts badly for a while: a Pixel 8 Pro
-// loses the run at bank 51-55 (where the first of the 256 posted reads come round again) for one to four seconds,
-// a restart each time, before it keeps up for good. Counted, three of those used to drop the watch to 20 MS/s within
-// a second, and on that phone 20 MS/s is far worse (its USB path wedges within ~0.2 s, where 40 MS/s runs for many
-// seconds). A link that cannot carry 40 MS/s goes on restarting past the grace, and still falls back.
-constexpr int64_t kFallbackGraceMs = 10000;
 constexpr int64_t kSnrEveryMs = 500;  // live SNR while watching (~2 % of a core at 20 MS/s)
 constexpr double kSnrSpan = 8e6;      // +- span the BW20 RX filter passes flat (-3 dB at ~9.2 MHz)
 // Off-centre tuning at 40 MS/s: how far beside the pilot the hardware centre goes (Radio::offset_centre). The
@@ -64,16 +45,7 @@ std::vector<double> scan_plan() {
 }
 }  // namespace
 
-Radio::Radio(FrameSink frames) : _frames(std::move(frames)) {
-  _gate = [this](const Frame &f) {
-    if (_conceal.load(std::memory_order_relaxed) > 0) {
-      _conceal--;
-      _concealed++;
-      return;
-    }
-    _frames(f);
-  };
-}
+Radio::Radio(FrameSink frames) : _gate(std::move(frames)) {}
 
 Radio::~Radio() { close(); }
 
@@ -120,7 +92,7 @@ void Radio::open(int fd) {
     _mode_epoch++;
     _req_hz = s.freq;
     _req_rate = s.rate_sel;
-    _fallback = false;
+    _fb.clear();
     _dead = false;
     _wedged = false;
   }
@@ -131,9 +103,8 @@ void Radio::open(int fd) {
     std::lock_guard<std::mutex> l(_rxm);
     _rx = std::move(rx);
   }
-  _ddropped = 0;
-  _conceal = 0;
-  _concealed = 0;
+  _decq.reset_dropped();
+  _gate.reset();
   _faults_seen = 0;
   _started = false;
   _dsp = std::thread([this] { dsp_loop(); });
@@ -149,12 +120,9 @@ void Radio::close() {
   _qcv.notify_all();
   if (_rx) _rx->stop();
   if (_dsp.joinable()) _dsp.join();
-  _dqcv.notify_all();
+  _decq.wake();
   if (_decoder.joinable()) _decoder.join();
-  {
-    std::lock_guard<std::mutex> l(_dqm);
-    _dq.clear();
-  }
+  _decq.clear();
   _fe.reset();
   // a recording cut short by the close: what was written stays (no .json: kp_replay then needs --fs)
   if (_rec) std::fclose(_rec), _rec = nullptr;
@@ -259,7 +227,7 @@ void Radio::tune(double hz, int rate_sel, bool watching) {
 }
 
 // The four mode calls do nothing on a radio that is not open, and that is decided under the lock open() and
-// close() set _open under: a call that races a close can no longer leave the closed radio in its mode.
+// close() set _open under: a call that races a close cannot leave the closed radio in its mode.
 void Radio::scan(double prefer_hz) {
   std::lock_guard<std::mutex> l(_m);
   if (!_open) return;
@@ -299,7 +267,7 @@ void Radio::idle() {
 void Radio::set_watch_rate(int rate_sel) {
   std::lock_guard<std::mutex> l(_m);
   _watch_rate = rate_sel;
-  _fallback = false;
+  _fb.clear();
 }
 
 void Radio::set_gain(double db) {
@@ -330,28 +298,28 @@ std::vector<Pilot> Radio::pilots() {
   return _pilots;
 }
 
-void Radio::unpack(const Bank &b, std::vector<cf> &out) {
+// One path's samples out of a bank's 64-bit words. Path A: I [11:0], Q [23:12] (la_i / la_q); path B the same
+// 24 bits up: I [35:24], Q [47:36] (kDmaBothPaths8822b).
+void Radio::unpack(const Bank &b, Path path, std::vector<cf> &out) {
+  const int shift = path == kPathB ? 24 : 0;
   const size_t ns = b.data.size() / 8;
   out.resize(ns);
   const uint8_t *p = b.data.data();
   for (size_t i = 0; i < ns; i++) {
     uint64_t w;
     std::memcpy(&w, p + 8 * i, 8);
+    w >>= shift;
     out[i] = cf(static_cast<float>(wsdr::la_i(w)), static_cast<float>(wsdr::la_q(w)));
   }
 }
 
-void Radio::unpack_b(const Bank &b, std::vector<cf> &out) {
-  const size_t ns = b.data.size() / 8;
-  out.resize(ns);
-  const uint8_t *p = b.data.data();
-  for (size_t i = 0; i < ns; i++) {
-    uint64_t w;
-    std::memcpy(&w, p + 8 * i, 8);
-    // path B: I [35:24], Q [47:36] (kDmaBothPaths8822b), sign-extended like la_i / la_q
-    out[i] = cf(static_cast<float>(wsdr::la_i(w >> 24)), static_cast<float>(wsdr::la_q(w >> 24)));
+// Path B of the bank in hand, unpacked the first time something asks for it (combining, a recording).
+const std::vector<cf> &Radio::path_b(const Bank &b) {
+  if (!_iqb_fresh) {
+    unpack(b, kPathB, _iqb);
+    _iqb_fresh = true;
   }
-  _iqb_fresh = true;
+  return _iqb;
 }
 
 void Radio::dsp_loop() {
@@ -384,10 +352,7 @@ void Radio::dsp_loop() {
           std::lock_guard<std::mutex> m(_m);
           _dead = true;
           _wedged = st.wedged;
-          if (st.wedged && _fallback && _mode == Mode::Watch && !_no_fallback) {
-            _no_fallback = true;
-            KP_LOGW("radio: wedged at 20 MS/s after falling back from 40: no more falling back this session");
-          }
+          if (st.wedged) _fb.receiver_wedged(_mode == Mode::Watch);
           break;
         }
       }
@@ -407,57 +372,11 @@ void Radio::dsp_loop() {
       // a mode change: set the radio up for it (a new watch builds a new decoder)
       _fe.reset();
       _fe_gen = ~0u;
-      if (mode == Mode::Watch) {
-        double hz;
-        {
-          std::lock_guard<std::mutex> l(_m);
-          hz = _watch_hz;
-        }
-        // Watch at 40 MS/s with the chip's AGC, or 20 MS/s after a fallback (watch_fault). Both on a 40 MHz
-        // channel: at 20 MHz width the OFDM CCA/AGC froze the LA in 120-sample runs (wifi-sdr RxSettings::wide).
-        int rate;
-        {
-          std::lock_guard<std::mutex> l(_m);
-          rate = _fallback && _watch_rate == 1 ? 2 : _watch_rate;
-          _watch_comb = _comb;  // a decoder rebuilt later in this watch (fallback, shift) keeps it
-        }
-        KP_LOGI("radio: watch %.3f MHz at %.0f MS/s", hz / 1e6, wsdr::Receiver::rate_of(rate) / 1e6);
-        {
-          const char *e = std::getenv("KP_CONCEAL");
-          _conceal_on = !(e && *e == '0');
-        }
-        _watch_faults.clear();
-        _drop_marks.clear();
-        _watch_t0_ms = now_ms();
-        _snr_psd.reset();
-        _snr_t_ms = 0;
-        {
-          std::lock_guard<std::mutex> l(_m);
-          _snr_db = -1;
-        }
-        tune(hz, rate, true);
-      } else if (mode == Mode::Scan) {
-        _plan = scan_plan();
-        _plan_n = _plan.size();
-        _at = 0;
-        _step = 0;
-        _cap.clear();
-        _settle = -1;
-        KP_LOGI("radio: scan, %zu steps", _plan.size());
-        tune(_plan[0], 1);
-      } else if (mode == Mode::Test) {
-        int rate;
-        {
-          std::lock_guard<std::mutex> l(_m);
-          rate = _req_rate;
-          _test_result.clear();
-        }
-        _test_banks = _test_gaps = 0;
-        _test_last_seq = 0;
-        _test_t0_ms = 0;
-        _test_fs = wsdr::Receiver::rate_of(rate);
-        KP_LOGI("radio: stream test at %.1f MS/s", _test_fs / 1e6);
-        tune(5769e6, rate);
+      switch (mode) {
+      case Mode::Watch: begin_watch(); break;
+      case Mode::Scan: begin_scan(); break;
+      case Mode::Test: begin_test(); break;
+      case Mode::Idle: break;
       }
     }
     switch (mode) {
@@ -483,13 +402,64 @@ void Radio::dsp_loop() {
                 "restarts %llu, %s %s lock %.2f fps %.0f, acq %llu lost %llu rephase %llu, torn frames hidden %llu",
                 _watch_hz / 1e6,
                 _load * 100, _dload * 100, (unsigned long long)(_rx ? _rx->status().mid_drops : 0),
-                (unsigned long long)_dropped.load(), (unsigned long long)_ddropped.load(),
+                (unsigned long long)_dropped.load(), (unsigned long long)_decq.dropped(),
                 (unsigned long long)(_rx ? _rx->status().restarts : 0), _vstats.std_name,
                 _vstats.colour ? "colour" : "grey", _vstats.lock_recent, _fps,
                 (unsigned long long)_vstats.acquisitions, (unsigned long long)_vstats.losses,
-                (unsigned long long)_vstats.rephases, (unsigned long long)_concealed.load());
+                (unsigned long long)_vstats.rephases, (unsigned long long)_gate.hidden());
     }
   }
+}
+
+// The three ways into a mode, on the DSP thread, with the first bank after the mode call.
+
+void Radio::begin_watch() {
+  double hz;
+  int rate;
+  {
+    std::lock_guard<std::mutex> l(_m);
+    hz = _watch_hz;
+    // 40 MS/s with the chip's AGC, or 20 MS/s after a fallback. Both on a 40 MHz channel: at 20 MHz width the
+    // OFDM CCA/AGC froze the LA in 120-sample runs (wifi-sdr RxSettings::wide).
+    rate = _fb.rate_for(_watch_rate);
+    _watch_comb = _comb;  // a decoder rebuilt later in this watch (fallback, shift) keeps it
+    _snr_db = -1;
+  }
+  KP_LOGI("radio: watch %.3f MHz at %.0f MS/s", hz / 1e6, wsdr::Receiver::rate_of(rate) / 1e6);
+  {
+    const char *e = std::getenv("KP_CONCEAL");  // read at every watch
+    _gate.set_enabled(!(e && *e == '0'));
+  }
+  _fb.watch_started(now_ms());
+  _snr_psd.reset();
+  _snr_t_ms = 0;
+  tune(hz, rate, true);
+}
+
+void Radio::begin_scan() {
+  _plan = scan_plan();
+  _plan_n = _plan.size();
+  _at = 0;
+  _step = 0;
+  _cap.clear();
+  _settle = -1;
+  KP_LOGI("radio: scan, %zu steps", _plan.size());
+  tune(_plan[0], 1);
+}
+
+void Radio::begin_test() {
+  int rate;
+  {
+    std::lock_guard<std::mutex> l(_m);
+    rate = _req_rate;
+    _test_result.clear();
+  }
+  _test_banks = _test_gaps = 0;
+  _test_last_seq = 0;
+  _test_t0_ms = 0;
+  _test_fs = wsdr::Receiver::rate_of(rate);
+  KP_LOGI("radio: stream test at %.1f MS/s", _test_fs / 1e6);
+  tune(5769e6, rate);
 }
 
 void Radio::note_faults(const wsdr::RxStatus &st) {
@@ -500,58 +470,35 @@ void Radio::note_faults(const wsdr::RxStatus &st) {
           st.last_fault.c_str());
 }
 
-// A stream restart during a watch. At 40 MS/s, kFallbackFaults of them within kFallbackWindowMs switch the
-// watch to 20 MS/s for the rest of the session; true when it did (the bank in hand is from the old stream).
-// Not counted in the first kFallbackGraceMs of the watch, nor once 20 MS/s has wedged here (_no_fallback).
-bool Radio::watch_fault(double hz) {
-  if (_fe_fs != 40e6 || no_fallback()) return false;
-  const int64_t t = now_ms();
-  if (t - _watch_t0_ms < kFallbackGraceMs) return false;
-  _watch_faults.push_back(t);
-  while (!_watch_faults.empty() && t - _watch_faults.front() > kFallbackWindowMs) _watch_faults.pop_front();
-  if (static_cast<int>(_watch_faults.size()) < kFallbackFaults) return false;
-  KP_LOGW("radio: 40 MS/s restarted %zu times in %lld s: watching at 20 MS/s from now on", _watch_faults.size(),
-          static_cast<long long>(kFallbackWindowMs / 1000));
-  fall_back(hz);
-  return true;
+// A new carrier or rate: a new decoder. No weights or noise estimates from the last one either, and the paths'
+// time offset is measured again (it is a number of samples, so it depends on the rate).
+void Radio::new_front_end(const Bank &b) {
+  DecoderOpts o;
+  o.comb = _watch_comb;
+  _fe = std::make_shared<FrontEnd>(b.fs, b.shift_hz, _gate.sink(), o);
+  _fe_fs = b.fs;
+  _fe_shift = b.shift_hz;
+  _combiner.reset(b.fs);
 }
 
-// The same for banks the stream dropped without restarting: kFallbackDrops of them within kFallbackWindowMs of
-// a watch at 40 MS/s. The receiver counts them as they happen; that count is read every kDropPollMs. Those dropped
-// in the first kFallbackGraceMs are not counted: the window starts when the grace ends.
-bool Radio::watch_drops(double hz) {
-  if (_fe_fs != 40e6 || !_rx || no_fallback()) return false;
-  const int64_t t = now_ms();
-  if (t - _drop_poll_ms < kDropPollMs) return false;
-  _drop_poll_ms = t;
-  if (t - _watch_t0_ms < kFallbackGraceMs) {
-    _drop_marks.clear();
-    return false;
-  }
-  const uint64_t count = _rx->status().mid_drops;
-  _drop_marks.emplace_back(t, count);
-  while (t - _drop_marks.front().first > kFallbackWindowMs) _drop_marks.pop_front();
-  const uint64_t lost = count - _drop_marks.front().second;
-  if (lost < static_cast<uint64_t>(kFallbackDrops)) return false;
-  KP_LOGW("radio: 40 MS/s lost %llu blocks in %.1f s: watching at 20 MS/s from now on",
-          static_cast<unsigned long long>(lost), (t - _drop_marks.front().first) / 1000.0);
-  fall_back(hz);
-  return true;
+// The stream restarted with the same settings: the decoder is kept, and re-phases onto the new stream within a
+// few lines. True: one restart too many for 40 MS/s (FallbackPolicy).
+bool Radio::stream_restarted(const Bank &b, int64_t t_ms) {
+  std::string why;
+  if (_rx) why = _rx->status().last_fault;
+  KP_LOGW("radio: stream restarted (gen %u, %s), decoder keeps going", b.gen, why.c_str());
+  return _fb.stream_restarted(t_ms, b.fs);
 }
 
-bool Radio::no_fallback() const {
-  std::lock_guard<std::mutex> l(_m);
-  return _no_fallback;
+// The receiver's count of the blocks its stream gave up on, read every FallbackPolicy::kPollMs. True: too many
+// lately for 40 MS/s.
+bool Radio::blocks_lost(const Bank &b, int64_t t_ms) {
+  return _rx && _fb.poll_due(t_ms) && _fb.blocks_lost(t_ms, b.fs, _rx->status().mid_drops);
 }
 
-// The watch does not hold up at 40 MS/s: at 20 MS/s until open() or set_watch_rate().
+// The watch does not hold up at 40 MS/s (FallbackPolicy has it at 20 MS/s from here on): the bank in hand is
+// from the old stream, the next ones come at 20 MS/s to a new decoder.
 void Radio::fall_back(double hz) {
-  {
-    std::lock_guard<std::mutex> l(_m);
-    _fallback = true;
-  }
-  _watch_faults.clear();
-  _drop_marks.clear();
   _fe.reset();
   _fe_gen = ~0u;
   tune(hz, 2, true);  // as a watch: off-centre tuning picks the centre for 20 MS/s
@@ -568,8 +515,7 @@ void Radio::measure_snr(const std::vector<cf> &iq, double fs, double shift_hz) {
   _snr_have += iq.size();
   if (_snr_have < _snr_need) return;
   // Around the carrier (at shift_hz: beside the centre with off-centre tuning), within the band the RX filter
-  // passes: the BW40 DFIR's +-kEdge at 40 MS/s, the BW20 set's +-kSnrSpan at 20 MS/s. With the carrier at the
-  // centre this is the +-kSnrSpan it always was.
+  // passes: the BW40 DFIR's +-kEdge at 40 MS/s, the BW20 set's +-kSnrSpan at 20 MS/s.
   const double pass = fs >= 40e6 ? kEdge : std::min(kSnrSpan, 0.4 * fs);
   const float snr = carrier_snr(_snr_psd->db(), fs, std::min(kSnrSpan, 0.4 * fs), shift_hz, pass);
   _snr_psd.reset();
@@ -578,6 +524,7 @@ void Radio::measure_snr(const std::vector<cf> &iq, double fs, double shift_hz) {
   _snr_db = snr;
 }
 
+// One bank of a watch: both antennas' samples in, a block of discriminator output on to the decode thread.
 void Radio::handle_watch(Bank &b) {
   double req;
   int req_rate;
@@ -588,34 +535,31 @@ void Radio::handle_watch(Bank &b) {
   }
   // ignore banks from before the retune (or the rate change of a fallback)
   if (std::fabs(b.centre_hz + b.shift_hz - req) > 1e3 || b.fs != wsdr::Receiver::rate_of(req_rate)) return;
-  if (!_fe || b.fs != _fe_fs || b.shift_hz != _fe_shift) {
-    DecoderOpts o;
-    o.comb = _watch_comb;
-    _fe = std::make_shared<FrontEnd>(b.fs, b.shift_hz, _gate, o);
-    _fe_fs = b.fs;
-    _fe_shift = b.shift_hz;
-    // a new carrier or rate: no weights or noise estimates from the last one, and the paths' time offset is
-    // measured again (it is a number of samples, so it depends on the rate)
-    _combiner.reset(b.fs);
-  } else if (b.gen != _fe_gen) {
-    // same settings: keep the decoder; it re-phases onto the restarted stream within a few lines
-    std::string why;
-    if (_rx) why = _rx->status().last_fault;
-    KP_LOGW("radio: stream restarted (gen %u, %s), decoder keeps going", b.gen, why.c_str());
-    if (watch_fault(req)) return;
+  const int64_t t = now_ms();
+  // the decoder for this stream, and whether 40 MS/s is holding up (a restart now, blocks lost lately)
+  bool give_up = false;
+  if (!_fe || b.fs != _fe_fs || b.shift_hz != _fe_shift) new_front_end(b);
+  else if (b.gen != _fe_gen) give_up = stream_restarted(b, t);
+  if (give_up || blocks_lost(b, t)) {
+    fall_back(req);
+    return;
   }
-  if (watch_drops(req)) return;
-  // After a restart, or banks lost on the way here, this bank does not follow on from the last one: the
-  // combiner must not delay path B with samples from before the hole, and the frames around it are torn.
+  // After a restart, or banks lost on the way here, this bank does not follow on from the last one.
   const bool gap = b.gen != _fe_gen || b.seq != _watch_seq + 1;
-  if (gap) _combiner.cut();
   _fe_gen = b.gen;
   _watch_seq = b.seq;
+  unpack(b, kPathA, _iq);
   _iqb_fresh = false;
-  unpack(b, _iq);
   measure_snr(_iq, b.fs, b.shift_hz);  // path A, as without combining
-  record_bank(b);  // both paths as they came in
-  // two-antenna video: B lined up and turned into step with A and both weighted by their SNR, in place of A
+  record_bank(b);                      // both paths as they came in
+  combine_antennas(b, gap, t);
+  demod_for_decoder(gap);
+}
+
+// Two-antenna video: path B lined up and turned into step with A and both weighted by their SNR, in place of A
+// in _iq. gap: the combiner must not delay path B with samples from before the hole.
+void Radio::combine_antennas(const Bank &b, bool gap, int64_t t_ms) {
+  if (gap) _combiner.cut();
   const bool comb = _combine.load();
   if (comb != _combine_was) {
     _combiner.reset(b.fs);
@@ -623,117 +567,105 @@ void Radio::handle_watch(Bank &b) {
     KP_LOGI("radio: video antennas %s", comb ? "A + B combined" : "A only");
   }
   if (comb) {
-    if (!_iqb_fresh) unpack_b(b, _iqb);
-    _combiner.process(_iq.data(), _iqb.data(), std::min(_iq.size(), _iqb.size()));
+    const std::vector<cf> &iqb = path_b(b);
+    _combiner.process(_iq.data(), iqb.data(), std::min(_iq.size(), iqb.size()));
   }
-  const int64_t tnow = now_ms();
-  if (tnow - _comb_t0_ms >= 1000) {
-    _comb_t0_ms = tnow;
-    ComboStatus cs;
-    cs.on = comb;
-    if (comb) cs.s = _combiner.take_stats();
-    bool news;
-    {
-      std::lock_guard<std::mutex> l(_m);
-      news = comb && (!_comb_status.on || cs.s.lag != _comb_status.s.lag ||
-                      cs.s.lag_measured != _comb_status.s.lag_measured);
-      _comb_status = cs;
-    }
-    if (news)
-      KP_LOGI("radio: antenna B taken as %d samples (%.0f ns) ahead of A, %s", cs.s.lag, cs.s.lag / b.fs * 1e9,
-              cs.s.lag_measured ? "measured" : "the adapter's usual figure");
-  }
-  std::vector<float> d;
-  std::vector<uint8_t> bad;
+  if (t_ms - _comb_t0_ms < 1000) return;
+  // once a second: the combiner's numbers for the status
+  _comb_t0_ms = t_ms;
+  ComboStatus cs;
+  cs.on = comb;
+  if (comb) cs.s = _combiner.take_stats();
+  bool news;
   {
-    std::lock_guard<std::mutex> l(_dqm);
-    if (!_dpool.empty()) {
-      d = std::move(_dpool.back());
-      _dpool.pop_back();
-    }
-    if (!_bpool.empty()) {
-      bad = std::move(_bpool.back());
-      _bpool.pop_back();
-    }
+    std::lock_guard<std::mutex> l(_m);
+    news = comb && (!_comb_status.on || cs.s.lag != _comb_status.s.lag ||
+                    cs.s.lag_measured != _comb_status.s.lag_measured);
+    _comb_status = cs;
   }
-  _fe->demod(_iq.data(), _iq.size(), d, &bad);  // bad stays empty while sparkle repair is off
-  {
-    std::lock_guard<std::mutex> l(_dqm);
-    if (_dq.size() >= 128) {  // ~26 ms behind: drop the oldest (the decoder re-phases)
-      // Not a gap for concealment: a decoder that falls behind drops blocks many times a second (a hot phone, a
-      // weak signal), and hiding a frame for each would freeze the picture. A stream gap it carried moves on.
-      const bool carried = _dq.front().gap;
-      _dpool.push_back(std::move(_dq.front().d));
-      _bpool.push_back(std::move(_dq.front().bad));
-      _dq.pop_front();
-      _ddropped++;
-      if (carried && !_dq.empty()) _dq.front().gap = true;
-    }
-    _dq.push_back(DBlock{_fe, std::move(d), std::move(bad), gap});
-  }
-  _dqcv.notify_one();
+  if (news)
+    KP_LOGI("radio: antenna B taken as %d samples (%.0f ns) ahead of A, %s", cs.s.lag, cs.s.lag / b.fs * 1e9,
+            cs.s.lag_measured ? "measured" : "the adapter's usual figure");
 }
 
-// Debug recording: the watched IQ as int16 (LA value << 4, as wsdr_probe writes .cs16), whole banks.
-void Radio::record_bank(const Bank &b) {
-  if (!_rec) {
-    double secs;
-    std::string prefix;
-    {
-      std::lock_guard<std::mutex> l(_m);
-      secs = _rec_req_s;
-      prefix = _rec_req_prefix;
-      _rec_req_s = 0;
-    }
-    if (secs <= 0) return;
-    _rec = std::fopen((prefix + ".cs16").c_str(), "wb");
-    if (!_rec) {
-      KP_LOGE("record: cannot open %s.cs16", prefix.c_str());
-      return;
-    }
-    std::setvbuf(_rec, nullptr, _IOFBF, 1 << 20);
-    _rec_b = std::fopen((prefix + "_b.cs16").c_str(), "wb");
-    if (_rec_b) std::setvbuf(_rec_b, nullptr, _IOFBF, 1 << 20);
-    _rec_prefix = prefix;
-    _rec_left = static_cast<uint64_t>(secs * b.fs);
-    _rec_samples = 0;
-    _rec_fs = b.fs;
-    _rec_centre = b.centre_hz;
-    _rec_shift = b.shift_hz;
-    KP_LOGI("record: %.1f s at %.0f MS/s -> %s.cs16", secs, b.fs / 1e6, prefix.c_str());
-  }
-  const size_t ns = std::min<uint64_t>(_iq.size(), _rec_left);
-  std::vector<int16_t> buf(2 * ns);
+// _iq through the discriminator (this thread's half of the work), then on to the decode thread. gap: the frames
+// around this block are torn (FrameGate).
+void Radio::demod_for_decoder(bool gap) {
+  DemodBlock blk = _decq.blank();
+  blk.fe = _fe;
+  blk.gap = gap;
+  _fe->demod(_iq.data(), _iq.size(), blk.d, &blk.bad);  // bad stays empty while sparkle repair is off
+  _decq.push(std::move(blk));
+}
+
+namespace {
+// Samples as int16 pairs, LA value << 4, as wsdr_probe writes .cs16.
+void write_cs16(FILE *f, const std::vector<cf> &iq, size_t ns, std::vector<int16_t> &buf) {
+  buf.resize(2 * ns);
   for (size_t i = 0; i < ns; i++) {
-    buf[2 * i] = static_cast<int16_t>(static_cast<int>(_iq[i].real()) * 16);
-    buf[2 * i + 1] = static_cast<int16_t>(static_cast<int>(_iq[i].imag()) * 16);
+    buf[2 * i] = static_cast<int16_t>(static_cast<int>(iq[i].real()) * 16);
+    buf[2 * i + 1] = static_cast<int16_t>(static_cast<int>(iq[i].imag()) * 16);
   }
-  std::fwrite(buf.data(), 4, ns, _rec);
-  if (_rec_b) {
-    if (!_iqb_fresh) unpack_b(b, _iqb);
-    for (size_t i = 0; i < ns; i++) {
-      buf[2 * i] = static_cast<int16_t>(static_cast<int>(_iqb[i].real()) * 16);
-      buf[2 * i + 1] = static_cast<int16_t>(static_cast<int>(_iqb[i].imag()) * 16);
-    }
-    std::fwrite(buf.data(), 4, ns, _rec_b);
-  }
+  std::fwrite(buf.data(), 4, ns, f);
+}
+}  // namespace
+
+// Debug recording: the watched IQ of both paths, whole banks, until the seconds asked for are written.
+void Radio::record_bank(const Bank &b) {
+  if (!_rec && !begin_recording(b)) return;
+  const size_t ns = std::min<uint64_t>(_iq.size(), _rec_left);
+  std::vector<int16_t> buf;
+  write_cs16(_rec, _iq, ns, buf);
+  if (_rec_b) write_cs16(_rec_b, path_b(b), ns, buf);
   _rec_left -= ns;
   _rec_samples += ns;
-  if (_rec_left == 0) {
-    std::fclose(_rec);
-    _rec = nullptr;
-    const bool with_b = _rec_b != nullptr;
-    if (_rec_b) std::fclose(_rec_b), _rec_b = nullptr;
-    const std::string base = _rec_prefix.substr(_rec_prefix.find_last_of("/\\") + 1);
-    if (FILE *j = std::fopen((_rec_prefix + ".json").c_str(), "w")) {
-      std::fprintf(j, "{\"format\":\"cs16\",\"sample_rate\":%.0f,\"centre_hz\":%.0f,\"shift_hz\":%.0f,\"samples\":%llu,"
-                   "\"source\":\"kepyur watch\"", _rec_fs, _rec_centre, _rec_shift, (unsigned long long)_rec_samples);
-      if (with_b) std::fprintf(j, ",\"path_b\":\"%s_b.cs16\"", base.c_str());  // beside it, as Play RX writes it
-      std::fprintf(j, "}\n");
-      std::fclose(j);
-    }
-    KP_LOGI("record: done, %llu samples -> %s.cs16", (unsigned long long)_rec_samples, _rec_prefix.c_str());
+  if (_rec_left == 0) end_recording();
+}
+
+// Takes up a request made with record(). False: there is none, or its file cannot be written.
+bool Radio::begin_recording(const Bank &b) {
+  double secs;
+  std::string prefix;
+  {
+    std::lock_guard<std::mutex> l(_m);
+    secs = _rec_req_s;
+    prefix = _rec_req_prefix;
+    _rec_req_s = 0;
   }
+  if (secs <= 0) return false;
+  _rec = std::fopen((prefix + ".cs16").c_str(), "wb");
+  if (!_rec) {
+    KP_LOGE("record: cannot open %s.cs16", prefix.c_str());
+    return false;
+  }
+  std::setvbuf(_rec, nullptr, _IOFBF, 1 << 20);
+  _rec_b = std::fopen((prefix + "_b.cs16").c_str(), "wb");
+  if (_rec_b) std::setvbuf(_rec_b, nullptr, _IOFBF, 1 << 20);
+  _rec_prefix = prefix;
+  _rec_left = static_cast<uint64_t>(secs * b.fs);
+  _rec_samples = 0;
+  _rec_fs = b.fs;
+  _rec_centre = b.centre_hz;
+  _rec_shift = b.shift_hz;
+  KP_LOGI("record: %.1f s at %.0f MS/s -> %s.cs16", secs, b.fs / 1e6, prefix.c_str());
+  return true;
+}
+
+// Closes the files and writes PREFIX.json beside them (what kp_replay reads the rate and centre from).
+void Radio::end_recording() {
+  std::fclose(_rec);
+  _rec = nullptr;
+  const bool with_b = _rec_b != nullptr;
+  if (_rec_b) std::fclose(_rec_b), _rec_b = nullptr;
+  const std::string base = _rec_prefix.substr(_rec_prefix.find_last_of("/\\") + 1);
+  if (FILE *j = std::fopen((_rec_prefix + ".json").c_str(), "w")) {
+    std::fprintf(j, "{\"format\":\"cs16\",\"sample_rate\":%.0f,\"centre_hz\":%.0f,\"shift_hz\":%.0f,\"samples\":%llu,"
+                 "\"source\":\"kepyur watch\"", _rec_fs, _rec_centre, _rec_shift, (unsigned long long)_rec_samples);
+    if (with_b) std::fprintf(j, ",\"path_b\":\"%s_b.cs16\"", base.c_str());  // beside it, as Play RX writes it
+    std::fprintf(j, "}\n");
+    std::fclose(j);
+  }
+  KP_LOGI("record: done, %llu samples -> %s.cs16", (unsigned long long)_rec_samples, _rec_prefix.c_str());
 }
 
 void Radio::decode_loop() {
@@ -743,37 +675,18 @@ void Radio::decode_loop() {
   double busy = 0;
   int64_t t0 = now_ms();
   while (!_stop) {
-    DBlock blk;
-    {
-      std::unique_lock<std::mutex> l(_dqm);
-      _dqcv.wait_for(l, std::chrono::milliseconds(200), [&] { return !_dq.empty() || _stop; });
-      if (_dq.empty()) continue;
-      blk = std::move(_dq.front());
-      _dq.pop_front();
-    }
+    DemodBlock blk;
+    if (!_decq.pop(blk, 200, _stop)) continue;
     const auto ta = std::chrono::steady_clock::now();
     if (blk.fe != cur) {
       cur = blk.fe;
       _frames_at_last = 0;
       _fps_t0_ms = now_ms();
     }
-    // the frame this block is in, and the next while the decoder re-phases, are torn: not shown (see _gate). At
-    // most once every kConcealEveryMs: a stream restarting several times a second shows torn frames rather
-    // than a frozen one.
-    if (blk.gap && _conceal_on) {
-      const int64_t t = now_ms();
-      if (t - _conceal_t_ms >= kConcealEveryMs) {
-        _conceal = kConcealFrames;
-        _conceal_t_ms = t;
-      }
-    }
+    if (blk.gap) _gate.gap(now_ms());  // the frame this block is in is torn, and the next while the decoder re-phases
     cur->decode(blk.d.data(), blk.d.size(), blk.bad.size() == blk.d.size() ? blk.bad.data() : nullptr);
     busy += std::chrono::duration<double>(std::chrono::steady_clock::now() - ta).count();
-    {
-      std::lock_guard<std::mutex> l(_dqm);
-      if (_dpool.size() < 256) _dpool.push_back(std::move(blk.d));
-      if (_bpool.size() < 256) _bpool.push_back(std::move(blk.bad));
-    }
+    _decq.recycle(std::move(blk));
     const int64_t t = now_ms();
     if (t - _fps_t0_ms >= 1000) {
       const auto s = cur->stats();
@@ -967,16 +880,17 @@ std::string Radio::status_json() {
   // worse, take it for a string (Android's does).
   const auto num = [](double v) { return std::isfinite(v) ? v : 0.0; };
   static const char *modes[] = {"idle", "scan", "watch", "test"};
+  const int64_t t = now_ms();
   o << "{\"open\":" << (_open ? "true" : "false") << ",\"usb3\":" << (_superspeed ? "true" : "false")
     << ",\"chip\":" << jstr(_chip) << ",\"rx_state\":" << jstr(wsdr::rx_state_name(rs.state))
     << ",\"rx_error\":" << jstr(rs.error) << ",\"last_fault\":" << jstr(rs.last_fault)
     << ",\"mode\":\"" << modes[static_cast<int>(_mode)] << "\",\"freq_hz\":" << num(_req_hz)
     << ",\"watch_hz\":" << num(_watch_hz) << ",\"fs\":" << num(rs.fs) << ",\"banks\":" << _banks.load()
-    << ",\"dropped\":" << _dropped.load() << ",\"decode_dropped\":" << _ddropped.load()
+    << ",\"dropped\":" << _dropped.load() << ",\"decode_dropped\":" << _decq.dropped()
     << ",\"stream_dropped\":" << rs.mid_drops
     << ",\"restarts\":" << rs.restarts << ",\"dsp_load\":" << num(_load) << ",\"decode_load\":" << num(_dload)
     << ",\"watch_msps\":" << (_mode == Mode::Watch ? wsdr::Receiver::rate_of(_req_rate) / 1e6 : 0)
-    << ",\"fallback\":" << (_fallback ? "true" : "false") << ",\"dead\":" << (_dead ? "true" : "false")
+    << ",\"fallback\":" << (_fb.active() ? "true" : "false") << ",\"dead\":" << (_dead ? "true" : "false")
     << ",\"wedged\":" << (_wedged ? "true" : "false")
     << ",\"offset_tuning\":" << (_offset ? "true" : "false") << ",\"centre_hz\":" << num(rs.centre_hz);
   if (_mode == Mode::Watch && _snr_db >= 0) o << ",\"snr_db\":" << num(_snr_db);
@@ -995,7 +909,6 @@ std::string Radio::status_json() {
   }
   o << ",\"test\":" << (_test_result.empty() ? "null" : _test_result);
   o << ",\"pilots\":[";
-  const int64_t t = now_ms();
   for (size_t i = 0; i < _pilots.size(); i++) {
     const auto &p = _pilots[i];
     o << (i ? "," : "") << "{\"mhz\":" << num(p.mhz) << ",\"name\":" << jstr(p.name) << ",\"std\":" << jstr(p.std_name)

@@ -18,6 +18,9 @@
 #include <vector>
 
 #include "combine.h"
+#include "decode_queue.h"
+#include "fallback_policy.h"
+#include "frame_gate.h"
 #include "spectrum.h"
 #include "video.h"
 
@@ -100,26 +103,34 @@ private:
     uint32_t gen;
     double fs, centre_hz, shift_hz;
   };
+  enum Path { kPathA = 0, kPathB = 1 };
   void dsp_loop();
   void decode_loop();
   void on_bank(const uint8_t *b, size_t n, uint64_t seq, uint32_t gen, double fs, double centre, double shift);
   // watching: off-centre tuning applies (the hardware centre recomputed for this rate)
   void tune(double hz, int rate_sel, bool watching = false);
+  void begin_watch();
+  void begin_scan();
+  void begin_test();
+  // a watched bank, step by step (handle_watch)
   void handle_watch(Bank &b);
-  bool watch_fault(double hz);
-  bool watch_drops(double hz);
-  bool no_fallback() const;
+  void new_front_end(const Bank &b);
+  bool stream_restarted(const Bank &b, int64_t t_ms);
+  bool blocks_lost(const Bank &b, int64_t t_ms);
   void fall_back(double hz);
+  const std::vector<cf> &path_b(const Bank &b);
   void measure_snr(const std::vector<cf> &iq, double fs, double shift_hz);
   void record_bank(const Bank &b);
+  bool begin_recording(const Bank &b);
+  void end_recording();
+  void combine_antennas(const Bank &b, bool gap, int64_t t_ms);
+  void demod_for_decoder(bool gap);
   void handle_scan(Bank &b);
   void handle_test(Bank &b);
   void scan_step_done();
-  void unpack(const Bank &b, std::vector<cf> &out);
-  void unpack_b(const Bank &b, std::vector<cf> &out);  // path B
+  static void unpack(const Bank &b, Path path, std::vector<cf> &out);
   void note_faults(const wsdr::RxStatus &st);  // log each stream restart the receiver has made since the last call
 
-  FrameSink _frames;
   std::unique_ptr<wsdr::Receiver> _rx;
   std::mutex _rxm;  // _rx itself (open and close replace it; status_json reads it from another thread)
   mutable std::mutex _m;  // mode, pilots, status fields below
@@ -128,10 +139,9 @@ private:
   double _watch_hz = 0, _req_hz = 0;
   int _req_rate = 1;
   int _watch_rate = 1;
-  bool _fallback = false;  // 40 MS/s kept faulting during a watch: watch at 20 MS/s until open() / set_watch_rate()
-  // The stream wedged while watching at 20 MS/s after a fallback: on this host 20 MS/s is worse than a 40 MS/s that
-  // restarts, so no more falling back while this Radio lives (it is one for the process; open() keeps it)
-  bool _no_fallback = false;
+  // 40 MS/s giving way to 20 MS/s in a watch. One for the process, like this Radio: open() clears a fallback, but
+  // not its "no more falling back". Locks for itself (taken inside _m where both are needed, never the reverse).
+  FallbackPolicy _fb;
   double _gain_db = -1;
   bool _comb = false;
   bool _watch_comb = false;  // _comb as of the current watch (DSP thread only)
@@ -162,29 +172,9 @@ private:
   std::atomic<bool> _started{false};  // open() has the receiver started: only then can it be found stopped
 
   // decode thread: watch mode runs demod on the DSP thread and the video decoder here (two cores)
-  struct DBlock {
-    std::shared_ptr<FrontEnd> fe;
-    std::vector<float> d;
-    std::vector<uint8_t> bad;  // sparkle repair marks (empty while it is off)
-    bool gap = false;          // the stream lost samples before this block (a restart, a dropped bank)
-  };
-  // Torn frames are not shown: after a gap in the stream the decoder's next kConcealFrames frames go nowhere, and
-  // the screen keeps the last whole one (KP_CONCEAL=0: shown as before). Set on the decode thread, read by _gate.
-  // At most once every kConcealEveryMs (so at most 4 frames a second hidden).
-  static constexpr int kConcealFrames = 2;
-  static constexpr int64_t kConcealEveryMs = 500;
-  int64_t _conceal_t_ms = 0;  // decode thread only
-  std::atomic<int> _conceal{0};
-  std::atomic<uint64_t> _concealed{0};
-  std::atomic<bool> _conceal_on{true};  // KP_CONCEAL, read at every watch
-  FrameSink _gate;  // what the decoders are given: _frames, minus the frames being concealed
+  FrameGate _gate;  // between the decoders and the frame sink: the frames torn by a hole in the stream stop here
   std::thread _decoder;
-  std::mutex _dqm;
-  std::condition_variable _dqcv;
-  std::deque<DBlock> _dq;
-  std::vector<std::vector<float>> _dpool;
-  std::vector<std::vector<uint8_t>> _bpool;  // DBlock::bad, recycled like _dpool
-  std::atomic<uint64_t> _ddropped{0};
+  DecodeQueue _decq;
   double _dload = 0;
 
   // DSP-thread state
@@ -192,11 +182,6 @@ private:
   uint64_t _faults_seen = 0;  // the receiver's restart count as last logged
   std::shared_ptr<FrontEnd> _fe;
   uint32_t _fe_gen = ~0u;
-  std::deque<int64_t> _watch_faults;  // ms of the stream restarts seen in this watch at 40 MS/s
-  // the receiver's count of banks its stream dropped mid-run, read every kDropPollMs of this watch at 40 MS/s
-  std::deque<std::pair<int64_t, uint64_t>> _drop_marks;  // (ms, count), the last kFallbackWindowMs of them
-  int64_t _drop_poll_ms = 0;
-  int64_t _watch_t0_ms = 0;  // when this watch began (its first kFallbackGraceMs do not count towards a fallback)
   uint64_t _watch_seq = 0;  // the last bank this watch took (with _fe_gen: does the next one follow on from it?)
   // live SNR of the watched carrier: a spectrum of kPsdSpan of IQ every kSnrEveryMs
   std::unique_ptr<Psd> _snr_psd;
@@ -204,8 +189,8 @@ private:
   int64_t _snr_t_ms = 0;
   float _snr_db = -1;  // < 0: none yet (under _m)
   double _fe_fs = 0, _fe_shift = 0;
-  std::vector<cf> _iq, _iqb;
-  bool _iqb_fresh = false;  // _iqb holds this bank's path B (unpacked only when combining or recording needs it)
+  std::vector<cf> _iq, _iqb;  // the bank in hand: path A, and path B once path_b() was asked for it
+  bool _iqb_fresh = false;    // _iqb is this bank's
   // two-antenna video
   std::atomic<bool> _combine{false};
   bool _combine_was = false;  // what the last bank did (the combiner restarts on a change)
@@ -225,8 +210,8 @@ private:
   int _cap_restarts = 0;  // of this step's capture, after a gap
   std::vector<std::complex<int16_t>> _cap;
   size_t _cap_need = 0;
-  double _cap_centre = 0;
-  std::vector<Hump> _humps;  // this step's candidates (from the first kPsdSpan of the capture)  // hardware centre of the capture (humps are measured from it)
+  double _cap_centre = 0;    // hardware centre of the capture (humps are measured from it)
+  std::vector<Hump> _humps;  // this step's candidates (from the first kPsdSpan of the capture)
   double _resume_hz = 0;
   // test
   uint64_t _test_banks = 0, _test_gaps = 0, _test_last_seq = 0, _test_runs = 0;

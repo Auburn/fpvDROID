@@ -52,7 +52,8 @@ if(KEPYUR_RADIO)
     target_link_libraries(devourer PUBLIC usb-1.0-static)
   endif()
   # web/CMakeLists.txt lists the same sources
-  set(KEPYUR_RADIO_SOURCES radio/radio.cpp radio/combine.cpp radio/thread_placement.cpp)
+  set(KEPYUR_RADIO_SOURCES radio/radio.cpp radio/combine.cpp radio/decode_queue.cpp radio/fallback_policy.cpp
+      radio/frame_gate.cpp radio/thread_placement.cpp)
   add_library(kepyur_radio STATIC ${KEPYUR_RADIO_SOURCES})
   target_include_directories(kepyur_radio PUBLIC radio)
   target_link_libraries(kepyur_radio PUBLIC kepyur_dsp wsdrcore)
@@ -84,6 +85,18 @@ if(NOT ANDROID)
     target_link_libraries(kp_sim PRIVATE kepyur_dsp wsdrcore Threads::Threads)
     target_compile_options(kp_sim PRIVATE -O2 -Wall)
   endif()
+endif()
+
+# ---- unit tests (desktop only): ctest --test-dir <build dir> ----
+if(NOT ANDROID)
+  enable_testing()
+  # the radio's rules that need no adapter: the sources themselves, so this builds with KEPYUR_RADIO off too
+  add_executable(kp_radio_tests tests/radio_tests.cpp radio/decode_queue.cpp radio/fallback_policy.cpp
+                 radio/frame_gate.cpp)
+  target_include_directories(kp_radio_tests PRIVATE radio tests)
+  target_link_libraries(kp_radio_tests PRIVATE kepyur_dsp Threads::Threads)
+  target_compile_options(kp_radio_tests PRIVATE -O2 -Wall -Wextra)
+  add_test(NAME radio COMMAND kp_radio_tests)
 endif()
 
 # ---- Android JNI ----
