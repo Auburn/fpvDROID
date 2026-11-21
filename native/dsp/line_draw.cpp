@@ -11,7 +11,7 @@ namespace kp {
 
 namespace {
 
-// Four pixels as RGBX words (bytes R, G, B, X): draw_line's per-pixel conversion, each of R, G and B (0..1)
+// Four pixels as RGBX words (bytes R, G, B, X): the draw loops' per-pixel conversion, each of R, G and B (0..1)
 // to clamp(z * 255, 0, 255) truncated to a byte.
 typedef uint32_t v4u __attribute__((vector_size(16)));
 inline v4u byte_of(v4f z) {

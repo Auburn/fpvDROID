@@ -242,7 +242,7 @@ private:
   // How many of the next samples (sync-path values m[0..cnt)) track() would do nothing with: locked on (not
   // acquiring, the levels settled), between pulses, still above the threshold, and the line not yet overdue.
   // They are passed over here, n moved on past them; the first that would do something is left to track().
-  // ~90 % of the samples, looked at eight at a time (a vector compare), where track() took each on its own.
+  // ~90 % of the samples, looked at eight at a time (a vector compare), where track() takes each on its own.
   size_t quiet_run(const float *m, size_t cnt) {
     if (acquiring || gated_lines < 64 || low) return 0;
     const uint64_t od = overdue_at();
