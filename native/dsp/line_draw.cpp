@@ -27,6 +27,12 @@ inline v4u grey_px(v4f y) {
   return 0xff000000u | q << 16 | q << 8 | q;
 }
 
+// The first cnt of a vector's four lanes to dst.
+template <typename V, typename T> inline void store_lanes(T *dst, const V &v, int cnt) {
+  if (cnt == 4) std::memcpy(dst, &v, sizeof v);
+  else std::memcpy(dst, &v, cnt * sizeof(T));
+}
+
 }  // namespace
 
 LineDrawer::LineDrawer(int width, double fs) : _w(width), _fs(fs) {
@@ -41,27 +47,29 @@ void LineDrawer::set_std(const VideoStd &s, double comb_w) {
   _aw = s.aw_us * 1e-6 * _fs;
   _pal = &s == &kPal;
   _comb_w = comb_w;
-  _prev_u.assign(_w, 0.f);
-  _prev_v.assign(_w, 0.f);
-  _px_off.resize(_w);
-  for (int x = 0; x < _w; x++) _px_off[x] = s.aw_us * 1e-6 * _fs * x / _w;
+  // The draw loops take four pixels at a time and may start anywhere (draw), so their last four can reach up
+  // to kPad pixels past the row's end: everything they read per pixel has that many more entries, which are
+  // worked out like the others and never stored.
+  _prev_u.assign(_w + kPad, 0.f);
+  _prev_v.assign(_w + kPad, 0.f);
+  _px_cm.assign(_w + kPad, 0.f);
+  _px_cr.assign(_w + kPad, 0.f);
+  _px_ci.assign(_w + kPad, 0.f);
+  _px_off.resize(_w + kPad);
+  for (int x = 0; x < _w + kPad; x++) _px_off[x] = s.aw_us * 1e-6 * _fs * x / _w;
 }
 
-// Without colour: each pixel the luma between the two samples either side, then to bytes; the interpolation and
-// the conversion four pixels at a time as vectors, the samples fetched one by one (there is no gather). Pixels
-// whose samples are not in the ring are black: a run at either end of the line, found once per line.
-void LineDrawer::draw_grey(uint32_t *row, const SampleRings &R, double base, float yscale, const DrawParams &p) {
-  const int W = _w;
+// Without colour: each pixel the luma between the two samples either side, then to bytes. The interpolation and
+// the conversion go four pixels at a time as vectors; the samples are fetched one by one (there is no gather).
+void LineDrawer::draw_grey(uint32_t *row, const SampleRings &R, double base, float yscale, int x0, int x1,
+                           const DrawParams &p) {
   const double *xo = _px_off.data();
   const float *lr = R.luma.data();
   const size_t mask = R.mask;
-  const auto first = [&](int x) { return static_cast<int64_t>(base + xo[x]); };  // pixel x's first sample
-  int x0 = 0, x1 = W;  // [x0, x1): in the ring (first() only grows with x)
-  while (x0 < W && !R.kept(first(x0), 8)) row[x0++] = 0xff000000u;
-  while (x1 > x0 && !R.written(first(x1 - 1) + 8)) row[--x1] = 0xff000000u;
   const float sg = p.sign, sb = p.sign * p.blank;
-  int x = x0;
-  for (; x + 4 <= x1; x += 4) {
+  // pixels x .. x + 3; the last four may reach past x1: the first cnt are stored
+  for (int x = x0; x < x1; x += 4) {
+    const int cnt = std::min(4, x1 - x);
     v4f a, b, f;
     for (int q = 0; q < 4; q++) {
       const double p = base + xo[x + q];
@@ -71,40 +79,24 @@ void LineDrawer::draw_grey(uint32_t *row, const SampleRings &R, double base, flo
       b[q] = lr[(i0 + 1) & mask];
     }
     const v4u px = grey_px(sg * (a + (b - a) * f - sb) * yscale);
-    std::memcpy(row + x, &px, sizeof px);
-  }
-  for (; x < x1; x++) {
-    const double p = base + xo[x];
-    const int64_t i0 = static_cast<int64_t>(p);
-    const float f = static_cast<float>(p - i0);
-    const float v0 = lr[i0 & mask], v1 = lr[(i0 + 1) & mask];
-    const v4u px = grey_px(v4f{sg * (v0 + (v1 - v0) * f - sb) * yscale, 0.f, 0.f, 0.f});
-    row[x] = px[0];
+    store_lanes(row + x, px, cnt);
   }
 }
 
-// In colour: as draw_grey, four pixels at a time. Chroma is interpolated like luma, the comb taken out (comb_on:
-// the comb's terms per pixel, worked out for the line first), turned onto the burst's phase and scaled, PAL-D
-// averaged with the line before, and converted to RGB.
+// In colour: as draw_grey. Chroma is interpolated like luma, the comb taken out (comb_on: the comb's terms per
+// pixel, worked out for the line first), turned onto the burst's phase and scaled, PAL-D averaged with the line
+// before, and converted to RGB.
 void LineDrawer::draw_colour(uint32_t *row, const SampleRings &R, double base, float yscale, std::complex<float> rot,
-                             float k_uv, bool comb_on, bool pal_v, const DrawParams &p) {
+                             float k_uv, bool comb_on, bool pal_v, int x0, int x1, const DrawParams &p) {
   using cf = std::complex<float>;
   const double cdel = p.cdel;
   const bool pal = _pal;
-  const int W = _w;
   const double *xo = _px_off.data();
   const float *lr = R.luma.data();
   const cf *chr = R.chroma.data();
   const size_t mask = R.mask;
-  const auto first = [&](int x) { return static_cast<int64_t>(base + xo[x]); };
-  int x0 = 0, x1 = W;  // [x0, x1): in the ring, as in draw_grey
-  while (x0 < W && !R.kept(first(x0), 8)) row[x0++] = 0xff000000u;
-  while (x1 > x0 && !R.written(first(x1 - 1) + 8)) row[--x1] = 0xff000000u;
   if (comb_on) {
-    // the comb on every other pixel (_comb_m, _comb_o: see draw_line), in between the mean of the two either side
-    _px_cm.resize(W);
-    _px_cr.resize(W);
-    _px_ci.resize(W);
+    // comb_weights has the comb on every other pixel; in between, the mean of the two either side
     for (int x = x0; x < x1; x++) {
       const int h = x >> 1;
       if (x & 1) {
@@ -120,8 +112,16 @@ void LineDrawer::draw_colour(uint32_t *row, const SampleRings &R, double base, f
   }
   float *pu = _prev_u.data(), *pv = _prev_v.data();
   const float sg = p.sign, sb = p.sign * p.blank, rr = rot.real(), ri = rot.imag();
-  int x = x0;
-  for (; x + 4 <= x1; x += 4) {
+  // PAL-D keeps each pixel's U/V for the next line, all four of a group at a time: what the last group puts
+  // past x1 is not this line's, and the entries there are put back afterwards.
+  float after_u[kPad], after_v[kPad];
+  if (pal) {
+    std::memcpy(after_u, pu + x1, sizeof after_u);
+    std::memcpy(after_v, pv + x1, sizeof after_v);
+  }
+  // pixels x .. x + 3; the last four may reach past x1: the first cnt are stored
+  for (int x = x0; x < x1; x += 4) {
+    const int cnt = std::min(4, x1 - x);
     v4f a, b, f, c0r, c0i, c1r, c1i, fc;
     for (int q = 0; q < 4; q++) {
       const double p = base + xo[x + q];
@@ -160,35 +160,11 @@ void LineDrawer::draw_colour(uint32_t *row, const SampleRings &R, double base, f
       v = 0.5f * (v + lv);
     }
     const v4u px = rgb_px(y + 1.140f * v, y - 0.395f * u - 0.581f * v, y + 2.032f * u);
-    std::memcpy(row + x, &px, sizeof px);
+    store_lanes(row + x, px, cnt);
   }
-  for (; x < x1; x++) {  // one pixel at a time: the same, in scalars
-    const double p = base + xo[x];
-    const int64_t i0 = static_cast<int64_t>(p);
-    const float f = static_cast<float>(p - i0);
-    const float v0 = lr[i0 & mask], v1 = lr[(i0 + 1) & mask];
-    const float y = sg * (v0 + (v1 - v0) * f - sb) * yscale;
-    const double pc = p + cdel;
-    const int64_t j0 = static_cast<int64_t>(pc);
-    const float fc = static_cast<float>(pc - j0);
-    const cf c0 = chr[j0 & mask], c1 = chr[(j0 + 1) & mask];
-    float cre = c0.real() + (c1.real() - c0.real()) * fc, cim = c0.imag() + (c1.imag() - c0.imag()) * fc;
-    if (comb_on) {
-      cre = cre * _px_cm[x] - _px_cr[x];
-      cim = cim * _px_cm[x] - _px_ci[x];
-    }
-    float u = -((cre * rr - cim * ri) * k_uv), v = -((cre * ri + cim * rr) * k_uv);
-    if (pal) {
-      if (pal_v) v = -v;
-      const float lu = pu[x], lv = pv[x];
-      pu[x] = u;
-      pv[x] = v;
-      u = 0.5f * (u + lu);
-      v = 0.5f * (v + lv);
-    }
-    const v4u px = rgb_px(v4f{y + 1.140f * v, 0, 0, 0}, v4f{y - 0.395f * u - 0.581f * v, 0, 0, 0},
-                          v4f{y + 2.032f * u, 0, 0, 0});
-    row[x] = px[0];
+  if (pal) {
+    std::memcpy(pu + x1, after_u, sizeof after_u);
+    std::memcpy(pv + x1, after_v, sizeof after_v);
   }
 }
 
@@ -271,11 +247,15 @@ void LineDrawer::draw(uint32_t *row, const SampleRings &R, const LineInfo &l, bo
   if (up && !R.kept(static_cast<int64_t>(ls + a0 - T), 8)) up = false;
   const bool comb_on = l.col && (up || dn || l.fade);
   if (comb_on) comb_weights(R, ls, yscale, up, dn, l.fade, p);
-  if (!l.col) {
-    draw_grey(row, R, ls + a0, yscale, p);
-    return;
-  }
-  draw_colour(row, R, ls + a0, yscale, rot, k_uv, comb_on, l.pal_v, p);
+  // [x0, x1): the pixels whose samples are in the rings (a pixel's first sample only grows with x). The others,
+  // a run at either end of the line, are black.
+  const double base = ls + a0;
+  const auto first = [&](int x) { return static_cast<int64_t>(base + _px_off[x]); };
+  int x0 = 0, x1 = _w;
+  while (x0 < _w && !R.kept(first(x0), 8)) row[x0++] = 0xff000000u;
+  while (x1 > x0 && !R.written(first(x1 - 1) + 8)) row[--x1] = 0xff000000u;
+  if (l.col) draw_colour(row, R, base, yscale, rot, k_uv, comb_on, l.pal_v, x0, x1, p);
+  else draw_grey(row, R, base, yscale, x0, x1, p);
 }
 
 }  // namespace kp

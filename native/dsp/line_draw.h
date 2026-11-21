@@ -48,11 +48,13 @@ public:
 
 private:
   void comb_weights(const SampleRings &R, double ls, float yscale, bool up, bool dn, bool fade, const DrawParams &p);
-  void draw_grey(uint32_t *row, const SampleRings &R, double base, float yscale, const DrawParams &p);
+  // pixels [x0, x1) of the row, from the samples at base (the picture's start) on
+  void draw_grey(uint32_t *row, const SampleRings &R, double base, float yscale, int x0, int x1, const DrawParams &p);
   void draw_colour(uint32_t *row, const SampleRings &R, double base, float yscale, std::complex<float> rot, float k_uv,
-                   bool comb_on, bool pal_v, const DrawParams &p);
+                   bool comb_on, bool pal_v, int x0, int x1, const DrawParams &p);
 
   static constexpr float kCombFull = 0.08f, kCombNone = 0.25f;  // luma mismatch, of black-to-white
+  static constexpr int kPad = 3;  // entries past the row's end in what the draw loops read per pixel (set_std)
   int _w;
   double _fs;
   double _a0 = 0, _aw = 0;  // the picture's start after the line's, and its width, in samples
