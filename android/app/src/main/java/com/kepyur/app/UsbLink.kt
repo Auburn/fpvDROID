@@ -13,7 +13,6 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
-import org.json.JSONObject
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -342,26 +341,24 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
      * that lands there must not take a healthy radio down. If it does stay there, no samples come, and the
      * stall rule ends it.
      */
-    fun check(status: JSONObject) {
+    fun check(status: RadioStatus) {
         if (state != State.RUNNING) return
         val now = SystemClock.elapsedRealtime()
-        val banks = status.optLong("banks", -1)
         // polling paused for a while (the app was in the background): the clock starts again
         if (now - checkedAt > 1500) banksMovedAt = now
         checkedAt = now
-        if (banks != lastBanks) {
-            lastBanks = banks
+        if (status.banks != lastBanks) {
+            lastBanks = status.banks
             banksMovedAt = now
         }
-        if (status.optBoolean("wedged")) {
+        if (status.wedged) {
             reopenAfterWedge(status)
             return
         }
-        val rx = status.optString("rx_state")
         val why = when {
-            status.optBoolean("dead") || rx == "lost" ->
-                status.optString("rx_error").ifEmpty { status.optString("last_fault") }.ifEmpty { "the adapter stopped answering" }
-            !status.optBoolean("open", true) -> "it was closed"   // under us: nothing will come
+            status.dead || status.rxState == "lost" ->
+                status.rxError.ifEmpty { status.lastFault }.ifEmpty { "the adapter stopped answering" }
+            !status.open -> "it was closed"   // under us: nothing will come
             now - banksMovedAt > STALL_MS -> "no samples for ${STALL_MS / 1000} seconds"
             else -> {
                 if (now - runningSince > HEALTHY_MS) failures = 0   // it has run well for a while: a clean slate
@@ -378,14 +375,14 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
      * counted towards slower retries), and quietly ([State.REOPENING]). When it keeps happening, [message] says
      * that this phone and this adapter do not get on.
      */
-    private fun reopenAfterWedge(status: JSONObject) {
+    private fun reopenAfterWedge(status: RadioStatus) {
         val now = SystemClock.elapsedRealtime()
         wedges.addLast(now)
         while (now - wedges.first() > WEDGE_WINDOW_MS) wedges.removeFirst()
         val n = wedges.size
         val minutes = WEDGE_WINDOW_MS / 60000
         engine.log("link: the USB data path wedged ($n in $minutes min): opening the adapter again at once; " +
-            status.optString("rx_error"))
+            status.rxError)
         engine.holdPicture(HOLD_PICTURE_MS)   // the last picture stays, dimmed, until the reopened radio's first frame
         giveUpAdapter()
         open(State.REOPENING, if (n >= WEDGE_ADVICE_COUNT)

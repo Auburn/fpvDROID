@@ -21,7 +21,7 @@ import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
-import org.json.JSONObject
+import com.kepyur.app.RadioStatus.Mode
 import java.io.File
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -60,8 +60,13 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     private var wasRunning = false
     private val surfaceToken = Any()
 
+    /**
+     * What the radio is doing, as far as this screen knows: what its status last said ([RadioStatus.mode]), or
+     * what it has been told to do since (a mode call takes effect in the radio before it returns). null: no radio
+     * is running, or its status did not say.
+     */
+    private var mode: Mode? = null
     // what the radio last said
-    private var mode = ""
     private var found: List<Found> = emptyList()
     private var noVideoFound = false       // the last scan came back empty
     private var lastDropped = 0L
@@ -159,7 +164,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         // back from the background, where decoding was stopped
         if (link.state == UsbLink.State.RUNNING) {
             if (!testRunning) {
-                if (scanOnReturn) onScan() else if (mode == "idle") tune(fresh = true)
+                if (scanOnReturn) onScan() else if (mode == Mode.IDLE) tune(fresh = true)
             }
         } else {
             showMenuForTrouble()   // the adapter went, or the radio died, while nobody was looking
@@ -181,9 +186,9 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         ui.removeCallbacks(poll)
         // nobody is watching: no reason to keep two cores decoding
         if (link.state == UsbLink.State.RUNNING && !testRunning) {
-            if (mode == "scan") scanOnReturn = true   // cut short: start it over when the app is back
+            if (mode == Mode.SCAN) scanOnReturn = true   // cut short: start it over when the app is back
             engine.idle()
-            mode = "idle"
+            mode = Mode.IDLE
         }
         // ... nor, after a while, to keep the adapter streaming and warm: it is opened again on return
         if (!testRunning) ui.postDelayed(closeInBackground, BACKGROUND_CLOSE_MS)
@@ -193,7 +198,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     private val closeInBackground = Runnable {
         engine.log("in the background for ${BACKGROUND_CLOSE_MS / 1000} s: closing the adapter")
         link.stop()
-        mode = ""
+        mode = null
         wasRunning = false
     }
 
@@ -246,12 +251,12 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         noVideoFound = false
         scanOnReturn = false   // a channel has been chosen since: no scan is owed any more
         engine.watch(hz, fresh)
-        mode = "watch"
+        mode = Mode.WATCH
     }
 
     /** The same channel again, for a setting that only takes effect on a tune. */
     private fun retune() {
-        if (mode == "watch") tune(fresh = false)
+        if (mode == Mode.WATCH) tune(fresh = false)
     }
 
     // ---------------------------------------------------------------------------------------- MenuView.Listener
@@ -264,7 +269,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         scanStartedAt = android.os.SystemClock.elapsedRealtime()
         found = emptyList()   // what earlier scans saw is history: this one starts from nothing
         engine.scan(channelHz())
-        mode = "scan"
+        mode = Mode.SCAN
         refresh()
     }
 
@@ -296,7 +301,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     override fun onLinkChanged() {
         val running = link.state == UsbLink.State.RUNNING
         if (!running) {
-            mode = ""
+            mode = null
             testRunning = false
             // the picture has just gone, with nothing on screen to say why: the menu does (and steps aside
             // again by itself once the radio is back, see onRadioUp). Not for the few seconds of a reopen after the
@@ -325,7 +330,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
             testRequested || soak -> startTest()
             !foreground -> {   // it came up with nobody watching: wait, and on return tune, or scan if this is the first run
                 engine.idle()
-                mode = "idle"
+                mode = Mode.IDLE
                 scanOnReturn = settings.channelMhz <= 0
             }
             scanOnReturn -> onScan()   // one was cut short before the adapter was let go
@@ -361,7 +366,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         testRunning = true
         engine.log("usbtest: rate_sel ${t.first} for ${t.second} s")
         engine.streamTest(t.first, t.second)
-        mode = "test"
+        mode = Mode.TEST
     }
 
     // ---------------------------------------------------------------------------------------- status
@@ -377,12 +382,6 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         val st = if (link.state == UsbLink.State.RUNNING) radioState() else linkState()
         if (menuOpen) menu.render(st)
     }
-
-    /**
-     * A number from the status, or [or] when it is missing or not a finite number. (The native side prints
-     * doubles as they come, and Android's JSON reader takes a bare nan or inf for a string without complaint.)
-     */
-    private fun JSONObject.num(key: String, or: Double = 0.0): Double = optDouble(key, or).let { if (it.isFinite()) it else or }
 
     private fun linkState(): MenuState = linkHeadline().let { st ->
         // the rail may have to cut a long message short on a small screen: the Signal tab shows all of it
@@ -404,46 +403,39 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     }
 
     private fun radioState(): MenuState {
-        // a number the native side could not print as JSON (nan, inf) must not take the app down with it
-        val s = try {
-            JSONObject(engine.status())
+        // a status that is not JSON at all (cut short, or something else) must not take the app down with it
+        val st = try {
+            RadioStatus.parse(engine.status())
         } catch (e: org.json.JSONException) {
             if (!statusBroken) engine.log("status: unreadable ($e)")
             statusBroken = true
             return MenuState(Tone.BUSY, "Working", radioReady = !testRunning, found = found)
         }
         statusBroken = false
-        link.check(s)
+        link.check(st)
         if (link.state != UsbLink.State.RUNNING) return linkState()
-        val was = mode
-        mode = s.optString("mode")
-        val radioMode = mode   // what the radio says it is doing; `mode` may move on below (the end of a stream test tunes)
-        val v = s.optJSONObject("video")
-        val locked = v?.optBoolean("locked") ?: false
-        val watchHz = s.num("watch_hz")
+        val before = mode
+        mode = st.mode   // what the radio says it is doing; `mode` may move on below (the end of a stream test tunes)
+        val v = st.video
+        val locked = v?.locked ?: false
+        val watchHz = st.watchHz
 
         // The radio remembers every signal it has ever seen; what the menu shows as found is what the last scan
         // saw (a transmitter that has since landed is not "found", and its old frequency is no guide to tuning).
         val sinceScan = android.os.SystemClock.elapsedRealtime() - scanStartedAt
-        found = if (scanStartedAt == 0L) emptyList() else buildList {
-            val arr = s.optJSONArray("pilots") ?: return@buildList
-            for (i in 0 until arr.length()) {
-                val p = arr.optJSONObject(i) ?: continue
-                val mhz = p.num("mhz")
-                val seenInThisScan = p.optLong("age_s") * 1000 <= sinceScan + 1500
-                if (mhz > 0 && seenInThisScan) add(Found(mhz, p.optString("name"), p.num("snr").toFloat(), p.optString("std")))
-            }
-        }
+        found = if (scanStartedAt == 0L) emptyList() else st.pilots
+            .filter { it.mhz > 0 && it.ageS * 1000 <= sinceScan + 1500 }   // seen in this scan
+            .map { Found(it.mhz, it.name, it.snrDb, it.std) }
         // a scan has just ended: it left the radio on the channel it judged best, and the picker follows
-        if (was == "scan" && mode != "scan") {
+        if (before == Mode.SCAN && st.mode != Mode.SCAN) {
             noVideoFound = found.isEmpty()
-            if (mode == "watch") adoptChannel(watchHz / 1e6)
+            if (st.mode == Mode.WATCH) adoptChannel(watchHz / 1e6)
         }
-        if (testRunning && mode == "idle") {
-            s.optJSONObject("test")?.let { if (it.optBoolean("done")) { testResults.add(it.toString()); nextTest() } }
+        if (testRunning && st.mode == Mode.IDLE) {
+            st.test?.let { if (it.done) { testResults.add(it.json); nextTest() } }
         }
-        if (mode == "watch" && locked) {
-            matchDisplayTo(v?.optString("std") ?: "")
+        if (mode == Mode.WATCH && locked) {
+            matchDisplayTo(v?.std ?: "")
             noVideoFound = false   // there is a picture after all: what the scan missed no longer matters
         }
 
@@ -458,62 +450,57 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         // note of. So is whatever comes in before the first refresh of a watch (up to a poll's length, the
         // retune into it included): a phone that is not keeping up goes on losing blocks after that.
         val now = android.os.SystemClock.elapsedRealtime()
-        val late = s.optLong("stream_dropped")
-        val queued = s.optLong("dropped") + s.optLong("decode_dropped")
+        val late = st.streamDropped
+        val queued = st.queueDropped + st.decodeDropped
         val dropped = late + queued   // lost anywhere on the way, for the figures on the Signal tab
-        val load = maxOf(s.num("dsp_load"), s.num("decode_load"))
-        val followed = radioMode == "watch" && lastLateWatching && late >= lastLate && now - lastLateAt <= LATE_GAP_MS
+        val load = st.load
+        val followed = st.mode == Mode.WATCH && lastLateWatching && late >= lastLate && now - lastLateAt <= LATE_GAP_MS
         if (!followed) lateMarks.clear()
         else if (late > lastLate) lateMarks.addLast(now to late - lastLate)
         while (lateMarks.isNotEmpty() && now - lateMarks.first().first > LATE_WINDOW_MS) lateMarks.removeFirst()
         val lateBurst = followed && late > lastLate && lateMarks.sumOf { it.second } >= LATE_BLOCKS
         lastLate = late
         lastLateAt = now
-        lastLateWatching = radioMode == "watch"
-        if (mode == "watch" && (queued > lastDropped || load > 0.95 || lateBurst)) overloadedUntil = now + 5000
+        lastLateWatching = st.mode == Mode.WATCH
+        if (mode == Mode.WATCH && (queued > lastDropped || load > 0.95 || lateBurst)) overloadedUntil = now + 5000
         lastDropped = queued
-        val overloaded = mode == "watch" && now < overloadedUntil
+        val overloaded = mode == Mode.WATCH && now < overloadedUntil
 
         val name = Channels.nearest(watchHz / 1e6, settings.band, Channels.SAME_CHANNEL_MHZ)?.name
-        val where = (if (name != null) "$name · " else "") + "${(watchHz / 1e6).roundToInt()} MHz"   // finite: num()
+        val where = (if (name != null) "$name · " else "") + "${(watchHz / 1e6).roundToInt()} MHz"   // finite: RadioStatus
         val stats = buildString {
-            append(if (s.optBoolean("usb3")) "USB 3" else "USB 2")
-            val msps = s.num("watch_msps")
-            if (msps > 0) append(" · %.0f MS/s".format(msps))
-            if (s.optBoolean("fallback")) append(" (40 kept dropping out)")
+            append(if (st.usb3) "USB 3" else "USB 2")
+            if (st.watchMsps > 0) append(" · %.0f MS/s".format(st.watchMsps))
+            if (st.fallback) append(" (40 kept dropping out)")
             append(" · processing %.0f%%".format(load * 100))
-            append(" · $dropped dropped · ${s.optLong("restarts")} restarts")
-            s.optJSONObject("antennas")?.let { a ->
-                if (a.optBoolean("combine")) append("\nAntenna A %.0f dB · B %.0f dB · together %.0f dB".format(
-                    a.num("snr_a"), a.num("snr_b"), a.num("snr_c")))
+            append(" · $dropped dropped · ${st.restarts} restarts")
+            st.antennas?.let { a ->
+                if (a.combine) append("\nAntenna A %.0f dB · B %.0f dB · together %.0f dB".format(a.snrA, a.snrB, a.snrC))
             }
         }
-        val base = MenuState(radioReady = !testRunning, scanning = mode == "scan", scanStep = s.optInt("scan_step"),
-            scanSteps = s.optInt("scan_steps"), found = found, scanFoundNothing = noVideoFound, stats = stats)
+        val base = MenuState(radioReady = !testRunning, scanning = mode == Mode.SCAN, scanStep = st.scanStep,
+            scanSteps = st.scanSteps, found = found, scanFoundNothing = noVideoFound, stats = stats)
         return when (mode) {
-            "scan" -> base.copy(tone = Tone.BUSY, headline = "Scanning", detail = "Looking for video on every channel.")
-            "test" -> {
-                val t = s.optJSONObject("test")
-                base.copy(tone = Tone.BUSY, headline = "USB test", detail = t?.let {
-                    "%.0f MS/s · %.0f s\n%d of %d blocks · %d gaps · %d restarts".format(it.num("rate_msps"), it.num("seconds"),
-                        it.optLong("banks"), it.optLong("expected"), it.optLong("seq_gaps"), it.optLong("restarts"))
-                } ?: "Starting…")
-            }
-            "watch" -> when {
+            Mode.SCAN -> base.copy(tone = Tone.BUSY, headline = "Scanning", detail = "Looking for video on every channel.")
+            Mode.TEST -> base.copy(tone = Tone.BUSY, headline = "USB test", detail = st.test?.let {
+                "%.0f MS/s · %.0f s\n%d of %d blocks · %d gaps · %d restarts".format(it.rateMsps, it.seconds,
+                    it.banks, it.expected, it.seqGaps, it.restarts)
+            } ?: "Starting…")
+            Mode.WATCH -> when {
                 overloaded -> OVERLOAD_ADVICE.let { advice ->   // in full on the Signal tab: the rail may cut it short
                     base.copy(tone = Tone.WARN, headline = where, detail = advice, stats = "$advice\n$stats")
                 }
                 locked -> base.copy(tone = Tone.LIVE, headline = where, detail = buildString {
-                    append(v?.optString("std") ?: "")
-                    if (v?.optBoolean("colour") == false) append(" · black and white")
-                    append(" · %.0f fps".format(v?.num("fps") ?: 0.0))
-                    if (s.has("snr_db")) append(" · %.0f dB".format(s.num("snr_db")))
+                    append(v?.std ?: "")
+                    if (v?.colour == false) append(" · black and white")
+                    append(" · %.0f fps".format(v?.fps ?: 0.0))
+                    st.snrDb?.let { append(" · %.0f dB".format(it)) }
                 })
                 noVideoFound -> base.copy(tone = Tone.BUSY, headline = where,
                     detail = "The scan found no video. Still looking on this channel…")
                 else -> base.copy(tone = Tone.BUSY, headline = where, detail = "Looking for a picture…")
             }
-            else -> base.copy(tone = Tone.IDLE, headline = "Ready",
+            Mode.IDLE, null -> base.copy(tone = Tone.IDLE, headline = "Ready",
                 detail = if (noVideoFound) "The scan found no video. Pick a channel, or scan again." else "Pick a channel, or scan.")
         }
     }
