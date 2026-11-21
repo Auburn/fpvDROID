@@ -732,52 +732,47 @@ private:
     return colour_on;
   }
 
-  void render_line(double ls, bool locked_line) {
-    if (cur_field < 0) return;
-    const int64_t k = static_cast<int64_t>(line_idx) - field_line0 - std_->skip;
-    if (comb) {
-      comb_line(ls, k, locked_line);
-      return;
-    }
-    if (k < 0 || k >= std_->active) return;
-    if (locked_line) measure_levels(ls);
-    if (luma_comb) top_line(ls, k);
-    const bool hit = repair && patch_line(ls);
-    bool pal_v = false;
-    const bool col = o.colour && locked_line && burst(ls, pal_v);
+  bool in_picture(int64_t k) const { return k >= 0 && k < std_->active; }
+
+  // The line that has just ended (ls: its start; k: its row; locked: its hsync was found), ready to be drawn:
+  // levels measured on it, then its picture put right in the rings (the top line with the luma comb, sparkle
+  // repair), then its burst. In that order: each reads what the one before left.
+  LineInfo measure(double ls, int64_t k, bool locked) {
     LineInfo l;
     l.ls = ls;
     l.k = k;
-    l.col = col;
-    l.pal_v = pal_v;
+    l.field = cur_field;
+    l.epoch = comb_epoch;
+    if (!in_picture(k)) return l;
+    if (locked) measure_levels(ls);
+    if (luma_comb) top_line(ls, k);
+    l.hit = repair && patch_line(ls);
+    l.col = o.colour && locked && burst(ls, l.pal_v);
+    l.ok = l.col && burst_e < kCombMaxErr;
     l.phase = c_phase;
     l.mag = c_mag;
-    draw_line(l, false, false);
-    if (repair) mend_rows(k, hit);
+    l.fade = comb && adaptive && adaptive_lines > 1;  // the filter noted this line's fade for the 3-line comb
+    return l;
   }
 
-  // NTSC comb: line k is measured now (levels, burst) and the previous one, k - 1, is drawn, combed with
-  // k - 2 and k. A neighbour is used only if both lines are locked and in colour, in the same field and on
-  // the same side of any jump in the stream (comb_epoch, and a burst on its predicted phase).
-  void comb_line(double ls, int64_t k, bool locked_line) {
-    LineInfo cur;
-    cur.ls = ls;
-    cur.k = k;
-    cur.field = cur_field;
-    cur.epoch = comb_epoch;
-    if (k >= 0 && k < std_->active) {
-      if (locked_line) measure_levels(ls);
-      if (luma_comb) top_line(ls, k);
-      cur.hit = repair && patch_line(ls);  // before this line is anyone's neighbour
-      bool pal_v = false;
-      cur.col = o.colour && locked_line && burst(ls, pal_v);
-      cur.ok = cur.col && burst_e < kCombMaxErr;
-      cur.phase = c_phase;
-      cur.mag = c_mag;
-      cur.fade = adaptive && adaptive_lines > 1;  // as push() had them over this line's picture
+  // A line has ended: it is drawn, or with the 3-line comb the one before it is.
+  void render_line(double ls, bool locked) {
+    if (cur_field < 0) return;
+    const LineInfo cur = measure(ls, static_cast<int64_t>(line_idx) - field_line0 - std_->skip, locked);
+    if (comb) {
+      comb_line(cur);
+    } else if (in_picture(cur.k)) {
+      draw_line(cur, false, false);
+      if (repair) mend_rows(cur.k, cur.hit);
     }
+  }
+
+  // NTSC comb: the line before cur, k - 1, is drawn, combed with k - 2 and k. A neighbour is used only if both
+  // lines are locked and in colour, in the same field and on the same side of any jump in the stream
+  // (comb_epoch, and a burst on its predicted phase).
+  void comb_line(const LineInfo &cur) {
     const LineInfo &m = comb_mid;
-    if (m.field == cur_field && m.k == k - 1 && m.k >= 0 && m.k < std_->active) {
+    if (m.field == cur_field && m.k == cur.k - 1 && in_picture(m.k)) {
       const auto pair = [&](const LineInfo &x, int64_t dk) {
         return m.ok && x.ok && x.field == m.field && x.k == m.k + dk && x.epoch == m.epoch;
       };
