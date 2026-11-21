@@ -4,7 +4,6 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <sstream>
 #include <stdexcept>
@@ -282,6 +281,10 @@ void Radio::set_comb(bool on) {
 
 void Radio::set_combine(bool on) { _combine = on; }
 
+void Radio::set_conceal(bool on) { _gate.set_enabled(on); }
+
+void Radio::set_fast_cores(bool on) { _fast_cores = on; }
+
 Radio::ComboStatus Radio::combine_status() {
   std::lock_guard<std::mutex> l(_m);
   return _comb_status;
@@ -324,7 +327,7 @@ const std::vector<cf> &Radio::path_b(const Bank &b) {
 
 void Radio::dsp_loop() {
   boost_thread("dsp");
-  keep_off_slow_cores("dsp");
+  keep_off_slow_cores("dsp", _fast_cores);
   Bank b;
   _load_t0_ms = now_ms();
   while (!_stop) {
@@ -426,10 +429,6 @@ void Radio::begin_watch() {
     _snr_db = -1;
   }
   KP_LOGI("radio: watch %.3f MHz at %.0f MS/s", hz / 1e6, wsdr::Receiver::rate_of(rate) / 1e6);
-  {
-    const char *e = std::getenv("KP_CONCEAL");  // read at every watch
-    _gate.set_enabled(!(e && *e == '0'));
-  }
   _fb.watch_started(now_ms());
   _snr_psd.reset();
   _snr_t_ms = 0;
@@ -670,7 +669,7 @@ void Radio::end_recording() {
 
 void Radio::decode_loop() {
   boost_thread("decode");
-  keep_off_slow_cores("decode");
+  keep_off_slow_cores("decode", _fast_cores);
   std::shared_ptr<FrontEnd> cur;
   double busy = 0;
   int64_t t0 = now_ms();

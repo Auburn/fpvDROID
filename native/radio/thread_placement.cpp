@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -56,9 +55,9 @@ std::vector<int> fast_cores() {
 }  // namespace
 #endif
 
-void keep_off_slow_cores(const char *what) {
+void keep_off_slow_cores(const char *what, bool on) {
 #if defined(__linux__)
-  if (const char *e = std::getenv("KP_FAST_CPUS"); e && *e == '0') {
+  if (!on) {
     KP_LOGI("radio: %s thread left to the OS (KP_FAST_CPUS=0)", what);
     return;
   }
@@ -75,6 +74,7 @@ void keep_off_slow_cores(const char *what) {
   KP_LOGI("radio: %s thread on cores %s: %s", what, list.c_str(), rc == 0 ? "ok" : std::strerror(errno));
 #else
   (void)what;
+  (void)on;
 #endif
 }
 

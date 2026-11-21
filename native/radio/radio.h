@@ -88,6 +88,13 @@ public:
     Combiner::Stats s;  // the last second; the time offset between the paths as of its end
   };
   ComboStatus combine_status();
+  // Debug switches (the app's "env" extra: KP_CONCEAL, KP_FAST_CPUS; kp_live reads the same two variables once,
+  // before open()). Both on by default; either may be called from any thread, open or not.
+  // Torn frames hidden (FrameGate); off: every frame is shown. Takes effect at once.
+  void set_conceal(bool on);
+  // The DSP and decode threads kept off the slowest cores (thread_placement.h); off: left to the OS. Takes
+  // effect when those threads next start: at the next open().
+  void set_fast_cores(bool on);
   // Debug: save the next `seconds` of watched IQ as PREFIX.cs16 + PREFIX.json (kp_replay reads them), and path B
   // as PREFIX_b.cs16.
   void record(double seconds, const std::string &prefix);
@@ -170,6 +177,8 @@ private:
   std::thread _dsp;
   std::atomic<bool> _stop{false};
   std::atomic<bool> _started{false};  // open() has the receiver started: only then can it be found stopped
+
+  std::atomic<bool> _fast_cores{true};  // set_fast_cores()
 
   // decode thread: watch mode runs demod on the DSP thread and the video decoder here (two cores)
   FrameGate _gate;  // between the decoders and the frame sink: the frames torn by a hole in the stream stop here

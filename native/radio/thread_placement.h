@@ -11,7 +11,7 @@ void boost_thread(const char *what);
 // so long as at least two are left. Left to itself, Android now and then runs a thread that is busy half the time
 // on a little core (a Pixel 8 Pro's Cortex-A510s, about a third the speed of its A715s): the decode thread was
 // there 7 % of its time, falling behind each time, and its queue overflowed in bursts with the thread at half
-// load. KP_FAST_CPUS=0 (the "env" debug extra): left to the OS, and the log says so. Linux and Android only.
-void keep_off_slow_cores(const char *what);
+// load. on = false: left to the OS, and the log says so (Radio::set_fast_cores). Linux and Android only.
+void keep_off_slow_cores(const char *what, bool on = true);
 
 }  // namespace kp
