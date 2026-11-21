@@ -4,6 +4,7 @@ import android.os.SystemClock
 import android.view.View
 import com.kepyur.app.UsbLink.State
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -349,6 +350,28 @@ class UsbLinkScenariosTest : AppHarness() {
             .putExtra(android.hardware.usb.UsbManager.EXTRA_DEVICE, back))
         settle()
         assertEquals("permission requests (one dialog per request)", 1, permissionRequests.size)
+    }
+
+    @Test
+    fun usb3SwitchAdapterBackWithoutPermissionThenGoneAgainEndsAndIsNotSwitchingForEver() {
+        saveChannel(5760, 'F')
+        fake.switchResults += "requested"
+        val d = adapter()
+        plug(d, broadcast = false)
+        launch()
+        assertEquals(State.SWITCHING, link.state)
+        unplug(d)   // re-enumeration
+        settle()
+        assertEquals(State.SWITCHING, link.state)
+        val back = adapter()
+        plug(back, permission = false)
+        assertEquals(State.PERMISSION, link.state)
+        advance(2000)
+        unplug(back)   // gone again, well within the 14 s
+        settle()
+        advance(20_000)
+        assertTrue("ended, not still switching: ${link.state}", link.state == State.NO_ADAPTER || link.state == State.FAILED)
+        assertNotEquals(State.SWITCHING, link.state)
     }
 
     // ------------------------------------------------------------------------------------------ 7. USB 2
