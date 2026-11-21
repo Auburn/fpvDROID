@@ -23,7 +23,9 @@ namespace kp {
 // 40 MS/s that restarts, so there is no more falling back for as long as this object lives (clear() keeps that).
 //
 // The lost blocks are counted at every sample rate, for late_recent(): how many the current watch has lost
-// lately, which is what tells the app that the host is not keeping up.
+// lately, which is what tells the app that the host is not keeping up. Not the ones a stream loses in its first
+// kSettleMs: on some hosts every fresh stream loses a few blocks about 55 blocks in (a Pixel 8 Pro: three or four,
+// 11 ms after its first), which says nothing of how the host keeps up from there on.
 //
 // The clock is the caller's: every call that needs the time is given it, in ms of one steady clock.
 // Thread-safe: the DSP thread feeds it, the status and the setters read and clear it from other threads.
@@ -34,6 +36,7 @@ public:
   static constexpr int64_t kWindowMs = 5000;
   static constexpr int64_t kGraceMs = 10000;
   static constexpr int64_t kPollMs = 200;  // how often the receiver's count of lost blocks is wanted
+  static constexpr int64_t kSettleMs = 250;
 
   // ---- any thread
   bool active() const;    // watches asked for at 40 MS/s run at 20 MS/s
@@ -42,9 +45,10 @@ public:
   int rate_for(int asked) const;
   // Watches run at the rate asked for again (the radio opened anew, or the watch rate set anew).
   void clear();
-  // Blocks the current watch's stream lost in the last kWindowMs, as of the last poll: counted from that watch's
-  // first block (nothing from before its retune), and from the retune of a fallback. 0 outside a watch, and once
-  // the polls stop for kWindowMs (a stream that delivers nothing).
+  // Blocks the current watch's stream lost in the last kWindowMs, as of the last poll: counted from kSettleMs
+  // after that watch's first block (nothing from before its retune, nor the stream's first moments), and again
+  // so after the retune of a fallback. 0 outside a watch, and once the polls stop for kWindowMs (a stream that
+  // delivers nothing).
   uint64_t late_recent(int64_t now_ms) const;
 
   // ---- the DSP thread
@@ -67,6 +71,7 @@ private:
   bool _active = false, _disabled = false, _watching = false;
   int64_t _t0_ms = 0;                                 // when the watch began
   int64_t _next_poll_ms = 0;
+  int64_t _first_ms = -1;                             // the first poll of this watch's stream (-1: none yet)
   std::deque<int64_t> _restarts;                      // the restarts that count, the last kWindowMs of them
   std::deque<std::pair<int64_t, uint64_t>> _marks;    // (ms, lost_total) at each poll, the last kWindowMs of them
 };

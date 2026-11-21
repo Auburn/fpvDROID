@@ -28,10 +28,11 @@ void FallbackPolicy::clear() {
 
 uint64_t FallbackPolicy::late_recent(int64_t now_ms) const {
   std::lock_guard<std::mutex> l(_m);
-  if (!_watching) return 0;
-  // the polls have kept only the last kWindowMs as of the latest one; the time since then takes more out
+  if (!_watching || _first_ms < 0) return 0;
+  // from the earliest count that is both past the stream's first moments and within the window: the polls have
+  // kept only the last kWindowMs as of the latest one, and the time since then takes more out
   for (const auto &m : _marks)
-    if (now_ms - m.first <= kWindowMs) return _marks.back().second - m.second;
+    if (m.first - _first_ms >= kSettleMs && now_ms - m.first <= kWindowMs) return _marks.back().second - m.second;
   return 0;
 }
 
@@ -40,6 +41,7 @@ void FallbackPolicy::watch_started(int64_t now_ms) {
   _watching = true;
   _t0_ms = now_ms;
   _next_poll_ms = now_ms;  // the first block of the watch gives the count to measure from
+  _first_ms = -1;
   _restarts.clear();
   _marks.clear();
 }
@@ -47,6 +49,7 @@ void FallbackPolicy::watch_started(int64_t now_ms) {
 void FallbackPolicy::watch_ended() {
   std::lock_guard<std::mutex> l(_m);
   _watching = false;
+  _first_ms = -1;
   _restarts.clear();
   _marks.clear();
 }
@@ -60,6 +63,7 @@ void FallbackPolicy::fall_back() {
   _active = true;
   _restarts.clear();
   _marks.clear();  // the 20 MS/s stream is measured from its own first block
+  _first_ms = -1;
 }
 
 bool FallbackPolicy::stream_restarted(int64_t now_ms, double fs) {
@@ -83,6 +87,7 @@ bool FallbackPolicy::poll_due(int64_t now_ms) {
 
 bool FallbackPolicy::blocks_lost(int64_t now_ms, double fs, uint64_t lost_total) {
   std::lock_guard<std::mutex> l(_m);
+  if (_first_ms < 0) _first_ms = now_ms;
   _marks.emplace_back(now_ms, lost_total);
   while (now_ms - _marks.front().first > kWindowMs) _marks.pop_front();
   if (!counts(now_ms, fs)) return false;

@@ -169,6 +169,43 @@ static void late_recent_counts_the_current_watch() {
   CHECK(p.late_recent(32000) == 1);
 }
 
+// One poll at t: the receiver's count stands at `total`.
+static void count_at(FP &p, int64_t t, uint64_t total) {
+  CHECK(p.poll_due(t));
+  CHECK(!p.blocks_lost(t, k40, total));
+}
+
+static void late_recent_leaves_out_a_streams_first_moments() {
+  FP p;
+  p.watch_started(0);
+  // the stream's first block comes 100 ms into the watch; 11 ms later it loses four (a Pixel 8 Pro, every start)
+  count_at(p, 100, 20);
+  CHECK(p.late_recent(100) == 0);
+  count_at(p, 300, 24);
+  CHECK(p.late_recent(300) == 0);
+  // settled: counted from here
+  count_at(p, 500, 24);
+  CHECK(p.late_recent(500) == 0);
+  count_at(p, 700, 25);
+  CHECK(p.late_recent(700) == 1);
+  count_at(p, 900, 27);
+  CHECK(p.late_recent(900) == 3);
+  // long after, the start no longer matters: only the window does
+  for (int64_t t = 1100; t <= 20000; t += FP::kPollMs) count_at(p, t, 27);
+  CHECK(p.late_recent(20000) == 0);
+  count_at(p, 20200, 30);
+  CHECK(p.late_recent(20200) == 3);
+  // and the same at the start of the next watch
+  p.watch_ended();
+  p.watch_started(30000);
+  count_at(p, 30050, 30);
+  count_at(p, 30250, 34);
+  CHECK(p.late_recent(30250) == 0);
+  count_at(p, 30450, 34);
+  count_at(p, 30650, 35);
+  CHECK(p.late_recent(30650) == 1);
+}
+
 static void late_recent_goes_when_the_stream_stops() {
   FP p;
   p.watch_started(0);
@@ -322,6 +359,7 @@ int main() {
   fallback_cleared();
   fallback_disabled_by_a_wedge_at_20();
   late_recent_counts_the_current_watch();
+  late_recent_leaves_out_a_streams_first_moments();
   late_recent_goes_when_the_stream_stops();
   late_recent_starts_over_at_a_fallback();
   gate_hides_the_frames_after_a_gap();
