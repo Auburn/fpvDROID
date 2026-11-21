@@ -140,6 +140,62 @@ static void fallback_disabled_by_a_wedge_at_20() {
   CHECK(!p.active());
 }
 
+static void late_recent_counts_the_current_watch() {
+  FP p;
+  CHECK(p.late_recent(0) == 0);  // no watch
+  // what the count stood at before the watch (a scan, a stream test, an earlier watch) is not this watch's
+  p.watch_started(1000);
+  CHECK(!poll(p, 1000, 2000, k20, 50));
+  CHECK(p.late_recent(2000) == 0);
+  // at any rate, and inside the grace: three more
+  CHECK(!poll(p, 2050, 3000, k20, 53));
+  CHECK(p.late_recent(3000) == 3);
+  // they stay for the window, then go
+  CHECK(!poll(p, 3050, 2000 + FP::kWindowMs, k20, 53));
+  CHECK(p.late_recent(2000 + FP::kWindowMs) == 3);
+  CHECK(!poll(p, 2050 + FP::kWindowMs, 3000 + FP::kWindowMs, k20, 53));
+  CHECK(p.late_recent(3000 + FP::kWindowMs) == 0);
+  // another mode: nothing
+  CHECK(!poll(p, 3050 + FP::kWindowMs, 20000, k20, 53));
+  CHECK(!poll(p, 20050, 21000, k20, 60));
+  CHECK(p.late_recent(21000) == 7);
+  p.watch_ended();
+  CHECK(p.late_recent(21000) == 0);
+  // the next watch starts from the count as it then stands
+  p.watch_started(30000);
+  CHECK(!poll(p, 30000, 31000, k40, 90));
+  CHECK(p.late_recent(31000) == 0);
+  CHECK(!poll(p, 31050, 32000, k40, 91));
+  CHECK(p.late_recent(32000) == 1);
+}
+
+static void late_recent_goes_when_the_stream_stops() {
+  FP p;
+  p.watch_started(0);
+  CHECK(!poll(p, 0, 1000, k40, 0));
+  CHECK(!poll(p, 1050, 2000, k40, 4));
+  CHECK(p.late_recent(2000) == 4);
+  // no more blocks, so no more polls: the last count ages out by the clock alone
+  CHECK(p.late_recent(1000 + FP::kWindowMs) == 4);
+  CHECK(p.late_recent(2100 + FP::kWindowMs) == 0);
+  CHECK(p.late_recent(60000) == 0);
+}
+
+static void late_recent_starts_over_at_a_fallback() {
+  FP p;
+  p.watch_started(0);
+  CHECK(!poll(p, 0, FP::kGraceMs + 500, k40, 0));
+  CHECK(poll(p, FP::kGraceMs + 550, FP::kGraceMs + 1500, k40, FP::kDrops));
+  CHECK(p.active());
+  // the 20 MS/s stream is measured from its own first block
+  const int64_t t = FP::kGraceMs + 2000;
+  CHECK(p.late_recent(t) == 0);
+  CHECK(!poll(p, t, t + 1000, k20, FP::kDrops + 5));
+  CHECK(p.late_recent(t + 1000) == 0);
+  CHECK(!poll(p, t + 1050, t + 2000, k20, FP::kDrops + 7));
+  CHECK(p.late_recent(t + 2000) == 2);
+}
+
 // ---------------------------------------------------------------------------------------- FrameGate
 
 static void gate_hides_the_frames_after_a_gap() {
@@ -265,6 +321,9 @@ int main() {
   fallback_poll_cadence();
   fallback_cleared();
   fallback_disabled_by_a_wedge_at_20();
+  late_recent_counts_the_current_watch();
+  late_recent_goes_when_the_stream_stops();
+  late_recent_starts_over_at_a_fallback();
   gate_hides_the_frames_after_a_gap();
   gate_hides_at_most_so_often();
   gate_switched_off_and_reset();

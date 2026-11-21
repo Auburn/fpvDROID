@@ -22,6 +22,9 @@ namespace kp {
 // And none at all once a stream that had fallen back wedged at 20 MS/s: on such a host 20 MS/s is worse than a
 // 40 MS/s that restarts, so there is no more falling back for as long as this object lives (clear() keeps that).
 //
+// The lost blocks are counted at every sample rate, for late_recent(): how many the current watch has lost
+// lately, which is what tells the app that the host is not keeping up.
+//
 // The clock is the caller's: every call that needs the time is given it, in ms of one steady clock.
 // Thread-safe: the DSP thread feeds it, the status and the setters read and clear it from other threads.
 class FallbackPolicy {
@@ -39,9 +42,14 @@ public:
   int rate_for(int asked) const;
   // Watches run at the rate asked for again (the radio opened anew, or the watch rate set anew).
   void clear();
+  // Blocks the current watch's stream lost in the last kWindowMs, as of the last poll: counted from that watch's
+  // first block (nothing from before its retune), and from the retune of a fallback. 0 outside a watch, and once
+  // the polls stop for kWindowMs (a stream that delivers nothing).
+  uint64_t late_recent(int64_t now_ms) const;
 
   // ---- the DSP thread
   void watch_started(int64_t now_ms);  // a new watch: nothing counted yet, the grace runs from now
+  void watch_ended();                  // the radio left the watch for another mode
   // The stream restarted during a watch at fs. True: fall back now (active() from here on).
   bool stream_restarted(int64_t now_ms, double fs);
   // The receiver's count of lost blocks is due: read it and call blocks_lost(). Asked with every bank of a watch.
@@ -56,11 +64,11 @@ private:
   void fall_back();
 
   mutable std::mutex _m;
-  bool _active = false, _disabled = false;
+  bool _active = false, _disabled = false, _watching = false;
   int64_t _t0_ms = 0;                                 // when the watch began
   int64_t _next_poll_ms = 0;
   std::deque<int64_t> _restarts;                      // the restarts that count, the last kWindowMs of them
-  std::deque<std::pair<int64_t, uint64_t>> _marks;    // (ms, lost_total) at each poll that counts, likewise
+  std::deque<std::pair<int64_t, uint64_t>> _marks;    // (ms, lost_total) at each poll, the last kWindowMs of them
 };
 
 }  // namespace kp

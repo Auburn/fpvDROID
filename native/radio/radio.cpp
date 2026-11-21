@@ -375,6 +375,7 @@ void Radio::dsp_loop() {
       // a mode change: set the radio up for it (a new watch builds a new decoder)
       _fe.reset();
       _fe_gen = ~0u;
+      if (mode != Mode::Watch) _fb.watch_ended();
       switch (mode) {
       case Mode::Watch: begin_watch(); break;
       case Mode::Scan: begin_scan(); break;
@@ -880,13 +881,16 @@ std::string Radio::status_json() {
   const auto num = [](double v) { return std::isfinite(v) ? v : 0.0; };
   static const char *modes[] = {"idle", "scan", "watch", "test"};
   const int64_t t = now_ms();
+  // late_recent: of stream_dropped (every block the adapter's stream gave up on since open()), those of the
+  // watch now running and of its last FallbackPolicy::kWindowMs: the host is not keeping up when they add up
+  const uint64_t late_recent = _mode == Mode::Watch ? _fb.late_recent(t) : 0;
   o << "{\"open\":" << (_open ? "true" : "false") << ",\"usb3\":" << (_superspeed ? "true" : "false")
     << ",\"chip\":" << jstr(_chip) << ",\"rx_state\":" << jstr(wsdr::rx_state_name(rs.state))
     << ",\"rx_error\":" << jstr(rs.error) << ",\"last_fault\":" << jstr(rs.last_fault)
     << ",\"mode\":\"" << modes[static_cast<int>(_mode)] << "\",\"freq_hz\":" << num(_req_hz)
     << ",\"watch_hz\":" << num(_watch_hz) << ",\"fs\":" << num(rs.fs) << ",\"banks\":" << _banks.load()
     << ",\"dropped\":" << _dropped.load() << ",\"decode_dropped\":" << _decq.dropped()
-    << ",\"stream_dropped\":" << rs.mid_drops
+    << ",\"stream_dropped\":" << rs.mid_drops << ",\"late_recent\":" << late_recent
     << ",\"restarts\":" << rs.restarts << ",\"dsp_load\":" << num(_load) << ",\"decode_load\":" << num(_dload)
     << ",\"watch_msps\":" << (_mode == Mode::Watch ? wsdr::Receiver::rate_of(_req_rate) / 1e6 : 0)
     << ",\"fallback\":" << (_fb.active() ? "true" : "false") << ",\"dead\":" << (_dead ? "true" : "false")

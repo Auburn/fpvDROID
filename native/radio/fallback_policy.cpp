@@ -26,10 +26,27 @@ void FallbackPolicy::clear() {
   _active = false;
 }
 
+uint64_t FallbackPolicy::late_recent(int64_t now_ms) const {
+  std::lock_guard<std::mutex> l(_m);
+  if (!_watching) return 0;
+  // the polls have kept only the last kWindowMs as of the latest one; the time since then takes more out
+  for (const auto &m : _marks)
+    if (now_ms - m.first <= kWindowMs) return _marks.back().second - m.second;
+  return 0;
+}
+
 void FallbackPolicy::watch_started(int64_t now_ms) {
   std::lock_guard<std::mutex> l(_m);
+  _watching = true;
   _t0_ms = now_ms;
-  _next_poll_ms = now_ms;
+  _next_poll_ms = now_ms;  // the first block of the watch gives the count to measure from
+  _restarts.clear();
+  _marks.clear();
+}
+
+void FallbackPolicy::watch_ended() {
+  std::lock_guard<std::mutex> l(_m);
+  _watching = false;
   _restarts.clear();
   _marks.clear();
 }
@@ -42,7 +59,7 @@ bool FallbackPolicy::counts(int64_t now_ms, double fs) const {
 void FallbackPolicy::fall_back() {
   _active = true;
   _restarts.clear();
-  _marks.clear();
+  _marks.clear();  // the 20 MS/s stream is measured from its own first block
 }
 
 bool FallbackPolicy::stream_restarted(int64_t now_ms, double fs) {
@@ -66,16 +83,16 @@ bool FallbackPolicy::poll_due(int64_t now_ms) {
 
 bool FallbackPolicy::blocks_lost(int64_t now_ms, double fs, uint64_t lost_total) {
   std::lock_guard<std::mutex> l(_m);
-  if (!counts(now_ms, fs)) {
-    _marks.clear();  // the window starts with the first poll that counts: what the grace lost is not in it
-    return false;
-  }
   _marks.emplace_back(now_ms, lost_total);
   while (now_ms - _marks.front().first > kWindowMs) _marks.pop_front();
-  const uint64_t lost = lost_total - _marks.front().second;
+  if (!counts(now_ms, fs)) return false;
+  // from the first poll after the grace: what the grace itself lost is not held against the stream
+  const auto from = std::find_if(_marks.begin(), _marks.end(),
+                                 [&](const auto &m) { return m.first - _t0_ms >= kGraceMs; });
+  const uint64_t lost = lost_total - from->second;
   if (lost < static_cast<uint64_t>(kDrops)) return false;
   KP_LOGW("radio: 40 MS/s lost %llu blocks in %.1f s: watching at 20 MS/s from now on",
-          static_cast<unsigned long long>(lost), (now_ms - _marks.front().first) / 1000.0);
+          static_cast<unsigned long long>(lost), (now_ms - from->first) / 1000.0);
   fall_back();
   return true;
 }
