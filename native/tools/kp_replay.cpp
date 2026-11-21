@@ -212,9 +212,9 @@ int main(int argc, char **argv) {
   const double dt = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   const auto s = fe.stats();
   std::fprintf(stderr, "done: %.2f s of IQ in %.2f s (%.1fx realtime), offset %+.3f MHz, frames %llu (%dx%d), "
-               "acquisitions %llu, losses %llu, lines locked %.1f%%\n",
+               "acquisitions %llu, losses %llu, re-phases %llu, lines locked %.1f%%\n",
                done / fs, dt, done / fs / dt, offset / 1e6, (unsigned long long)s.frames, fw, fh,
-               (unsigned long long)s.acquisitions, (unsigned long long)s.losses,
+               (unsigned long long)s.acquisitions, (unsigned long long)s.losses, (unsigned long long)s.rephases,
                s.lines ? 100.0 * s.lines_locked / s.lines : 0.0);
   std::fprintf(stderr, "cpu per second of IQ: demod %.0f ms, decode %.0f ms\n", t_demod / (done / fs) * 1e3,
                t_decode / (done / fs) * 1e3);
