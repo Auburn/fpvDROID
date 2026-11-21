@@ -78,10 +78,12 @@ On screen: the OSD pill (channel, frequency, SNR, decode → screen latency) can
 
 ## Layout
 
-- `native/dsp/` — video decoder (FM discriminator, sync, fields, the picture switches), spectrum + pilot
-  finding. No hardware.
+- `native/dsp/` — video decoder (`video.cpp`: FM discriminator, sync, fields; the luma and colour filters,
+  line drawing, sparkle repair and deinterlacing in files of their own), spectrum + pilot finding. No hardware.
 - `native/radio/` — the adapter (wifi-sdr `Receiver`) + a DSP thread: scan, watch, stream test; antenna
-  combining (`combine.cpp`).
+  combining (`combine.cpp`); when 40 MS/s gives way to 20 (`fallback_policy.cpp`); torn frames kept off the
+  screen (`frame_gate.cpp`).
+- `native/tests/` — unit tests of the radio's rules, no hardware (`ctest`; `scripts/build-desktop.sh` runs them).
 - `native/render/` — the picture on screen (OpenGL ES 3): layout, side-by-side view, the menu's blurred
   backdrop.
 - `native/jni/` — the app's native side; a render thread draws each frame on the video Surface as it is decoded.
@@ -150,6 +152,7 @@ build/desktop/kp_gen rec/r4 --mhz 5769 --label R4 --cnr 12   # a synthetic trans
 build/desktop/kp_replay rec/r4.cs16 --luma-comb --adaptive --smooth --repair   # the picture switches (--comb: colour comb)
 KP_SIM_FILE=rec/r4.cs16 build/desktop/kp_sim --scan --offset-tune --diversity   # the radio's switches, no hardware
 KP_SIM_FILE=rec/r4.cs16 KP_SIM_DROP_EVERY=700 build/desktop/kp_sim --watch 5769   # a link that loses every 700th block: falls back to 20 MS/s (after the 10 s grace)
+KP_SIM_FILE=rec/r4.cs16 KP_SIM_RESTART_EVERY_MS=1500 build/desktop/kp_sim --watch 5769   # a stream that restarts every 1.5 s: torn frames hidden, then 20 MS/s
 KP_SIM_FILE=rec/r4.cs16 build/desktop/kp_sim --watch 5769 --msps 20               # watch at 20 MS/s (kp_live takes --msps too)
 build/desktop/kp_render out.ppm --view 2400x1080 --aspect 16:9 --fit crop --stereo --blur 1   # what a view setting draws
 build/desktop/kp_replay ../vtx-spike/rec/demo.cs16            # lock numbers

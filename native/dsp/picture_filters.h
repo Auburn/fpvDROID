@@ -2,8 +2,8 @@
 // baseband colour in the sample rings, through one of two chains:
 //  - the notch chain: luma through a 3 MHz low-pass (two sections) and a notch at the subcarrier (rings ~4 px
 //    after every edge);
-//  - the luma comb (NTSC, set_luma_comb): a gentle 4.8 MHz low-pass, colour cancelled with the line before (no
-//    ringing, sharper), and on top of it the adaptive comb (set_adaptive_comb), which falls back to the notch
+//  - the luma comb (NTSC, PictureOpts::luma_comb): a gentle 4.8 MHz low-pass, colour cancelled with the line
+//    before (no ringing, sharper), and on top of it the adaptive comb (adaptive_comb), which falls back to the notch
 //    and fades the colour where the line before is clearly different.
 // Colour in both: mixed down by a free-running oscillator at the nominal subcarrier, whose phase belongs to the
 // absolute sample index (burst and picture share it), then a 4th-order Butterworth low-pass at 1.2 MHz (U/V
@@ -22,12 +22,12 @@ namespace kp {
 class PictureFilters {
 public:
   PictureFilters(double fs, bool colour);
-  // comb3: the 3-line chroma comb is on (DecoderOpts::comb, NTSC). The adaptive comb then only notes its fade
-  // (SampleRings::fade), for LineDrawer to apply where that comb finds no matching line.
-  void set_std(const VideoStd &s, bool comb3);
+  void set_std(const VideoStd &s);
   // Before each line's samples: the switches as they are for it, the line period T (samples) and 1 / the sync
   // depth. They hold until the next call.
-  void set_line(bool luma_comb, bool adaptive, double T, float inv_depth);
+  // comb3: the 3-line chroma comb is on (PictureOpts::chroma_comb, NTSC). The adaptive comb then only notes its
+  // fade (SampleRings::fade), for LineDrawer to apply where that comb finds no matching line.
+  void set_line(bool luma_comb, bool adaptive, bool comb3, double T, float inv_depth);
   // The next cnt samples (bad: their click marks, or null) through the chain into the rings; R.n moves on by cnt.
   void run(SampleRings &R, const float *d, const uint8_t *bad, size_t cnt);
   // With the luma comb: the picture [pic0, pic0 + aw) of a line already in the rings worked out again the way
@@ -52,8 +52,7 @@ private:
 
   double _fs;
   bool _colour;  // DecoderOpts::colour
-  bool _comb3 = false;
-  bool _luma_comb = false, _adaptive = false;
+  bool _luma_comb = false, _adaptive = false, _comb3 = false;  // set_line
   int _adaptive_lines = 0;  // lines since the adaptive comb came on: its filters and ring need one to fill
   Biquad _lp_luma, _lp_luma2, _luma_notch;                // the notch chain
   Biquad _lp_wide, _bp_chroma, _lp_vert, _luma_notch_w;   // the luma comb, and the adaptive comb's two

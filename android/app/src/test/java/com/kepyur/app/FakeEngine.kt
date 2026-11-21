@@ -197,7 +197,6 @@ class FakeEngine : Engine {
     private var watchRate = 1
     private var gain = -1.0
     private var offset = false
-    private var colourComb = false
 
     @Synchronized override fun setWatchRate(rateSel: Int): Boolean {
         rec("setWatchRate", rateSel)
@@ -217,10 +216,8 @@ class FakeEngine : Engine {
     }
 
     @Synchronized override fun setPicture(lumaComb: Boolean, adaptiveComb: Boolean, smoothLines: Boolean, repair: Boolean,
-                                          colourComb: Boolean): Boolean {
+                                          colourComb: Boolean) =
         rec("setPicture", lumaComb, adaptiveComb, smoothLines, repair, colourComb)
-        return (this.colourComb != colourComb).also { this.colourComb = colourComb }
-    }
 
     @Synchronized override fun setView(aspect: Float, fit: Int, scale: Float, stereo: Boolean, eyeShift: Float) =
         rec("setView", aspect, fit, scale, stereo, eyeShift)

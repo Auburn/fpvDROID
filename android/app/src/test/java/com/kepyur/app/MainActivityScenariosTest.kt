@@ -197,12 +197,12 @@ class MainActivityScenariosTest : AppHarness() {
     }
 
     @Test
-    fun colourCombIsSetAndTheChannelWatchedAgainNotFresh() {
+    fun colourCombIsSetWithoutWatchingTheChannelAgain() {
         running()
         showTab("Picture")
         fake.clearCalls()
         click(control("Colour comb"))
-        assertChanges(call("setPicture", true, true, true, false, true), call("watch", f2, false))
+        assertChanges(call("setPicture", true, true, true, false, true))
         assertTrue(savedSettings().colourComb)
     }
 

@@ -39,7 +39,7 @@ public:
   // The line into row (`width` RGBX pixels): luma between the two samples either side of each pixel, chroma
   // likewise, turned onto the burst's phase and scaled, PAL-D averaged with the line before, to RGB. Pixels
   // whose samples are not in the rings (past the stream's end, or too far back) are black.
-  // up / dn: comb this line's chroma with the line above / below (NTSC, DecoderOpts::comb). The subcarrier is
+  // up / dn: comb this line's chroma with the line above / below (NTSC, PictureOpts::chroma_comb). The subcarrier is
   // 227.5 x the line rate, so at the same place one line away chroma comes back with its sign flipped while
   // luma detail does not: combing cancels the luma near the subcarrier that the chroma filter lets through as
   // rainbows. Per pixel a neighbour only counts as far as its luma there matches this line's, so the top and

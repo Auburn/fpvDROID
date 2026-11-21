@@ -278,13 +278,6 @@ bool Radio::set_gain(double db) {
   return true;
 }
 
-bool Radio::set_comb(bool on) {
-  std::lock_guard<std::mutex> l(_m);
-  if (_comb == on) return false;
-  _comb = on;
-  return true;
-}
-
 void Radio::set_combine(bool on) { _combine = on; }
 
 void Radio::set_conceal(bool on) { _gate.set_enabled(on); }
@@ -432,7 +425,6 @@ void Radio::begin_watch() {
     // 40 MS/s with the chip's AGC, or 20 MS/s after a fallback. Both on a 40 MHz channel: at 20 MHz width the
     // OFDM CCA/AGC froze the LA in 120-sample runs (wifi-sdr RxSettings::wide).
     rate = _fb.rate_for(_watch_rate);
-    _watch_comb = _comb;  // a decoder rebuilt later in this watch (fallback, shift) keeps it
     _snr_db = -1;
   }
   KP_LOGI("radio: watch %.3f MHz at %.0f MS/s", hz / 1e6, wsdr::Receiver::rate_of(rate) / 1e6);
@@ -479,9 +471,7 @@ void Radio::note_faults(const wsdr::RxStatus &st) {
 // A new carrier or rate: a new decoder. No weights or noise estimates from the last one either, and the paths'
 // time offset is measured again (it is a number of samples, so it depends on the rate).
 void Radio::new_front_end(const Bank &b) {
-  DecoderOpts o;
-  o.comb = _watch_comb;
-  _fe = std::make_shared<FrontEnd>(b.fs, b.shift_hz, _gate.sink(), o);
+  _fe = std::make_shared<FrontEnd>(b.fs, b.shift_hz, _gate.sink(), DecoderOpts{}, _picture.load());
   _fe_fs = b.fs;
   _fe_shift = b.shift_hz;
   _combiner.reset(b.fs);
@@ -600,7 +590,8 @@ void Radio::demod_for_decoder(bool gap) {
   DemodBlock blk = _decq.blank();
   blk.fe = _fe;
   blk.gap = gap;
-  _fe->demod(_iq.data(), _iq.size(), blk.d, &blk.bad);  // bad stays empty while sparkle repair is off
+  _fe->set_picture(_picture.load(std::memory_order_relaxed));  // whatever set_picture() last said, block by block
+  _fe->demod(_iq.data(), _iq.size(), blk.d, blk.bad);
   _decq.push(std::move(blk));
 }
 
@@ -690,7 +681,7 @@ void Radio::decode_loop() {
       _fps_t0_ms = now_ms();
     }
     if (blk.gap) _gate.gap(now_ms());  // the frame this block is in is torn, and the next while the decoder re-phases
-    cur->decode(blk.d.data(), blk.d.size(), blk.bad.size() == blk.d.size() ? blk.bad.data() : nullptr);
+    cur->decode(blk.d, blk.bad);
     busy += std::chrono::duration<double>(std::chrono::steady_clock::now() - ta).count();
     _decq.recycle(std::move(blk));
     const int64_t t = now_ms();

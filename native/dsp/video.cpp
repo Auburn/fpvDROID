@@ -21,19 +21,6 @@ namespace kp {
 const VideoStd kNtsc{63.5556, 9.4, 52.6, 240, 18, "NTSC"};
 const VideoStd kPal{64.0, 10.5, 52.0, 288, 22, "PAL"};
 
-// ---- picture switches (every decoder in the process; see video.h) ----
-namespace {
-std::atomic<bool> g_luma_comb{false}, g_acomb{false}, g_repair{false}, g_smooth{false};
-}
-void set_luma_comb(bool on) { g_luma_comb = on; }
-bool luma_comb_on() { return g_luma_comb.load(std::memory_order_relaxed); }
-void set_adaptive_comb(bool on) { g_acomb = on; }
-bool adaptive_comb_on() { return g_acomb.load(std::memory_order_relaxed); }
-void set_repair(bool on) { g_repair = on; }
-bool repair_on() { return g_repair.load(std::memory_order_relaxed); }
-void set_smooth_lines(bool on) { g_smooth = on; }
-bool smooth_lines_on() { return g_smooth.load(std::memory_order_relaxed); }
-
 // ---- the decoder: discriminator output (MHz) in, frames out ---------------------------------------------
 // It finds the sync pulses (levels, acquisition, a line PLL that freewheels and re-phases), which is all its own;
 // for the rest it runs the modules: the luma and colour paths behind the pulse tracking into the sample rings
@@ -41,8 +28,9 @@ bool smooth_lines_on() { return g_smooth.load(std::memory_order_relaxed); }
 // (line_draw.h) and, as each field ends, the frame (deinterlace.h).
 class Decoder {
 public:
-  Decoder(double fs, FrameSink sink, const DecoderOpts &o)
-      : fs(fs), sink(std::move(sink)), o(o), drawer(o.width, fs), filt(fs, o.colour), spark(fs) {
+  // picture: the switches, which whoever owns the decoder may change at any time (FrontEnd::set_picture)
+  Decoder(double fs, FrameSink sink, const DecoderOpts &o, const std::atomic<PictureOpts> &picture)
+      : fs(fs), sink(std::move(sink)), o(o), picture(picture), drawer(o.width, fs), filt(fs, o.colour), spark(fs) {
     lp_sync.design(1.0e6, fs);
     acq.resize(static_cast<size_t>(fs * 0.06));  // 60 ms
     hist.assign(800, 0);
@@ -116,6 +104,8 @@ private:
   double fs;
   FrameSink sink;
   DecoderOpts o;
+  const std::atomic<PictureOpts> &picture;
+  PictureOpts pic;  // ... as of the start of the line being received (refresh_switches)
   const VideoStd *std_ = &kNtsc;
   float sign = +1, tip = -1, blank = 0, thr = -0.5f;
   uint64_t n = 0;  // samples taken (the pulse tracking's count)
@@ -130,7 +120,7 @@ private:
   uint64_t od_at = UINT64_MAX;
   SampleRings R;  // what the filters below have made of the samples so far (R.n <= n: filter_to)
   LineDrawer drawer;
-  // NTSC chroma comb (DecoderOpts::comb; LineDrawer::draw does the combing): each line is drawn one line late,
+  // NTSC chroma comb (PictureOpts::chroma_comb; LineDrawer::draw does the combing): each line is drawn one line late,
   // once the line below is in, and combed with both neighbours (centred, so chroma stays on luma's line).
   // Luma keeps the notch. PAL (its subcarrier pattern repeats over two lines) is not combed.
   static constexpr float kCombMaxErr = 0.35f;  // rad: a burst further off means the stream jumped
@@ -151,9 +141,8 @@ private:
   // The luma and colour paths, which follow behind the pulse tracking (filter_to). Their switches are set once
   // per line (refresh_switches).
   PictureFilters filt;
-  bool repair = false;
   float inv_depth = 1;  // 1 / sync depth, as of the line's start
-  SparkleRepair spark;  // sparkle repair (set_repair), on the click marks in R.bad
+  SparkleRepair spark;  // sparkle repair (PictureOpts::repair), on the click marks in R.bad
   bool low = false, longrun = false;
   uint64_t low_start = 0;
   double T = 0, line_start = -1;
@@ -288,8 +277,7 @@ private:
     fieldA.assign(static_cast<size_t>(o.width) * s.active * 4, 0);
     fieldB = fieldA;
     frame.assign(static_cast<size_t>(o.width) * s.active * 2 * 4, 0);
-    comb = o.comb && &s != &kPal;
-    filt.set_std(s, comb);
+    filt.set_std(s);
     refresh_switches();
     comb_epoch++;
     drawer.set_std(s, filt.comb_w());
@@ -298,13 +286,21 @@ private:
     c_last_line = -1;
   }
 
-  // The picture switches (process-wide, see video.h) and the timing for the line that begins. PAL's colour
-  // repeats over two lines, not one: it keeps the notch.
+  // The picture switches as they now stand, and the timing, for the line that begins. PAL's colour repeats over
+  // two lines, not one: it keeps the notch and is not combed.
   void refresh_switches() {
-    const bool luma_comb = (o.luma_filter >= 0 ? o.luma_filter == 1 : luma_comb_on()) && std_ != &kPal;
+    pic = picture.load(std::memory_order_relaxed);
+    const bool ntsc = std_ != &kPal;
+    const bool luma_comb = pic.luma_comb && ntsc;
+    if (comb != (pic.chroma_comb && ntsc)) {
+      // The chroma comb comes on or goes off. Lines either side of the change do not mix, and the line the comb
+      // was holding back (it draws each a line late) is not drawn: its row keeps what the frame before had.
+      comb = !comb;
+      comb_epoch++;
+      comb_up = comb_mid = LineInfo{};
+    }
     inv_depth = 1.f / std::max(blank - tip, 0.2f);
-    filt.set_line(luma_comb, luma_comb && adaptive_comb_on(), T, inv_depth);
-    repair = repair_on();
+    filt.set_line(luma_comb, luma_comb && pic.adaptive_comb, comb, T, inv_depth);
   }
 
   void count_line(bool locked) {
@@ -545,7 +541,7 @@ private:
     if (!in_picture(k)) return l;
     if (locked) measure_levels(ls);
     if (filt.luma_comb()) top_line(ls, k);
-    l.hit = repair && patch_line(ls);
+    l.hit = pic.repair && patch_line(ls);
     l.col = o.colour && locked && burst(ls, l.pal_v);
     l.ok = l.col && burst_e < kCombMaxErr;
     l.phase = c_phase;
@@ -562,7 +558,7 @@ private:
       comb_line(cur);
     } else if (in_picture(cur.k)) {
       draw_line(cur, false, false);
-      if (repair) mend_rows(cur.k, cur.hit);
+      if (pic.repair) mend_rows(cur.k, cur.hit);
     }
   }
 
@@ -576,7 +572,7 @@ private:
         return m.ok && x.ok && x.field == m.field && x.k == m.k + dk && x.epoch == m.epoch;
       };
       draw_line(m, pair(comb_up, -1), pair(cur, 1));
-      if (repair) mend_rows(m.k, m.hit);
+      if (pic.repair) mend_rows(m.k, m.hit);
     }
     comb_up = comb_mid;
     comb_mid = cur;
@@ -683,7 +679,7 @@ private:
       ph -= std::floor(ph + 0.25);  // -> [-0.25, 0.75)
       const bool odd = std::fabs(ph) < 0.25;
       // smooth lines: A is the lower field, B the upper one (B's line k is drawn above A's line k)
-      const bool smooth = smooth_lines_on();
+      const bool smooth = pic.smooth_lines;
       if (cur_field == 0) {
         haveA = true;
         if (o.fields) smooth ? emit_field(fieldA, false) : emit(fieldA, fieldA);
@@ -747,8 +743,8 @@ private:
 // kepyur: block-wise and branch-free so the compiler vectorises it (the spike's per-sample loop used a whole
 // phone core at 40 MS/s). Per chunk of <= kTab samples: DC removal (block mean, smoothed), mix by a
 // precomputed rotation table, halfband /2 over a work array with 22 samples of history, discriminator.
-FrontEnd::FrontEnd(double fs_in, double shift_hz, FrameSink sink, const DecoderOpts &o)
-    : _fs_in(fs_in), _fs_out(fs_in >= 40e6 ? fs_in / 2 : fs_in), _decimate(fs_in >= 40e6) {
+FrontEnd::FrontEnd(double fs_in, double shift_hz, FrameSink sink, const DecoderOpts &o, const PictureOpts &p)
+    : _fs_in(fs_in), _fs_out(fs_in >= 40e6 ? fs_in / 2 : fs_in), _decimate(fs_in >= 40e6), _picture(p) {
   for (int i = 0; i < kHb; i++) {
     const int k = i - kHb / 2;
     const double w = 0.5 - 0.5 * std::cos(2 * M_PI * (i + 0.5) / kHb);
@@ -756,7 +752,7 @@ FrontEnd::FrontEnd(double fs_in, double shift_hz, FrameSink sink, const DecoderO
   }
   _wr.assign(kHb - 1 + kTab, 0.f);
   _wi.assign(kHb - 1 + kTab, 0.f);
-  _dec = new Decoder(_fs_out, std::move(sink), o);
+  _dec = new Decoder(_fs_out, std::move(sink), o, _picture);
   _clicks = new ClickDetector(_fs_out);
   set_shift(shift_hz);
 }
@@ -796,11 +792,11 @@ inline float atan2_bf(float y, float x) {
 }
 }  // namespace
 
-void FrontEnd::demod(const cf *xs, size_t n, std::vector<float> &out, std::vector<uint8_t> *bad) {
+void FrontEnd::demod(const cf *xs, size_t n, std::vector<float> &out, std::vector<uint8_t> &bad) {
   out.clear();
-  const bool rep = bad && repair_on();
+  const bool rep = _picture.load(std::memory_order_relaxed).repair;
   _clicks->begin(rep);
-  if (bad) bad->clear();
+  bad.clear();
   const float k = static_cast<float>(_fs_out / (2 * M_PI) / 1e6);  // rad/sample -> MHz
   constexpr int H = kHb - 1;
   while (n > 0) {
@@ -869,16 +865,16 @@ void FrontEnd::demod(const cf *xs, size_t n, std::vector<float> &out, std::vecto
     xs += m;
     n -= m;
   }
-  if (rep) _clicks->mark(out, *bad);
+  if (rep) _clicks->mark(out, bad);
 }
 
-void FrontEnd::decode(const float *d, size_t n, const uint8_t *bad) {
-  _dec->push_block(d, bad, n);
+void FrontEnd::decode(const std::vector<float> &d, const std::vector<uint8_t> &bad) {
+  _dec->push_block(d.data(), bad.size() == d.size() ? bad.data() : nullptr, d.size());
 }
 
 void FrontEnd::feed(const cf *xs, size_t n) {
-  demod(xs, n, _dbuf, &_badbuf);
-  decode(_dbuf.data(), _dbuf.size(), _badbuf.size() == _dbuf.size() ? _badbuf.data() : nullptr);
+  demod(xs, n, _dbuf, _badbuf);
+  decode(_dbuf, _badbuf);
 }
 
 }  // namespace kp

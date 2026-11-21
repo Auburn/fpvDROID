@@ -30,7 +30,7 @@ PictureFilters::PictureFilters(double fs, bool colour) : _fs(fs), _colour(colour
   _cdel_comb = 0.21e-6 * fs + (delay(_lp_luma, &l2) - delay(_lp_wide, nullptr));
 }
 
-void PictureFilters::set_std(const VideoStd &s, bool comb3) {
+void PictureFilters::set_std(const VideoStd &s) {
   const double fsc = &s == &kPal ? 4.43361875e6 : 315e6 / 88;
   const double a = 2 * M_PI * fsc / _fs;
   _lo_step = cf(static_cast<float>(std::cos(a)), static_cast<float>(std::sin(a)));
@@ -38,12 +38,12 @@ void PictureFilters::set_std(const VideoStd &s, bool comb3) {
   _luma_notch_w.notch(fsc, _fs, 1.5);  // adaptive comb: the same, on the comb's wide signal
   _bp_chroma.bandpass(fsc, _fs, 1.0);  // luma comb: the colour band of the line difference
   _comb_w = a;
-  _comb3 = comb3;
 }
 
-void PictureFilters::set_line(bool luma_comb, bool adaptive, double T, float inv_depth) {
+void PictureFilters::set_line(bool luma_comb, bool adaptive, bool comb3, double T, float inv_depth) {
   _luma_comb = luma_comb;
   _adaptive = adaptive;
+  _comb3 = comb3;
   _adaptive_lines = adaptive ? std::min(_adaptive_lines + 1, 2) : 0;
   // the same point on the line before: n - T = (n - ceil(T)) + (ceil(T) - T)
   const double up = std::ceil(T);

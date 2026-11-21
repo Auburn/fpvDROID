@@ -32,10 +32,10 @@ interface Engine {
     /** Hardware centre beside the channel (off the chip's DC point). */
     fun setOffsetTuning(on: Boolean): Boolean
     /**
-     * The decoder's picture switches (native/dsp/video.h). At once, all but [colourComb] (the NTSC 3-line chroma
-     * comb: fewer rainbows on fine detail, more decode CPU), which is what the result is about.
+     * The decoder's picture switches (PictureOpts in native/dsp/video.h). At once. [colourComb]: the NTSC 3-line
+     * chroma comb (fewer rainbows on fine detail, more decode CPU).
      */
-    fun setPicture(lumaComb: Boolean, adaptiveComb: Boolean, smoothLines: Boolean, repair: Boolean, colourComb: Boolean): Boolean
+    fun setPicture(lumaComb: Boolean, adaptiveComb: Boolean, smoothLines: Boolean, repair: Boolean, colourComb: Boolean)
     /** How the picture is laid out on the Surface. [fit]: 0 fit, 1 stretch, 2 crop. [eyeShift]: fraction of the width. */
     fun setView(aspect: Float, fit: Int, scale: Float, stereo: Boolean, eyeShift: Float)
     /** The menu's backdrop: the picture blurred and dimmed, eased in and out unless [now]. */
@@ -82,7 +82,7 @@ object Native : Engine {
     external override fun setGain(db: Double): Boolean
     external override fun setDiversity(on: Boolean)
     external override fun setOffsetTuning(on: Boolean): Boolean
-    external override fun setPicture(lumaComb: Boolean, adaptiveComb: Boolean, smoothLines: Boolean, repair: Boolean, colourComb: Boolean): Boolean
+    external override fun setPicture(lumaComb: Boolean, adaptiveComb: Boolean, smoothLines: Boolean, repair: Boolean, colourComb: Boolean)
     external override fun setView(aspect: Float, fit: Int, scale: Float, stereo: Boolean, eyeShift: Float)
     external override fun setBackdrop(on: Boolean, now: Boolean)
     external override fun record(seconds: Double, prefix: String)

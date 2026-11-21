@@ -208,11 +208,13 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     }
 
     // ---------------------------------------------------------------------------------------- settings -> native
-    // Each says whether something changed that a watch only takes when it starts: the native side knows which of its
-    // settings those are, and whether this is a change (Engine).
-    private fun applyPicture(): Boolean = engine.setPicture(settings.lumaComb, settings.lumaComb && settings.cleanOsd,
+    private fun applyPicture() = engine.setPicture(settings.lumaComb, settings.lumaComb && settings.cleanOsd,
         settings.smoothLines, settings.sparkleRepair, settings.colourComb)
 
+    /**
+     * True when something changed that a watch only takes when it starts: the native side knows which of its
+     * settings those are, and whether this is a change (Engine).
+     */
     private fun applySignal(): Boolean {
         val rate = engine.setWatchRate(if (settings.rate40) 1 else 2)
         val gain = engine.setGain(if (settings.gainAuto) -1.0 else settings.gainDb.toDouble())
@@ -262,9 +264,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
 
     override fun onView() = applyView()
 
-    override fun onPicture() {
-        if (applyPicture()) retune()
-    }
+    override fun onPicture() = applyPicture()
 
     override fun onSignal() {
         if (applySignal()) retune()

@@ -63,7 +63,7 @@ public:
   void watch(double hz);
   void stream_test(int rate_sel, double seconds);
   void idle();
-  // The four setters below only take effect at the next watch() (the next tune). Each returns true when it
+  // The three setters below only take effect at the next watch() (the next tune). Each returns true when it
   // changed something, so that a watch already running has to be started again (watch()) to have it.
   //
   // The rate watch uses (1 = 40 MS/s, the default; 2 = 20 MS/s). A change also clears a 20 MS/s fallback; the
@@ -71,9 +71,6 @@ public:
   bool set_watch_rate(int rate_sel);
   // Gain: < 0 = the chip's AGC, else fixed gain in dB (CCA off, IGI pinned).
   bool set_gain(double db);
-  // NTSC chroma comb (DecoderOpts::comb): fewer rainbows on fine detail and OSD text, ~15 % more decode CPU.
-  // Off by default. Android: Native.setComb (the "comb" debug extra).
-  bool set_comb(bool on);
   // Off-centre tuning (watch only): the hardware centre on the 5 MHz grid ~6 MHz to one side of the pilot at
   // 40 MS/s, so the video never sits on the chip's DC point: its DC filter eats whatever brightness lands there
   // and rings when the picture moves off it (stripes at the left edge, ghost outlines). At 20 MS/s it changes
@@ -85,6 +82,9 @@ public:
   // Two-antenna video: true = paths A and B combined before demodulation (combine.h), false = A only. Takes
   // effect at once (no retune).
   void set_combine(bool on);
+  // The decoder's picture switches (video.h), for the watch that is running and those after it. Takes effect
+  // within a line of video (no retune). Any thread.
+  void set_picture(const PictureOpts &p) { _picture.store(p, std::memory_order_relaxed); }
   struct ComboStatus {
     bool on = false;
     Combiner::Stats s;  // the last second; the time offset between the paths as of its end
@@ -152,8 +152,7 @@ private:
   // not its "no more falling back". Locks for itself (taken inside _m where both are needed, never the reverse).
   FallbackPolicy _fb;
   double _gain_db = -1;
-  bool _comb = false;
-  bool _watch_comb = false;  // _comb as of the current watch (DSP thread only)
+  std::atomic<PictureOpts> _picture{PictureOpts{}};  // set_picture(); the DSP thread hands it to the decoder
   bool _offset = false;      // off-centre tuning
   bool _dead = false;        // the DSP thread exited because the receiver stopped (cleared by open())
   bool _wedged = false;      // ... because the chip's C2H path wedged: only open() again recovers (RxStatus::wedged)

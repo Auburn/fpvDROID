@@ -10,7 +10,7 @@ namespace kp {
 // twice doubles its lines).
 void weave(const uint8_t *a, const uint8_t *b, int W, int A, uint8_t *frame);
 
-// Smooth lines (set_smooth_lines): one field into the frame at its own lines (the even ones when upper), the
+// Smooth lines (PictureOpts::smooth_lines): one field into the frame at its own lines (the even ones when upper), the
 // lines between interpolated from the field lines above and below, along whichever of 5 directions matches best,
 // so a diagonal edge stays a clean diagonal instead of a staircase.
 class Deinterlacer {

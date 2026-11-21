@@ -4,7 +4,7 @@
 //   kp_live --test 1 60                     stream test: rate_sel (1 = 40 MS/s, 2 = 20 MS/s), seconds
 //   options: --offset-tune (hardware centre beside the pilot), --diversity (antennas A + B combined; their numbers
 //   printed every second), --msps 20 (watch at 20 MS/s instead of 40), --repair (sparkle repair), --luma-comb,
-//   --adaptive (comb), --smooth (lines)
+//   --adaptive (comb), --smooth (lines), --comb (the 3-line colour comb)
 //   ... --frames | ffplay -f rawvideo -pixel_format rgb0 -video_size 720x480 -framerate 60 -fflags nobuffer -i -
 #include <atomic>
 #include <chrono>
@@ -25,6 +25,7 @@ int main(int argc, char **argv) {
   double mhz = 5769, secs = 60;
   int rate = 1, watch_rate = 1;
   bool frames = false, offset = false, diversity = false;
+  PictureOpts pic;
   for (int i = 1; i < argc; i++) {
     const std::string k = argv[i];
     if (k == "--scan") mode = "scan";
@@ -34,15 +35,16 @@ int main(int argc, char **argv) {
     else if (k == "--offset-tune") offset = true;
     else if (k == "--diversity") diversity = true;
     else if (k == "--msps" && i + 1 < argc) watch_rate = std::atoi(argv[++i]) == 20 ? 2 : 1;
-    else if (k == "--repair") set_repair(true);
-    else if (k == "--luma-comb") set_luma_comb(true);
-    else if (k == "--adaptive") set_adaptive_comb(true);
-    else if (k == "--smooth") set_smooth_lines(true);
+    else if (k == "--repair") pic.repair = true;
+    else if (k == "--luma-comb") pic.luma_comb = true;
+    else if (k == "--adaptive") pic.adaptive_comb = true;
+    else if (k == "--smooth") pic.smooth_lines = true;
+    else if (k == "--comb") pic.chroma_comb = true;
     else if (k == "-v") set_log_debug(true);
     else {
       std::fprintf(stderr, "usage: kp_live [--scan | --watch MHZ | --test RATE_SEL SECONDS] [--frames] [-v]\n"
                    "        [--offset-tune] [--diversity] [--msps 20|40] [--repair] [--luma-comb] [--adaptive]\n"
-                   "        [--smooth]\n");
+                   "        [--smooth] [--comb]\n");
       return 2;
     }
   }
@@ -66,6 +68,7 @@ int main(int argc, char **argv) {
   }
   radio.set_offset_tuning(offset);
   radio.set_combine(diversity);
+  radio.set_picture(pic);
   radio.set_watch_rate(watch_rate);
   if (mode == "scan") radio.scan();
   else if (mode == "watch") radio.watch(mhz * 1e6);

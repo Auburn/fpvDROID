@@ -33,7 +33,8 @@ static double json_number(const std::string &txt, const char *key) {
 int main(int argc, char **argv) {
   std::string file;
   double offset = NAN, start = 0, seconds = 0, cnr = 0, fs = 40e6, mix = 0;
-  bool frames = false, woven = false, as20 = false, comb = false, repair = false;
+  bool frames = false, woven = false, as20 = false;
+  PictureOpts pic;
   for (int i = 1; i < argc; i++) {
     const std::string k = argv[i];
     auto v = [&] { return i + 1 < argc ? argv[++i] : (std::fprintf(stderr, "missing value\n"), std::exit(2), ""); };
@@ -46,11 +47,11 @@ int main(int argc, char **argv) {
     else if (k == "--as20") as20 = true;  // emulate the adapter at 20 MS/s: ~18.4 MHz filter, decimate by 2
     else if (k == "--frames") frames = true;
     else if (k == "--woven") woven = true;
-    else if (k == "--comb") comb = true;
-    else if (k == "--luma-comb") set_luma_comb(true);
-    else if (k == "--adaptive") set_adaptive_comb(true);
-    else if (k == "--repair") set_repair(true), repair = true;
-    else if (k == "--smooth") set_smooth_lines(true);
+    else if (k == "--comb") pic.chroma_comb = true;
+    else if (k == "--luma-comb") pic.luma_comb = true;
+    else if (k == "--adaptive") pic.adaptive_comb = true;
+    else if (k == "--repair") pic.repair = true;
+    else if (k == "--smooth") pic.smooth_lines = true;
     else if (k == "-v") set_log_debug(true);
     else if (k[0] != '-') file = k;
     else {
@@ -157,13 +158,12 @@ int main(int argc, char **argv) {
   const double fs_dec = as20 ? fs / 2 : fs;
   DecoderOpts o;
   o.fields = !woven;
-  o.comb = comb;
   int fw = 0, fh = 0;
   FrontEnd fe(fs_dec, offset, [&](const Frame &fr) {
     fw = fr.width;
     fh = fr.height;
     if (frames) std::fwrite(fr.data, 1, static_cast<size_t>(fr.width) * fr.height * 4, stdout);
-  }, o);
+  }, o, pic);
   std::mt19937 rng(1);
   std::normal_distribution<float> nd(0.f, 1.f);
   float noise_sd = 0;
@@ -192,9 +192,9 @@ int main(int argc, char **argv) {
     const auto ta = std::chrono::steady_clock::now();
     size_t nn = n;
     if (as20) nn = dec20(x.data(), n);
-    fe.demod(x.data(), nn, dbuf, &bad);
+    fe.demod(x.data(), nn, dbuf, bad);
     const auto tb = std::chrono::steady_clock::now();
-    fe.decode(dbuf.data(), dbuf.size(), bad.size() == dbuf.size() ? bad.data() : nullptr);
+    fe.decode(dbuf, bad);
     t_demod += std::chrono::duration<double>(tb - ta).count();
     t_decode += std::chrono::duration<double>(std::chrono::steady_clock::now() - tb).count();
     done += n;
@@ -218,7 +218,7 @@ int main(int argc, char **argv) {
                s.lines ? 100.0 * s.lines_locked / s.lines : 0.0);
   std::fprintf(stderr, "cpu per second of IQ: demod %.0f ms, decode %.0f ms\n", t_demod / (done / fs) * 1e3,
                t_decode / (done / fs) * 1e3);
-  if (repair)
+  if (pic.repair)
     std::fprintf(stderr, "sparkle repair: %llu clicks patched, %llu lines mended\n", (unsigned long long)s.clicks_repaired,
                  (unsigned long long)s.lines_mended);
   return 0;

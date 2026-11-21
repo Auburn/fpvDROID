@@ -223,14 +223,15 @@ JNIEXPORT jboolean JNICALL Java_com_kepyur_app_Native_setOffsetTuning(JNIEnv *, 
   return g_radio && g_radio->set_offset_tuning(on);
 }
 
-JNIEXPORT jboolean JNICALL Java_com_kepyur_app_Native_setPicture(JNIEnv *, jclass, jboolean luma_comb,
-                                                                 jboolean adaptive, jboolean smooth, jboolean repair,
-                                                                 jboolean colour_comb) {
-  set_luma_comb(luma_comb);
-  set_adaptive_comb(adaptive);
-  set_smooth_lines(smooth);
-  set_repair(repair);
-  return g_radio && g_radio->set_comb(colour_comb);
+JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setPicture(JNIEnv *, jclass, jboolean luma_comb, jboolean adaptive,
+                                                             jboolean smooth, jboolean repair, jboolean colour_comb) {
+  PictureOpts p;
+  p.luma_comb = luma_comb;
+  p.adaptive_comb = adaptive;
+  p.smooth_lines = smooth;
+  p.repair = repair;
+  p.chroma_comb = colour_comb;
+  if (g_radio) g_radio->set_picture(p);
 }
 
 JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setView(JNIEnv *, jclass, jfloat aspect, jint fit, jfloat scale,
