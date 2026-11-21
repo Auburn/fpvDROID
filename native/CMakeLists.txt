@@ -98,6 +98,11 @@ if(NOT ANDROID)
   target_link_libraries(kp_radio_tests PRIVATE kepyur_dsp Threads::Threads)
   target_compile_options(kp_radio_tests PRIVATE -O2 -Wall -Wextra)
   add_test(NAME radio COMMAND kp_radio_tests)
+  # the decoder's sync tracking, on a signal the test makes itself
+  add_executable(kp_decoder_tests tests/decoder_tests.cpp)
+  target_link_libraries(kp_decoder_tests PRIVATE kepyur_dsp)
+  target_compile_options(kp_decoder_tests PRIVATE -O2 -Wall -Wextra)
+  add_test(NAME decoder COMMAND kp_decoder_tests)
 endif()
 
 # ---- Android JNI ----

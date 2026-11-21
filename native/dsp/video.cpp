@@ -145,6 +145,8 @@ private:
   SparkleRepair spark;  // sparkle repair (PictureOpts::repair), on the click marks in R.bad
   bool low = false, longrun = false;
   uint64_t low_start = 0;
+  static constexpr double kHsMinUs = 3.0, kHsMaxUs = 6.5;  // an hsync: a pulse this long (4.7 us nominal)
+  double hs_len = 0;  // how long hsyncs have been lately, in samples (on_hsync)
   double T = 0, line_start = -1;
   uint64_t lines = 0, lines_locked = 0, line_idx = 0, acquisitions = 0, losses = 0;
   uint64_t line_low = 0;
@@ -209,15 +211,19 @@ private:
       if (w >= thr) {
         low = false;
         const double wid = (now - low_start) / fs * 1e6;
-        if (wid > 3.0 && wid < 6.5) {
+        if (wid > kHsMinUs && wid < kHsMaxUs) {
           filter_to(n);
-          on_hsync(static_cast<double>(low_start));
+          on_hsync(static_cast<double>(low_start), static_cast<double>(now - low_start));
         }
       }
       line_low++;
     }
-    // freewheel: line overdue by > 8 % with no edge
-    if (now > overdue_at()) {
+    // freewheel: line overdue by > 8 % with no edge. A pulse that is low now and may yet be an hsync counts as
+    // an edge: what it is shows only when it ends, 4.7 us after it began, and the line is overdue 5.1 us after
+    // its hsync was due. Without the wait an hsync more than 0.4 us late was never taken, though the window is
+    // 5.1 us either side: the line freewheeled, the pulse came out as a stray one line off, and so did every
+    // hsync after it, until the run of strays re-phased the grid six lines on.
+    if (now > overdue_at() && !(low && (now - low_start) / fs * 1e6 < kHsMaxUs)) {
       filter_to(n);
       const double ls = line_start;
       miss_run++;
@@ -336,6 +342,7 @@ private:
     gated_lines = 0;
     miss_run = stray_run = 0;
     last_stray = -1;
+    hs_len = 0;
     comb_epoch++;
   }
 
@@ -705,14 +712,29 @@ private:
     refresh_switches();
   }
 
-  void on_hsync(double edge) {
+  // An hsync-width pulse has ended: it began at edge and was len samples long.
+  void on_hsync(double edge, double len) {
     if (line_start < 0) {
       line_start = edge;
       return;
     }
     const double pred = line_start + T;
-    if (std::fabs(edge - pred) <= 0.08 * T) {
-      const double ns = 0.6 * edge + 0.4 * pred;
+    // Where the hsync began. A dip in the signal just ahead of the pulse (a click, the black edge of an OSD
+    // character at the end of the picture) runs into it, and the pulse seems to begin early; one inside it
+    // splits it, and the part that is left begins late. The pulse's end is then still right, and where the hsync
+    // began follows from that and from how long hsyncs are (hs_len); with a dip behind the pulse it is the other
+    // way round. So when the pulse is not as long as hsyncs are (by more than 0.1 us: they vary by a sample), of
+    // the two, its own beginning and its end less hs_len, the one nearer to where the hsync was due is taken.
+    // (Taken by its beginning alone, a pulse that began 0.85 us early moved the grid 0.5 us at once, 7 pixels,
+    // for the lines after it to pull back.)
+    const double by_end = edge + len - hs_len;
+    const bool odd = hs_len > 0 && std::fabs(len - hs_len) > 0.1e-6 * fs;
+    const double at = odd && std::fabs(by_end - pred) < std::fabs(edge - pred) ? by_end : edge;
+    if (std::fabs(at - pred) <= 0.08 * T) {
+      // hs_len follows the pulses a sixteenth of a sample at a time, whatever their length: one that something
+      // ran into does not move it
+      hs_len = hs_len > 0 ? hs_len + std::clamp(len - hs_len, -1.0, 1.0) * (1.0 / 16) : len;
+      const double ns = 0.6 * at + 0.4 * pred;
       T = 0.995 * T + 0.005 * (ns - line_start);
       miss_run = 0;
       stray_run = 0;
