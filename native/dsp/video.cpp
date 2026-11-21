@@ -10,6 +10,7 @@
 
 #include "biquad.h"
 #include "deinterlace.h"
+#include "line_draw.h"
 #include "log.h"
 #include "rings.h"
 #include "sparkle.h"
@@ -32,30 +33,10 @@ bool repair_on() { return g_repair.load(std::memory_order_relaxed); }
 void set_smooth_lines(bool on) { g_smooth = on; }
 bool smooth_lines_on() { return g_smooth.load(std::memory_order_relaxed); }
 
-namespace {
-
-// Four pixels as RGBX words (bytes R, G, B, X): draw_line's per-pixel conversion, each of R, G and B (0..1)
-// to clamp(z * 255, 0, 255) truncated to a byte.
-typedef uint32_t v4u __attribute__((vector_size(16)));
-inline v4u byte_of(v4f z) {
-  const v4f lo = {0.f, 0.f, 0.f, 0.f}, hi = {255.f, 255.f, 255.f, 255.f};
-  z = z * 255.f;
-  z = z < lo ? lo : z;
-  z = hi < z ? hi : z;
-  return __builtin_convertvector(z, v4u);
-}
-inline v4u rgb_px(v4f r, v4f g, v4f b) { return 0xff000000u | byte_of(b) << 16 | byte_of(g) << 8 | byte_of(r); }
-inline v4u grey_px(v4f y) {
-  const v4u q = byte_of(y);
-  return 0xff000000u | q << 16 | q << 8 | q;
-}
-
-}  // namespace
-
 // ---- the decoder (streaming, one sample of discriminator output at a time, MHz) ----------------------
 class Decoder {
 public:
-  Decoder(double fs, FrameSink sink, const DecoderOpts &o) : fs(fs), sink(std::move(sink)), o(o), spark(fs) {
+  Decoder(double fs, FrameSink sink, const DecoderOpts &o) : fs(fs), sink(std::move(sink)), o(o), drawer(o.width, fs), spark(fs) {
     // chroma: mixed down by the subcarrier, 4th-order Butterworth low-pass at 1.2 MHz (U/V bandwidth)
     for (Biquad *b : {&cl_r1, &cl_i1}) b->design(1.2e6, fs, 0.54);
     for (Biquad *b : {&cl_r2, &cl_i2}) b->design(1.2e6, fs, 1.31);
@@ -65,9 +46,6 @@ public:
     // luma comb: one gentle section (Q 0.6: no peaking, ~1 % overshoot), -3 dB near 4 MHz
     lp_wide.design(4.8e6, fs, 0.6);
     lp_vert.design(1.0e6, fs);  // adaptive comb: brightness below the colour band, line against line
-    // adaptive fade behind the 3-line comb (draw_line): the chroma low-pass's main lobe, as three points
-    fade_back = std::max(1, static_cast<int>(std::lround(0.4e-6 * fs)));
-    fade_step = std::max(1, static_cast<int>(std::lround(0.2e-6 * fs)));
     // colour / brightness registration: the notch chain was aligned by hand (0.21 us); the comb's luma filter
     // is faster, so colour must come that much later relative to it
     {
@@ -170,35 +148,16 @@ private:
   double od_ls = 0, od_T = 0;
   uint64_t od_at = UINT64_MAX;
   SampleRings R;  // what the filters below have made of the samples so far (R.n <= n: filter_to)
-  // kepyur: NTSC chroma comb (DecoderOpts::comb). The subcarrier is 227.5 x the line rate, so at the same
-  // place one line away chroma comes back with the subcarrier's sign flipped while luma detail does not:
-  // combing cancels the luma near the subcarrier that the 1.2 MHz chroma filter lets through as rainbows.
-  // It works on the baseband chroma already in R.chroma, inside render_line: each line is drawn one line
-  // late, once the line below is in, and combed with both neighbours (centred, so chroma stays on luma's
-  // line). Adaptive: per pixel a neighbour only counts as far as its luma there matches this line's, so the
-  // top and bottom edges of OSD glyphs fall back to the plain filter instead of keeping half the rainbow.
-  // Luma keeps the notch. PAL (2H subcarrier pattern) is unchanged.
-  struct CombLine {
-    double ls = -1;
-    int64_t k = -1;
-    int field = -1;
-    bool col = false;  // drawn in colour
-    bool ok = false;   // usable as a neighbour: locked, in colour, burst on the PLL's predicted phase
-    bool hit = false;  // sparkle repair: still badly hit after patching (mend_rows)
-    bool fade = false;  // adaptive comb: R.fade holds this line's fade
-    uint64_t epoch = 0;
-    double phase = 0;  // c_phase and c_mag after this line's burst: it is drawn after the next line's
-    float mag = 0;
-  };
-  static constexpr float kCombFull = 0.08f, kCombNone = 0.25f;  // luma mismatch, of black-to-white
+  LineDrawer drawer;
+  // NTSC chroma comb (DecoderOpts::comb; LineDrawer::draw does the combing): each line is drawn one line late,
+  // once the line below is in, and combed with both neighbours (centred, so chroma stays on luma's line).
+  // Luma keeps the notch. PAL (its subcarrier pattern repeats over two lines) is not combed.
   static constexpr float kCombMaxErr = 0.35f;  // rad: a burst further off means the stream jumped
   bool comb = false;
   double comb_w = 0;           // the mixing oscillator's frequency, rad per sample
   uint64_t comb_epoch = 0;     // bumped where the sample stream may have jumped: lines across it don't mix
-  CombLine comb_up, comb_mid;  // the two lines before the current one
+  LineInfo comb_up, comb_mid;  // the two lines before the current one
   float burst_e = 0;           // |phase error| of the last burst against the PLL's prediction
-  std::vector<float> comb_m;   // draw_line: the comb on every other pixel (see there)
-  std::vector<cf> comb_o;
   // kepyur: colour. A free-running oscillator at the nominal subcarrier mixes chroma to baseband; a
   // per-line PLL on the burst tracks the transmitter's subcarrier phase (and its small frequency error);
   // PAL: the burst's +-45 degree swing gives the V switch, and adjacent lines are averaged (PAL-D).
@@ -209,15 +168,11 @@ private:
   float c_mag = 0, c_err = 1;      // burst amplitude (MHz), mean |phase error| (rad)
   bool colour_on = false;
   int c_good = 0;
-  std::vector<float> prev_u, prev_v;  // PAL-D: the previous line's U/V
-  std::vector<float> px_cm, px_cr, px_ci;  // draw_colour: the comb for each pixel (chroma * px_cm - px_c{r,i})
-  std::vector<double> px_off;      // draw_line: pixel x is px_off[x] samples into the line's picture (set_std)
   float med_a = 0, med_b = 0;
   Biquad lp_luma, lp_luma2, lp_sync;
   // Luma comb (DecoderOpts::luma_filter, set_luma_comb) and adaptive comb (set_adaptive_comb): see push().
   // The switches are read once per line (refresh_switches), not per sample.
   Biquad lp_wide, bp_chroma, lp_vert, luma_notch_w;
-  int fade_back = 8, fade_step = 4;  // where draw_line reads it, in samples before the chroma (see there)
   bool luma_comb = false, adaptive = false, repair = false;
   int adaptive_lines = 0;  // lines since the adaptive comb came on: its filters and ring need one to fill
   uint64_t prev_back = 1;  // the line before: ring sample n - prev_back, and prev_fr of the way to the next one
@@ -533,10 +488,7 @@ private:
     comb = o.comb && &s != &kPal;
     comb_w = a;
     comb_epoch++;
-    prev_u.assign(o.width, 0.f);
-    prev_v.assign(o.width, 0.f);
-    px_off.resize(o.width);  // draw_line: each pixel's place on the line, in samples after its picture starts
-    for (int x = 0; x < o.width; x++) px_off[x] = s.aw_us * 1e-6 * fs * x / o.width;
+    drawer.set_std(s, a);
     colour_on = false;
     c_good = 0;
     c_last_line = -1;
@@ -793,7 +745,14 @@ private:
     const bool hit = repair && patch_line(ls);
     bool pal_v = false;
     const bool col = o.colour && locked_line && burst(ls, pal_v);
-    draw_line(ls, k, col, pal_v, false, false, c_phase, c_mag, false);
+    LineInfo l;
+    l.ls = ls;
+    l.k = k;
+    l.col = col;
+    l.pal_v = pal_v;
+    l.phase = c_phase;
+    l.mag = c_mag;
+    draw_line(l, false, false);
     if (repair) mend_rows(k, hit);
   }
 
@@ -801,7 +760,7 @@ private:
   // k - 2 and k. A neighbour is used only if both lines are locked and in colour, in the same field and on
   // the same side of any jump in the stream (comb_epoch, and a burst on its predicted phase).
   void comb_line(double ls, int64_t k, bool locked_line) {
-    CombLine cur;
+    LineInfo cur;
     cur.ls = ls;
     cur.k = k;
     cur.field = cur_field;
@@ -817,246 +776,24 @@ private:
       cur.mag = c_mag;
       cur.fade = adaptive && adaptive_lines > 1;  // as push() had them over this line's picture
     }
-    const CombLine &m = comb_mid;
+    const LineInfo &m = comb_mid;
     if (m.field == cur_field && m.k == k - 1 && m.k >= 0 && m.k < std_->active) {
-      const auto pair = [&](const CombLine &x, int64_t dk) {
+      const auto pair = [&](const LineInfo &x, int64_t dk) {
         return m.ok && x.ok && x.field == m.field && x.k == m.k + dk && x.epoch == m.epoch;
       };
-      draw_line(m.ls, m.k, m.col, false, pair(comb_up, -1), pair(cur, 1), m.phase, m.mag, m.fade);
+      draw_line(m, pair(comb_up, -1), pair(cur, 1));
       if (repair) mend_rows(m.k, m.hit);
     }
     comb_up = comb_mid;
     comb_mid = cur;
   }
 
-  // draw_line without colour: each pixel the same arithmetic as there (the luma between the two samples either
-  // side, then to bytes), the interpolation and the conversion four pixels at a time as vectors; the samples are
-  // fetched one by one (there is no gather). Pixels whose samples are not in the ring (past the stream's end, or
-  // too far back) are black, as there: a run at either end of the line, found once per line, not per pixel.
-  void draw_grey(uint32_t *row, double base, float yscale) {
-    const int W = o.width;
-    const double *xo = px_off.data();
-    const float *lr = R.luma.data();
-    const size_t mask = R.mask;
-    const auto first = [&](int x) { return static_cast<int64_t>(base + xo[x]); };  // pixel x's first sample
-    int x0 = 0, x1 = W;  // [x0, x1): in the ring (first() only grows with x)
-    while (x0 < W && !R.kept(first(x0), 8)) row[x0++] = 0xff000000u;
-    while (x1 > x0 && !R.written(first(x1 - 1) + 8)) row[--x1] = 0xff000000u;
-    const float sg = sign, sb = sign * blank;
-    int x = x0;
-    for (; x + 4 <= x1; x += 4) {
-      v4f a, b, f;
-      for (int q = 0; q < 4; q++) {
-        const double p = base + xo[x + q];
-        const int64_t i0 = static_cast<int64_t>(p);
-        f[q] = static_cast<float>(p - i0);
-        a[q] = lr[i0 & mask];
-        b[q] = lr[(i0 + 1) & mask];
-      }
-      const v4u px = grey_px(sg * (a + (b - a) * f - sb) * yscale);
-      std::memcpy(row + x, &px, sizeof px);
-    }
-    for (; x < x1; x++) {
-      const double p = base + xo[x];
-      const int64_t i0 = static_cast<int64_t>(p);
-      const float f = static_cast<float>(p - i0);
-      const float v0 = lr[i0 & mask], v1 = lr[(i0 + 1) & mask];
-      const v4u px = grey_px(v4f{sg * (v0 + (v1 - v0) * f - sb) * yscale, 0.f, 0.f, 0.f});
-      row[x] = px[0];
-    }
-  }
-
-  // draw_line in colour: as draw_grey, four pixels at a time, each through the same arithmetic as one at a time
-  // (written out once more in `one`, for the pixels left over at the end). Chroma is interpolated like luma,
-  // the comb taken out (comb_on: the comb's terms per pixel, worked out for the line first), turned onto the
-  // burst's phase and scaled, PAL-D averaged with the line before, and converted to RGB.
-  void draw_colour(uint32_t *row, double base, float yscale, double cdel, cf rot, float k_uv, bool comb_on, bool pal,
-                   bool pal_v) {
-    const int W = o.width;
-    const double *xo = px_off.data();
-    const float *lr = R.luma.data();
-    const cf *chr = R.chroma.data();
-    const size_t mask = R.mask;
-    const auto first = [&](int x) { return static_cast<int64_t>(base + xo[x]); };
-    int x0 = 0, x1 = W;  // [x0, x1): in the ring, as in draw_grey
-    while (x0 < W && !R.kept(first(x0), 8)) row[x0++] = 0xff000000u;
-    while (x1 > x0 && !R.written(first(x1 - 1) + 8)) row[--x1] = 0xff000000u;
-    if (comb_on) {
-      // the comb on every other pixel (comb_m, comb_o: see draw_line), in between the mean of the two either side
-      px_cm.resize(W);
-      px_cr.resize(W);
-      px_ci.resize(W);
-      for (int x = x0; x < x1; x++) {
-        const int h = x >> 1;
-        if (x & 1) {
-          px_cm[x] = 1 - 0.5f * (comb_m[h] + comb_m[h + 1]);
-          px_cr[x] = 0.5f * (comb_o[h].real() + comb_o[h + 1].real());
-          px_ci[x] = 0.5f * (comb_o[h].imag() + comb_o[h + 1].imag());
-        } else {
-          px_cm[x] = 1 - comb_m[h];
-          px_cr[x] = comb_o[h].real();
-          px_ci[x] = comb_o[h].imag();
-        }
-      }
-    }
-    float *pu = prev_u.data(), *pv = prev_v.data();
-    const float sg = sign, sb = sign * blank, rr = rot.real(), ri = rot.imag();
-    int x = x0;
-    for (; x + 4 <= x1; x += 4) {
-      v4f a, b, f, c0r, c0i, c1r, c1i, fc;
-      for (int q = 0; q < 4; q++) {
-        const double p = base + xo[x + q];
-        const int64_t i0 = static_cast<int64_t>(p);
-        f[q] = static_cast<float>(p - i0);
-        a[q] = lr[i0 & mask];
-        b[q] = lr[(i0 + 1) & mask];
-        const double pc = p + cdel;
-        const int64_t j0 = static_cast<int64_t>(pc);
-        fc[q] = static_cast<float>(pc - j0);
-        const cf c0 = chr[j0 & mask], c1 = chr[(j0 + 1) & mask];
-        c0r[q] = c0.real();
-        c0i[q] = c0.imag();
-        c1r[q] = c1.real();
-        c1i[q] = c1.imag();
-      }
-      const v4f y = sg * (a + (b - a) * f - sb) * yscale;
-      v4f cre = c0r + (c1r - c0r) * fc, cim = c0i + (c1i - c0i) * fc;
-      if (comb_on) {
-        v4f cm, cr, ci;
-        std::memcpy(&cm, &px_cm[x], sizeof cm);
-        std::memcpy(&cr, &px_cr[x], sizeof cr);
-        std::memcpy(&ci, &px_ci[x], sizeof ci);
-        cre = cre * cm - cr;
-        cim = cim * cm - ci;
-      }
-      v4f u = -((cre * rr - cim * ri) * k_uv), v = -((cre * ri + cim * rr) * k_uv);
-      if (pal) {
-        if (pal_v) v = -v;
-        v4f lu, lv;  // the line before
-        std::memcpy(&lu, pu + x, sizeof lu);
-        std::memcpy(&lv, pv + x, sizeof lv);
-        std::memcpy(pu + x, &u, sizeof u);
-        std::memcpy(pv + x, &v, sizeof v);
-        u = 0.5f * (u + lu);
-        v = 0.5f * (v + lv);
-      }
-      const v4u px = rgb_px(y + 1.140f * v, y - 0.395f * u - 0.581f * v, y + 2.032f * u);
-      std::memcpy(row + x, &px, sizeof px);
-    }
-    for (; x < x1; x++) {  // one pixel at a time: the same, in scalars
-      const double p = base + xo[x];
-      const int64_t i0 = static_cast<int64_t>(p);
-      const float f = static_cast<float>(p - i0);
-      const float v0 = lr[i0 & mask], v1 = lr[(i0 + 1) & mask];
-      const float y = sg * (v0 + (v1 - v0) * f - sb) * yscale;
-      const double pc = p + cdel;
-      const int64_t j0 = static_cast<int64_t>(pc);
-      const float fc = static_cast<float>(pc - j0);
-      const cf c0 = chr[j0 & mask], c1 = chr[(j0 + 1) & mask];
-      float cre = c0.real() + (c1.real() - c0.real()) * fc, cim = c0.imag() + (c1.imag() - c0.imag()) * fc;
-      if (comb_on) {
-        cre = cre * px_cm[x] - px_cr[x];
-        cim = cim * px_cm[x] - px_ci[x];
-      }
-      float u = -((cre * rr - cim * ri) * k_uv), v = -((cre * ri + cim * rr) * k_uv);
-      if (pal) {
-        if (pal_v) v = -v;
-        const float lu = pu[x], lv = pv[x];
-        pu[x] = u;
-        pv[x] = v;
-        u = 0.5f * (u + lu);
-        v = 0.5f * (v + lv);
-      }
-      const v4u px = rgb_px(v4f{y + 1.140f * v, 0, 0, 0}, v4f{y - 0.395f * u - 0.581f * v, 0, 0, 0},
-                            v4f{y + 2.032f * u, 0, 0, 0});
-      row[x] = px[0];
-    }
-  }
-
-  // up / dn: comb this line's chroma with the line above / below (see comb_line); fade: the adaptive comb's
-  // fade for this line is in R.fade
-  void draw_line(double ls, int64_t k, bool col, bool pal_v, bool up, bool dn, double phase, float mag, bool fade) {
-    uint32_t *row = reinterpret_cast<uint32_t *>((cur_field == 0 ? fieldA : fieldB).data()) + static_cast<size_t>(k) * o.width;
-    const double a0 = std_->a0_us * 1e-6 * fs, aw = std_->aw_us * 1e-6 * fs;
-    const float white = blank + 2.5f * (blank - tip);
-    const float yscale = 1.f / (white - blank);
-    // chroma -> U/V in luma units: the burst is 20/92.5 (NTSC) or 0.15/0.7 (PAL) of black-to-white, and
-    // demodulated chroma comes out as -(U + jV)/2 against a burst of +1/2 (see fpv_sim.py's composite())
-    const float k_uv = 0.215f / std::max(mag, 1e-6f);
-    const cf rot = std::polar(1.f, static_cast<float>(-phase));
+  // The line into its row of the field being built (line_draw.h). up / dn: comb its chroma with the line above /
+  // below (comb_line).
+  void draw_line(const LineInfo &l, bool up, bool dn) {
+    uint32_t *row = reinterpret_cast<uint32_t *>((cur_field == 0 ? fieldA : fieldB).data()) + static_cast<size_t>(l.k) * o.width;
     const double cdel = luma_comb ? cdel_comb : 0.21e-6 * fs;  // chroma filter delay minus luma filter delay
-    const bool pal = std_ == &kPal;
-    // the comb's neighbours sit one line period T (Ti whole samples and Tf more) away, turned onto this
-    // line's subcarrier phase: the oscillator runs on the absolute sample index, so what is mixed down one
-    // line away comes out turned by w*T
-    if (dn && !R.written(static_cast<int64_t>(ls + a0 + aw + cdel + T + 2))) dn = false;
-    if (up && !R.kept(static_cast<int64_t>(ls + a0 - T), 8)) up = false;
-    // The comb, on every other pixel (chroma is 1.2 MHz wide; per pixel cost twice as much for nothing
-    // visible) and interpolated in between below: chroma becomes c * (1 - comb_m) - comb_o.
-    const bool comb_on = col && (up || dn || fade);
-    if (comb_on) {
-      const int64_t Ti = static_cast<int64_t>(T);
-      const float Tf = static_cast<float>(T - Ti);
-      const cf turn = std::polar(1.f, static_cast<float>(-comb_w * T));  // the line above; below: conj
-      const float wk = std::fabs(yscale) / (kCombNone - kCombFull), w1 = kCombNone / (kCombNone - kCombFull);
-      const int nc = (o.width + 1) / 2;
-      comb_m.resize(nc + 1);
-      comb_o.resize(nc + 1);
-      const double step = 2 * aw / o.width;
-      for (int h = 0; h < nc; h++) {
-        float m = 0, orr = 0, oi = 0;
-        const double p = ls + a0 + step * h, pc = p + cdel;
-        const int64_t i0 = static_cast<int64_t>(p + 0.5), j0 = static_cast<int64_t>(pc);
-        if (R.has(i0 - Ti, j0 + Ti + 3, 8)) {
-          // a neighbour's weight: 1 while its luma here is within kCombFull of this line's, 0 past kCombNone
-          const float y0 = R.luma[i0 & R.mask];
-          const float wu = up ? std::clamp(w1 - std::fabs(R.luma[(i0 - Ti) & R.mask] - y0) * wk, 0.f, 1.f) : 0.f;
-          const float wd = dn ? std::clamp(w1 - std::fabs(R.luma[(i0 + Ti) & R.mask] - y0) * wk, 0.f, 1.f) : 0.f;
-          if (wu + wd > 0) {
-            // A neighbour turned onto this line has chroma -c and the same luma detail, so c + the neighbours'
-            // mean is twice the detail: take out half of it per unit of the best weight (all of it at 1).
-            m = 0.5f * std::max(wu, wd);
-            const float sc = m / (wu + wd);
-            const float fc = static_cast<float>(pc - j0);
-            // R.chroma at j + t (0 <= t < 2), in plain floats: branch-free, and std::complex cost more here
-            const auto take = [&](int64_t j, float t, float rr, float ri) {
-              const int iw = static_cast<int>(t);
-              j += iw;
-              t -= static_cast<float>(iw);
-              const cf a = R.chroma[j & R.mask], b = R.chroma[(j + 1) & R.mask];
-              const float xr = a.real() + (b.real() - a.real()) * t, xi = a.imag() + (b.imag() - a.imag()) * t;
-              orr += xr * rr - xi * ri;
-              oi += xr * ri + xi * rr;
-            };
-            if (wu > 0) take(j0 - Ti - 1, fc + 1 - Tf, turn.real() * sc * wu, turn.imag() * sc * wu);
-            if (wd > 0) take(j0 + Ti, fc + Tf, turn.real() * sc * wd, -turn.imag() * sc * wd);
-          }
-        }
-        if (fade) {
-          // Adaptive comb: where this line differs from the one before, colour is faded out, because there
-          // the detail that passes for colour cannot be cancelled against that line. The comb above can use
-          // the line below as well, so only what it left in (all of it at m = 0: no line matches, a stroke one
-          // line tall; none at m = 0.5) is faded. The fade was worked out ahead of the chroma low-pass: seen
-          // through that filter (its main lobe, as three points) it is what fading ahead of it would have done.
-          const int64_t jf = j0 - fade_back;
-          const float f = 0.25f * (R.fade[(jf - fade_step) & R.mask] + R.fade[(jf + fade_step) & R.mask]) +
-                          0.5f * R.fade[jf & R.mask];
-          const float keep = 1.f - f * (1.f - 2.f * m);
-          m = 1.f - (1.f - m) * keep;
-          orr *= keep;
-          oi *= keep;
-        }
-        comb_m[h] = m;
-        comb_o[h] = cf(orr, oi);
-      }
-      comb_m[nc] = comb_m[nc - 1];
-      comb_o[nc] = comb_o[nc - 1];
-    }
-    if (!col) {
-      draw_grey(row, ls + a0, yscale);
-      return;
-    }
-    draw_colour(row, ls + a0, yscale, cdel, rot, k_uv, comb_on, pal, pal_v);
+    drawer.draw(row, R, l, up, dn, DrawParams{sign, tip, blank, T, cdel});
   }
 
   // The top of the picture with the luma comb. The first picture line of a field has blanking above it, not
