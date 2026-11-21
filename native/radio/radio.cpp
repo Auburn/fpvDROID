@@ -263,20 +263,26 @@ void Radio::idle() {
   _mode_epoch++;
 }
 
-void Radio::set_watch_rate(int rate_sel) {
+bool Radio::set_watch_rate(int rate_sel) {
   std::lock_guard<std::mutex> l(_m);
+  if (_watch_rate == rate_sel) return false;
   _watch_rate = rate_sel;
   _fb.clear();
+  return true;
 }
 
-void Radio::set_gain(double db) {
+bool Radio::set_gain(double db) {
   std::lock_guard<std::mutex> l(_m);
+  if (_gain_db == db) return false;
   _gain_db = db;
+  return true;
 }
 
-void Radio::set_comb(bool on) {
+bool Radio::set_comb(bool on) {
   std::lock_guard<std::mutex> l(_m);
+  if (_comb == on) return false;
   _comb = on;
+  return true;
 }
 
 void Radio::set_combine(bool on) { _combine = on; }

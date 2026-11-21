@@ -63,20 +63,22 @@ public:
   void watch(double hz);
   void stream_test(int rate_sel, double seconds);
   void idle();
-  // Debug: the rate watch uses (1 = 40 MS/s, the default; 2 = 20 MS/s); takes effect on the next watch().
-  // Also clears a 20 MS/s fallback.
-  void set_watch_rate(int rate_sel);
-  // Debug: gain for the next tune: < 0 = the chip's AGC, else fixed gain in dB (CCA off, IGI pinned).
-  void set_gain(double db);
-  // NTSC chroma comb (DecoderOpts::comb), taken at the next watch(): fewer rainbows on fine detail and OSD
-  // text, ~15 % more decode CPU. Off by default. Android: Native.setComb (the "comb" debug extra).
-  void set_comb(bool on);
+  // The four setters below only take effect at the next watch() (the next tune). Each returns true when it
+  // changed something, so that a watch already running has to be started again (watch()) to have it.
+  //
+  // The rate watch uses (1 = 40 MS/s, the default; 2 = 20 MS/s). A change also clears a 20 MS/s fallback; the
+  // same rate again changes nothing (a fallback stays).
+  bool set_watch_rate(int rate_sel);
+  // Gain: < 0 = the chip's AGC, else fixed gain in dB (CCA off, IGI pinned).
+  bool set_gain(double db);
+  // NTSC chroma comb (DecoderOpts::comb): fewer rainbows on fine detail and OSD text, ~15 % more decode CPU.
+  // Off by default. Android: Native.setComb (the "comb" debug extra).
+  bool set_comb(bool on);
   // Off-centre tuning (watch only): the hardware centre on the 5 MHz grid ~6 MHz to one side of the pilot at
   // 40 MS/s, so the video never sits on the chip's DC point: its DC filter eats whatever brightness lands there
   // and rings when the picture moves off it (stripes at the left edge, ghost outlines). At 20 MS/s it changes
   // nothing: the stream is only +-10 MHz wide, the video has to stay in its middle, and the centre stays the
-  // grid point nearest the pilot (at most 2.5 MHz from it). Off by default; taken at the next watch(). True when
-  // it changed (call watch() again to retune now).
+  // grid point nearest the pilot (at most 2.5 MHz from it). Off by default.
   bool set_offset_tuning(bool on);
   // The hardware centre off-centre tuning picks for a pilot at hz, streaming at fs.
   static double offset_centre(double hz, double fs);
