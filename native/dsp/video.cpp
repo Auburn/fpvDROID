@@ -9,6 +9,7 @@
 #include <cstring>
 
 #include "biquad.h"
+#include "deinterlace.h"
 #include "log.h"
 #include "rings.h"
 
@@ -242,8 +243,6 @@ private:
   uint64_t mend_field = ~0ull;
   int mend_cur = -1;
   uint64_t clicks_repaired = 0, lines_mended = 0;
-  std::vector<uint16_t> lum_rows;  // smooth lines: each field row's brightness ...
-  std::vector<int8_t> best_dir;    // ... and one row's interpolation directions
   bool low = false, longrun = false;
   uint64_t low_start = 0;
   double T = 0, line_start = -1;
@@ -256,6 +255,7 @@ private:
   size_t acq_n = 0;
   bool acquiring = true;
   std::vector<uint8_t> fieldA, fieldB, frame;
+  Deinterlacer deint;
   bool haveA = false, haveB = false;
   int cur_field = -1;
   int64_t field_line0 = 0;
@@ -1326,69 +1326,17 @@ private:
     gated_lines++;
   }
 
-  // Smooth lines: field f (the upper field when upper) into the frame at its own lines, the lines between from
-  // the field lines above (p) and below (q), averaged along whichever of 5 directions matches best (so a
-  // diagonal edge stays a clean diagonal instead of a staircase).
+  // A frame to the sink: from one field with its lines interpolated (smooth lines), or from two (the same one
+  // twice: each line doubled).
   void emit_field(const std::vector<uint8_t> &f, bool upper) {
-    const int W = o.width, A = std_->active;
-    const size_t rowb = static_cast<size_t>(W) * 4;
-    uint8_t *out = frame.data();
-    for (int r = 0; r < A; r++) std::memcpy(out + (2 * r + (upper ? 0 : 1)) * rowb, f.data() + r * rowb, rowb);
-    // every row's brightness once: the search below compares 5 pairs of them per pixel
-    lum_rows.resize(static_cast<size_t>(W) * A);
-    for (size_t i = 0, e = lum_rows.size(); i < e; i++) {
-      const uint8_t *px = f.data() + i * 4;
-      lum_rows[i] = static_cast<uint16_t>(px[0] + 2 * px[1] + px[2]);
-    }
-    best_dir.resize(W);
-    const auto blend = [](const uint8_t *a, const uint8_t *b, uint8_t *dst) {  // per byte (a + b + 1) / 2
-      uint32_t x, y;
-      std::memcpy(&x, a, 4);
-      std::memcpy(&y, b, 4);
-      const uint32_t z = (x | y) - (((x ^ y) >> 1) & 0x7f7f7f7fu);
-      std::memcpy(dst, &z, 4);
-    };
-    for (int r = 0; r < A; r++) {
-      const int line = upper ? 2 * r + 1 : 2 * r;
-      const int rp = upper ? r : std::max(r - 1, 0), rq = upper ? std::min(r + 1, A - 1) : r;
-      const uint8_t *p = f.data() + rp * rowb, *q = f.data() + rq * rowb;
-      const uint16_t *lp = lum_rows.data() + static_cast<size_t>(rp) * W, *lq = lum_rows.data() + static_cast<size_t>(rq) * W;
-      uint8_t *dst = out + line * rowb;
-      int8_t *best = best_dir.data();
-      // The direction d (p at x + d against q at x - d) with the lowest cost, straight down preferred; ties go
-      // to the first of -2, -1, 0, 1, 2. Away from the row's ends all five exist: no branches, so it vectorises.
-      const auto edge = [&](int x) {
-        int b = 0, bc = 1 << 30;
-        for (int d = std::max(-2, std::max(-x, x - (W - 1))), de = std::min(2, std::min(x, W - 1 - x)); d <= de; d++) {
-          const int c = std::abs(lp[x + d] - lq[x - d]) + (d ? 24 + 8 * std::abs(d) : 0);
-          if (c < bc) bc = c, b = d;
-        }
-        best[x] = static_cast<int8_t>(b);
-      };
-      for (int x = 0; x < std::min(2, W); x++) edge(x);
-      for (int x = 2; x < W - 2; x++) {
-        int bc = std::abs(lp[x - 2] - lq[x + 2]) + 40, b = -2;
-        const int c1 = std::abs(lp[x - 1] - lq[x + 1]) + 32, c2 = std::abs(lp[x] - lq[x]);
-        const int c3 = std::abs(lp[x + 1] - lq[x - 1]) + 32, c4 = std::abs(lp[x + 2] - lq[x - 2]) + 40;
-        b = c1 < bc ? -1 : b, bc = std::min(bc, c1);
-        b = c2 < bc ? 0 : b, bc = std::min(bc, c2);
-        b = c3 < bc ? 1 : b, bc = std::min(bc, c3);
-        b = c4 < bc ? 2 : b;
-        best[x] = static_cast<int8_t>(b);
-      }
-      for (int x = std::max(2, W - 2); x < W; x++) edge(x);
-      for (int x = 0; x < W; x++) blend(p + (x + best[x]) * 4, q + (x - best[x]) * 4, dst + x * 4);
-    }
-    frames_out++;
-    if (sink) sink(Frame{frame.data(), o.width, 2 * std_->active, std_});
+    deint.smooth(f.data(), upper, o.width, std_->active, frame.data());
+    emit_frame();
   }
-
   void emit(const std::vector<uint8_t> &a, const std::vector<uint8_t> &b) {
-    const size_t rowb = static_cast<size_t>(o.width) * 4;
-    for (int r = 0; r < std_->active; r++) {
-      std::memcpy(frame.data() + (2 * r) * rowb, a.data() + r * rowb, rowb);
-      std::memcpy(frame.data() + (2 * r + 1) * rowb, b.data() + r * rowb, rowb);
-    }
+    weave(a.data(), b.data(), o.width, std_->active, frame.data());
+    emit_frame();
+  }
+  void emit_frame() {
     frames_out++;
     if (sink) sink(Frame{frame.data(), o.width, 2 * std_->active, std_});
   }

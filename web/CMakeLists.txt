@@ -20,7 +20,8 @@ add_subdirectory(${ROOT}/third_party/wifi-sdr wifi-sdr EXCLUDE_FROM_ALL)
 # proxied transfers missed the chip's deadline at 20 MS/s (90.8 % of banks, 11 restarts in 20 s; this: 100 %, 0)
 target_compile_definitions(wsdrcore PRIVATE WSDR_JS_BULKIN)
 
-add_library(kepyur_dsp STATIC ${ROOT}/native/dsp/video.cpp ${ROOT}/native/dsp/spectrum.cpp ${ROOT}/native/dsp/log.cpp)
+add_library(kepyur_dsp STATIC ${ROOT}/native/dsp/video.cpp ${ROOT}/native/dsp/deinterlace.cpp
+            ${ROOT}/native/dsp/spectrum.cpp ${ROOT}/native/dsp/log.cpp)
 target_include_directories(kepyur_dsp PUBLIC ${ROOT}/native/dsp)
 target_compile_options(kepyur_dsp PRIVATE -O3 -ffast-math)
 

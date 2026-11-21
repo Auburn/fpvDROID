@@ -9,7 +9,7 @@ set(KEPYUR_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
 option(KEPYUR_RADIO "Build the radio (wifi-sdr + devourer + libusb)" ON)
 
 # ---- DSP: no hardware, shared by the app and the desktop tools ----
-add_library(kepyur_dsp STATIC dsp/video.cpp dsp/spectrum.cpp dsp/log.cpp)
+add_library(kepyur_dsp STATIC dsp/video.cpp dsp/deinterlace.cpp dsp/spectrum.cpp dsp/log.cpp)
 target_include_directories(kepyur_dsp PUBLIC dsp)
 target_compile_options(kepyur_dsp PRIVATE -O3 -ffast-math -Wall -Wextra)
 if(ANDROID)
