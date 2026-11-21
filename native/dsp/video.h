@@ -65,6 +65,7 @@ struct DecoderOpts {
 };
 
 class Decoder;
+class ClickDetector;
 
 // ---- picture switches, for every decoder in the process. Each takes effect within a line of video, without
 // rebuilding the decoder, and none of them holds the picture back (no added delay). All off by default. From
@@ -127,10 +128,7 @@ private:
   std::vector<float> _dbuf;
   std::vector<uint8_t> _badbuf;
   Decoder *_dec;
-  // sparkle repair, on demod()'s thread: each output sample's envelope (power), with the end of the last call's
-  // kept in front; the discriminator output of those kept samples; the envelope's recent level
-  std::vector<float> _env, _dtail;
-  float _pref = 0;
+  ClickDetector *_clicks;  // sparkle repair's half of demod() (sparkle.h)
 };
 
 }  // namespace kp
