@@ -16,14 +16,15 @@ The `#ifdef _WIN32` parts are inert on Android, Linux and the web build.
 
 The build applies them: `native/CMakeLists.txt` and `web/CMakeLists.txt` include `native/cmake/patches.cmake`,
 which applies each patch unless it is already in, and stops the configure if one neither applies nor is in (the
-submodule pin moved without the patch). To build wifi-sdr some other way, run `scripts/apply-patches.sh` first.
+submodule pin moved without the patch). To build wifi-sdr some other way, run `scripts/apply-patches.sh` first:
+it runs the same file as a script (`cmake -P native/cmake/patches.cmake`).
 `.gitmodules` has `ignore = dirty` for wifi-sdr, so the patched working trees do not show in `git status`.
 
-Both work on the sources as plain directories too (no submodule metadata: an archive, or kepyur copied into
+It works on the sources as plain directories too (no submodule metadata: an archive, or kepyur copied into
 another repository), and on a copy of a checkout made without its top `.git` directory, whose submodules still
-have a `.git` file that now leads nowhere. Both check after the fact that a line each patch adds is really in
-the tree. A patch
-that adds or removes that line needs the marker in `patches.cmake` and `apply-patches.sh` changed with it.
+have a `.git` file that now leads nowhere. It checks after the fact that a line each patch adds is really in
+the tree: the marker, at the end of `patches.cmake`. A patch that adds or removes that line needs its marker
+changed with it.
 
 ## Regenerating one
 

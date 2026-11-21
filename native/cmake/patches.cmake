@@ -2,13 +2,21 @@
 # at configure time. Idempotent: a patch that is already in is left alone, so configuring again changes nothing.
 # A patch that neither applies nor is already in means the submodule pin moved without the patch being
 # regenerated; that stops the configure rather than building an adapter driver without the fixes.
+#
+# The one implementation: included by native/CMakeLists.txt and web/CMakeLists.txt, and run on its own
+# (cmake -P, which scripts/apply-patches.sh does) to patch the submodules for a build of wifi-sdr outside kepyur's.
 find_package(Git REQUIRED)
+if(NOT DEFINED KEPYUR_ROOT)  # run as a script: the repository root is two directories up
+  get_filename_component(KEPYUR_ROOT ${CMAKE_CURRENT_LIST_DIR}/../.. ABSOLUTE)
+endif()
 
 # marker: a piece of text the patch adds to marker_file (a path inside dir), checked whenever git says the patch
 # is already in.
 function(kp_apply_patch dir patch marker_file marker)
   get_filename_component(name ${patch} NAME)
-  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${patch})  # an edited patch re-runs this
+  if(NOT CMAKE_SCRIPT_MODE_FILE)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${patch})  # an edited patch re-runs this
+  endif()
   # git must look for a repository in ${dir} and no further up. Where ${dir} is not a work tree of its own but a
   # plain directory inside some other repository (kepyur's sources vendored into one, or unpacked from an archive
   # inside a checkout), git apply takes the patch's paths as relative to that repository's top, finds none of
@@ -53,6 +61,8 @@ function(kp_apply_patch dir patch marker_file marker)
       message(FATAL_ERROR "patch ${name}: git apply failed in ${dir}:\n${err}")
     endif()
     message(STATUS "applied ${name} to ${dir}")
+  elseif(CMAKE_SCRIPT_MODE_FILE)
+    message(STATUS "already applied: ${name}")
   endif()
   # Do not take git's word alone for it (see above): the patched text has to be there.
   set(text "")
@@ -67,7 +77,7 @@ function(kp_apply_patch dir patch marker_file marker)
   endif()
 endfunction()
 
-# KEPYUR_ROOT: the repository root (native/CMakeLists.txt and web/CMakeLists.txt set it)
+# The patches, each with its marker. KEPYUR_ROOT: the repository root (the including CMakeLists.txt sets it).
 kp_apply_patch(${KEPYUR_ROOT}/third_party/wifi-sdr ${KEPYUR_ROOT}/patches/wifi-sdr-0001-playrx-stream.patch
                src/receiver.h "double centre = 0;")
 kp_apply_patch(${KEPYUR_ROOT}/third_party/wifi-sdr/external/devourer
