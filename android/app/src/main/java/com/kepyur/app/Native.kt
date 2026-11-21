@@ -39,6 +39,7 @@ interface Engine {
     fun setBackdrop(on: Boolean, now: Boolean)
     /** Debug: save the next [seconds] of watched IQ as [prefix].cs16 + .json. */
     fun record(seconds: Double, prefix: String)
+    /** What the radio says of itself, as JSON: [RadioStatus.parse] reads it. */
     fun status(): String
     /** The Surface to draw on (null: it is going away; returns once nothing draws on the old one). */
     fun setSurface(surface: Surface?)

@@ -59,7 +59,7 @@ class Settings(private val prefs: SharedPreferences) {
     var cleanOsd by pref("clean_osd", true)
     var smoothLines by pref("smooth_lines", true)
     var sparkleRepair by pref("sparkle_repair", false)
-    var colourComb by pref("comb", false)                    // the 3-line chroma comb (the key predates this menu)
+    var colourComb by pref("comb", false)                    // the 3-line chroma comb ("comb" is where installs have it)
     // signal
     var rate40 by pref("rate40", true)
     var diversity by pref("diversity", false)
