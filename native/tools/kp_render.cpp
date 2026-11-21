@@ -48,8 +48,8 @@ int main(int argc, char **argv) {
   std::string in;
   int fw = 720, fh = 480, vw = 2400, vh = 1080;
   bool feed = true;
-  std::string label;
   kp::ViewOpts o;
+  kp::Scene sc;
   for (int i = 2; i < argc; i++) {
     const std::string k = argv[i];
     auto v = [&] { return i + 1 < argc ? argv[++i] : (std::fprintf(stderr, "missing value\n"), std::exit(2), ""); };
@@ -64,16 +64,16 @@ int main(int argc, char **argv) {
     } else if (k == "--scale") o.scale = static_cast<float>(std::atof(v()));
     else if (k == "--stereo") o.stereo = true;
     else if (k == "--eye") o.eye_shift = static_cast<float>(std::atof(v()));
-    else if (k == "--gain") o.gain = static_cast<float>(std::atof(v()));
+    else if (k == "--gain") sc.gain = static_cast<float>(std::atof(v()));
     else if (k == "--nofeed") feed = false;
-    else if (k == "--label") label = v();
-    else if (k == "--inset") o.inset = static_cast<float>(std::atof(v()));
-    else if (k == "--radius") o.radius = static_cast<float>(std::atof(v()));
+    else if (k == "--label") sc.label = v();
+    else if (k == "--inset") sc.inset = static_cast<float>(std::atof(v()));
+    else if (k == "--radius") sc.preview.radius = static_cast<float>(std::atof(v()));
     else if (k == "--box") {
       float b[4];
       if (std::sscanf(v(), "%f,%f,%f,%f", &b[0], &b[1], &b[2], &b[3]) != 4)
         return std::fprintf(stderr, "--box takes X,Y,W,H\n"), 2;
-      o.box = {b[0], b[1], b[2], b[3]};
+      sc.preview.box = {b[0], b[1], b[2], b[3]};
     } else {
       std::fprintf(stderr, "unknown or bad option %s\n", k.c_str());
       return 2;
@@ -126,9 +126,8 @@ int main(int argc, char **argv) {
 
   kp::VideoRenderer r;
   if (!r.init()) return std::fprintf(stderr, "renderer init failed\n"), 1;
-  r.set_card_words(label);
   if (feed) r.upload(frame.data(), fw, fh);
-  r.draw(fbo, vw, vh, o);
+  r.draw(fbo, vw, vh, o, sc);
   if (const GLenum e = glGetError(); e != GL_NO_ERROR) std::fprintf(stderr, "GL error 0x%x\n", e);
 
   std::vector<uint8_t> px(static_cast<size_t>(vw) * vh * 4);

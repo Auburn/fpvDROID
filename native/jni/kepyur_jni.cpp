@@ -117,7 +117,7 @@ public:
     _cv.notify_one();
   }
 
-  // Layout (the inset, box, radius and gain fields are the screen's own business).
+  // The view settings: how the picture is laid out.
   void set_view(const ViewOpts &v) {
     {
       std::lock_guard<std::mutex> l(_m);
@@ -140,21 +140,20 @@ public:
   }
 
   // What the card shown where there is no picture says: the chosen channel ("R8"), or "" for NO SIGNAL.
-  void set_card_words(const std::string &words) {
+  void set_card_label(const std::string &label) {
     {
       std::lock_guard<std::mutex> l(_m);
-      _words = words;
+      _label = label;
       _dirty = true;
     }
     _cv.notify_one();
   }
 
   // Where the menu's preview is on the window, in pixels, and its corner radius.
-  void set_preview(const Rect &box, float radius) {
+  void set_preview(const Preview &p) {
     {
       std::lock_guard<std::mutex> l(_m);
-      _box = box;
-      _radius = radius;
+      _preview = p;
       _dirty = true;
     }
     _cv.notify_one();
@@ -172,7 +171,12 @@ private:
   static constexpr float kInsetSeconds = 0.28f;  // the picture's way into the preview and back
   static constexpr double kStaleSeconds = 1.2;   // no frame for this long: the picture is not live any more ...
   static constexpr float kFadeSeconds = 0.5f;    // ... and fades into NO SIGNAL over this, dimming on the way ...
-  static constexpr float kHoldGain = 0.6f;       // ... to this; while held (hold()) it stays up, only dimmed
+  static constexpr float kStaleBright = 0.6f;    // ... to this; while held (hold()) it stays up, only dimmed
+
+  // A fade's next step toward `to`: by `up` if it rises, `down` if it falls.
+  static float approach(float v, float to, float up, float down) {
+    return v < to ? std::min(to, v + up) : std::max(to, v - down);
+  }
 
   // EGL sorts the configs that match by colour depth, deepest first, so the first one is 10-bit wherever the
   // driver has such a config. The picture is 8-bit, and its buffer format then follows the phone, with a 2-bit
@@ -269,20 +273,23 @@ private:
     std::vector<uint8_t> px, last;  // the frame in hand, and a copy of the newest (re-uploaded after a GL restart)
     int w = 0, h = 0, lw = 0, lh = 0;
     float inset = 0, gain = 0, bright = 1;  // gain: the picture against NO SIGNAL; bright: the picture's own
-    std::string words;
     auto t_prev = Clock::now(), t_frame = t_prev;
     bool live = false;  // a frame within kStaleSeconds
+    bool held = false;  // a stale picture stays up, dimmed, instead of fading into NO SIGNAL (hold())
+    // Where the fades are headed: a live picture all the way up; a stale one dimmed (never brightened) and, unless
+    // it is held, gone into NO SIGNAL.
+    const auto gain_to = [&] { return live ? 1.f : held ? gain : 0.f; };
+    const auto bright_to = [&] { return live ? 1.f : std::min(bright, kStaleBright); };
     for (;;) {
       bool got = false, cleared = false, animating;
       ViewOpts view;
+      Scene scene;
       float inset_to;
-      bool held;  // a stale picture stays up, dimmed, instead of fading into NO SIGNAL (hold())
       {
         std::unique_lock<std::mutex> l(_m);
         const auto ready = [&] { return _stop || _win_next_set || _have || _clear || _dirty; };
         held = Clock::now() < _hold_until;
-        animating = inset != _inset_to ||
-                    (live ? gain < 1 || bright < 1 : bright > kHoldGain || (!held && gain > 0));
+        animating = inset != _inset_to || gain != gain_to() || bright != bright_to();
         if (animating) _cv.wait_for(l, std::chrono::milliseconds(8), ready);
         else if (live) _cv.wait_until(l, t_frame + std::chrono::duration<double>(kStaleSeconds), ready);
         else if (held) _cv.wait_until(l, _hold_until, ready);  // then into NO SIGNAL, unless a frame came
@@ -311,9 +318,8 @@ private:
         _clear = false;
         _dirty = false;
         view = _view;
-        view.box = _box;
-        view.radius = _radius;
-        words = _words;
+        scene.preview = _preview;
+        scene.label = _label;
         inset_to = _inset_to;
         if (_inset_snap) inset = inset_to;
         _inset_snap = false;
@@ -333,17 +339,12 @@ private:
       } else if (live && std::chrono::duration<double>(now - t_frame).count() >= kStaleSeconds) {
         live = false;
       }
-      // ease the picture's way into the preview, and its fade, toward where they should be: a live picture comes
-      // up quickly; a stale one dims (never brightened while stale) and, unless it is held, fades into NO SIGNAL
+      // ease the picture's way into the preview, and its fade, toward where they are headed: a live picture
+      // comes up four times as fast as a stale one goes
       const float istep = dt / kInsetSeconds, gstep = dt / kFadeSeconds;
-      inset = inset < inset_to ? std::min(inset_to, inset + istep) : std::max(inset_to, inset - istep);
-      if (live) {
-        gain = std::min(1.f, gain + 4 * gstep);
-        bright = std::min(1.f, bright + 4 * gstep);
-      } else {
-        if (bright > kHoldGain) bright = std::max(kHoldGain, bright - gstep);
-        if (!held) gain = std::max(0.f, gain - gstep);
-      }
+      inset = approach(inset, inset_to, istep, istep);
+      gain = approach(gain, gain_to(), 4 * gstep, gstep);
+      bright = approach(bright, bright_to(), 4 * gstep, gstep);
       if (_surf == EGL_NO_SURFACE || !_gl_ready) {
         if (got) last.swap(px), lw = w, lh = h;
         continue;
@@ -361,11 +362,10 @@ private:
       EGLint sw = 0, sh = 0;
       eglQuerySurface(_dpy, _surf, EGL_WIDTH, &sw);
       eglQuerySurface(_dpy, _surf, EGL_HEIGHT, &sh);
-      view.inset = inset * inset * (3 - 2 * inset);  // smoothstep
-      view.gain = gain;
-      view.bright = bright;
-      _gl.set_card_words(words);
-      _gl.draw(0, sw, sh, view);
+      scene.inset = inset * inset * (3 - 2 * inset);  // smoothstep
+      scene.gain = gain;
+      scene.bright = bright;
+      _gl.draw(0, sw, sh, view, scene);
       if (!eglSwapBuffers(_dpy, _surf)) {
         const EGLint e = eglGetError();
         KP_LOGW("screen: swap failed (0x%x)", e);
@@ -410,9 +410,8 @@ private:
   ViewOpts _view;
   float _inset_to = 0;
   bool _inset_snap = false;
-  Rect _box{0, 0, 0, 0};
-  float _radius = 0;
-  std::string _words;
+  Preview _preview;
+  std::string _label;
   // render thread only
   EGLDisplay _dpy = EGL_NO_DISPLAY;
   EGLConfig _cfg = nullptr;
@@ -613,14 +612,14 @@ JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setBackdrop(JNIEnv *, jclass, 
 }
 
 JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setCardLabel(JNIEnv *env, jclass, jstring label) {
-  if (g_screen) g_screen->set_card_words(jstring_of(env, label));
+  if (g_screen) g_screen->set_card_label(jstring_of(env, label));
 }
 
 JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setPreview(JNIEnv *, jclass, jint left, jint top, jint right,
                                                              jint bottom, jfloat radius) {
   if (!g_screen) return;
   const float w = static_cast<float>(std::max(0, right - left)), h = static_cast<float>(std::max(0, bottom - top));
-  g_screen->set_preview(Rect{static_cast<float>(left), static_cast<float>(top), w, h}, std::max(0.f, radius));
+  g_screen->set_preview(Preview{Rect{static_cast<float>(left), static_cast<float>(top), w, h}, std::max(0.f, radius)});
 }
 
 JNIEXPORT void JNICALL Java_com_kepyur_app_Native_record(JNIEnv *env, jclass, jdouble seconds, jstring prefix) {

@@ -21,6 +21,7 @@ struct Rect {
   float x, y, w, h;
 };
 
+// The view settings: how the picture is laid out on the screen.
 struct ViewOpts {
   float aspect = 4.f / 3;  // the shape the picture is shown at: 4:3, or 16:9 for a widescreen camera
   Fit fit = Fit::Fit;
@@ -28,14 +29,25 @@ struct ViewOpts {
   bool stereo = false;     // two windows, the left and right halves of the viewport, the same picture in both
   float eye_shift = 0;     // stereo: each picture moved toward the middle of the viewport (+) or away (-), as a
                            // fraction of the viewport's width (lens spacing differs between goggles)
-  float inset = 0;         // 0 = the picture where the settings above put it ... 1 = in `box` (the menu's
-                           // preview), laid out there by aspect and fit alone, black all round; in between it moves.
-                           // The NO SIGNAL card is dimmed there, under the menu's status.
-  Rect box{0, 0, 0, 0};    // the preview
-  float radius = 0;        // the preview's corner radius, pixels
-  float gain = 1;          // how much of the picture: 1 = all of it, 0 = none (the NO SIGNAL card in its place,
-                           // e.g. a stale picture faded out), in between the two cross-faded
-  float bright = 1;        // the picture's own brightness (a stale one, held over a reopen, is dimmed)
+};
+
+// The menu's preview: where it is on the viewport, and its corners' radius (pixels).
+struct Preview {
+  Rect box{0, 0, 0, 0};
+  float radius = 0;
+};
+
+// What the screen decides itself, frame by frame, on top of the view settings: the picture's way into the menu's
+// preview, its fade into the NO SIGNAL card, and what the card says.
+struct Scene {
+  Preview preview;
+  float inset = 0;     // 0 = the picture where the view settings put it ... 1 = in the preview, laid out there by
+                       // aspect and fit alone, black all round; in between it moves. The card is dimmed there,
+                       // under the menu's status.
+  float gain = 1;      // how much of the picture: 1 = all of it, 0 = none (the NO SIGNAL card in its place, e.g. a
+                       // stale picture faded out), in between the two cross-faded
+  float bright = 1;    // the picture's own brightness (a stale one, held over a reopen, is dimmed)
+  std::string label;   // what the card says: the chosen channel ("R8"), or "" for NO SIGNAL
 };
 
 // Where a picture lands in a window, in pixels from the window's top left (may reach outside it: Crop,
@@ -52,19 +64,17 @@ public:
   void upload(const uint8_t *rgbx, int width, int height);
   void clear();  // no picture: the NO SIGNAL card until the next upload
   bool has_picture() const { return _have; }
-  // What the card where there is no picture says: the chosen channel ("R8"), or "" for NO SIGNAL.
-  void set_card_words(const std::string &words) { _words = words; }
   // The whole viewport, into framebuffer `target` (0 = the window surface).
-  void draw(unsigned target, int view_w, int view_h, const ViewOpts &o);
+  void draw(unsigned target, int view_w, int view_h, const ViewOpts &view, const Scene &scene);
 
 private:
-  void ensure_card(float aspect);
+  void ensure_card(float aspect, const std::string &label);
   void quad(unsigned tex, int tex_w, int tex_h, float gain, float alpha, bool bicubic);
 
   unsigned _prog = 0;
   unsigned _vbo = 0, _vao = 0, _tex = 0, _card = 0;
   int _tex_w = 0, _tex_h = 0, _card_w = 0, _card_h = 0;
-  std::string _words, _card_words;  // what the card should say, and what the one made says
+  std::string _card_label;  // what the card made says
   bool _have = false;
   // uniform locations
   int _u_rect = -1, _u_size = -1, _u_gain = -1, _u_alpha = -1, _u_bicubic = -1, _u_clip = -1, _u_radius = -1;

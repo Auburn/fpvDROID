@@ -79,7 +79,6 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     private var scanOnReturn = false       // a scan is owed: the first one, or one the background cut short
     private var scanStartedAt = 0L         // when the last scan began (elapsedRealtime); 0: none this session
     private var statusBroken = false
-    private var cardLabel: String? = null  // what the screen's no-picture card was last told to say
 
     // USB stream test
     private val testPlan = ArrayDeque<Pair<Int, Double>>()
@@ -241,11 +240,11 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
      */
     private fun showChannel() {
         val mhz = settings.channelMhz
-        val label = if (mhz <= 0) "" else Channels.nearest(mhz.toDouble(), settings.band, Channels.SAME_CHANNEL_MHZ)?.name ?: "$mhz"
-        if (label == cardLabel) return
-        cardLabel = label
-        engine.setCardLabel(label)
+        engine.setCardLabel(if (mhz <= 0) "" else channelAt(mhz.toDouble())?.name ?: "$mhz")
     }
+
+    /** The channel [mhz] is on, the chosen band's if two share it; null: on none (a transmitter off every channel). */
+    private fun channelAt(mhz: Double) = Channels.nearest(mhz, settings.band, Channels.SAME_CHANNEL_MHZ)
 
     /** The frequency for the chosen channel: where a scan measured its transmitter, if it found one, else the nominal one. */
     private fun channelHz(): Double {
@@ -496,7 +495,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         lastDropped = queued
         val overloaded = mode == "watch" && now < overloadedUntil
 
-        val name = Channels.nearest(watchHz / 1e6, settings.band, Channels.SAME_CHANNEL_MHZ)?.name
+        val name = channelAt(watchHz / 1e6)?.name
         val where = (if (name != null) "$name · " else "") + "${(watchHz / 1e6).roundToInt()} MHz"   // finite: num()
         val stats = buildString {
             append(if (s.optBoolean("usb3")) "USB 3" else "USB 2")
@@ -545,7 +544,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     private fun adoptChannel(mhz: Double) {
         if (!mhz.isFinite() || mhz <= 0) return
         // a transmitter further than that from a channel is not on it: it is kept by its own frequency
-        val ch = Channels.nearest(mhz, settings.band, Channels.SAME_CHANNEL_MHZ)
+        val ch = channelAt(mhz)
         val to = ch?.mhz ?: mhz.roundToInt()
         if (to == settings.channelMhz && (ch == null || ch.band == settings.band)) return
         settings.channelMhz = to

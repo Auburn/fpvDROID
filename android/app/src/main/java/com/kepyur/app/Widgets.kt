@@ -6,14 +6,11 @@ import android.content.Context
 import android.content.res.ColorStateList
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.ColorFilter
-import android.graphics.Outline
 import android.graphics.Paint
-import android.graphics.Path
-import android.graphics.PixelFormat
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
 import android.graphics.RectF
 import android.graphics.Typeface
-import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
 import android.util.TypedValue
@@ -102,53 +99,14 @@ class PillButton(ctx: Context, text: String, private val primary: Boolean = fals
 }
 
 /**
- * A panel of the menu: [fill] with rounded corners and a hairline round it, less a [hole] where it has one (the
- * rail, round the preview: the picture under the menu shows through it).
- */
-class Panel(private val fill: Int, private val radius: Float, private val stroke: Int, private val strokeWidth: Float) : Drawable() {
-    /** The hole, in the same pixels as the bounds; empty: none. */
-    val hole = RectF()
-    var holeRadius = 0f
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val path = Path()
-    private val box = RectF()
-    private var shade = 255
-
-    override fun draw(c: Canvas) {
-        box.set(bounds)
-        path.rewind()
-        path.fillType = Path.FillType.EVEN_ODD
-        path.addRoundRect(box, radius, radius, Path.Direction.CW)
-        if (!hole.isEmpty) path.addRoundRect(hole, holeRadius, holeRadius, Path.Direction.CW)
-        paint.style = Paint.Style.FILL
-        paint.color = fill
-        paint.alpha = Color.alpha(fill) * shade / 255
-        c.drawPath(path, paint)
-        val half = strokeWidth / 2
-        box.inset(half, half)
-        paint.style = Paint.Style.STROKE
-        paint.strokeWidth = strokeWidth
-        paint.color = stroke
-        paint.alpha = Color.alpha(stroke) * shade / 255
-        c.drawRoundRect(box, radius - half, radius - half, paint)
-    }
-
-    override fun getOutline(outline: Outline) = outline.setRoundRect(bounds, radius)
-    override fun setAlpha(alpha: Int) {
-        if (alpha != shade) { shade = alpha; invalidateSelf() }
-    }
-    override fun getAlpha() = shade
-    override fun setColorFilter(filter: ColorFilter?) { paint.colorFilter = filter; invalidateSelf() }
-    @Deprecated("Deprecated in Java")
-    override fun getOpacity() = PixelFormat.TRANSLUCENT
-}
-
-/**
  * The picture, small, at the foot of the menu's rail: a hole the native screen draws the picture into (or NO
  * SIGNAL), with nothing of its own but a hairline and the sign of a full-screen button. Tapping it closes the menu.
+ * It makes the hole itself, as a SurfaceView does: it clears whatever was drawn under it (the rail's panel), so
+ * that the window is see-through there, wherever the tile is laid out.
  */
 class PreviewTile(ctx: Context) : View(ctx) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val clear = Paint(Paint.ANTI_ALIAS_FLAG).apply { xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR) }
     private val box = RectF()
     /** Its corners' radius: the rail's less the rail's padding, so that the two curves run side by side. */
     val radius: Float get() = dp(RADIUS_DP)
@@ -163,6 +121,8 @@ class PreviewTile(ctx: Context) : View(ctx) {
     override fun onDraw(c: Canvas) {
         val w = width.toFloat()
         val h = height.toFloat()
+        box.set(0f, 0f, w, h)
+        c.drawRoundRect(box, radius, radius, clear)
         val half = dp(0.5f)
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = dp(1f)

@@ -181,7 +181,7 @@ void VideoRenderer::destroy(bool context_alive) {
   _prog = 0;
   _vbo = _vao = _tex = _card = 0;
   _tex_w = _tex_h = _card_w = _card_h = 0;
-  _card_words.clear();
+  _card_label.clear();
   _have = false;
 }
 
@@ -203,12 +203,12 @@ void VideoRenderer::clear() { _have = false; }
 
 // The NO SIGNAL card at the picture's shape (its words keep theirs), made on the CPU once per shape and per
 // channel: 720 lines, with smaller levels for the preview, where it is shown at a fraction of that.
-void VideoRenderer::ensure_card(float aspect) {
+void VideoRenderer::ensure_card(float aspect, const std::string &label) {
   const int h = 720, w = std::clamp(static_cast<int>(std::lround(h * std::max(aspect, 0.1f))), 360, 1920);
-  if (_card && w == _card_w && h == _card_h && _words == _card_words) return;
+  if (_card && w == _card_w && h == _card_h && label == _card_label) return;
   std::vector<uint8_t> px;
-  no_signal_card(px, w, h, _words);
-  _card_words = _words;
+  no_signal_card(px, w, h, label);
+  _card_label = label;
   if (!_card) glGenTextures(1, &_card);
   glBindTexture(GL_TEXTURE_2D, _card);
   glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
@@ -229,7 +229,7 @@ void VideoRenderer::quad(unsigned tex, int tex_w, int tex_h, float gain, float a
   glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 }
 
-void VideoRenderer::draw(unsigned target, int view_w, int view_h, const ViewOpts &o) {
+void VideoRenderer::draw(unsigned target, int view_w, int view_h, const ViewOpts &o, const Scene &s) {
   if (view_w <= 0 || view_h <= 0) return;
   glDisable(GL_DEPTH_TEST);
   glDisable(GL_BLEND);
@@ -240,12 +240,13 @@ void VideoRenderer::draw(unsigned target, int view_w, int view_h, const ViewOpts
   glClear(GL_COLOR_BUFFER_BIT);
   if (!_prog) return;
   // how much of the picture, and of the card in its place
-  const float g = _have ? std::clamp(o.gain, 0.f, 1.f) : 0.f;
-  if (g < 1) ensure_card(o.aspect);
+  const float g = _have ? std::clamp(s.gain, 0.f, 1.f) : 0.f;
+  if (g < 1) ensure_card(o.aspect, s.label);
   const bool card = g < 1 && _card;
   if (!card && g <= 0) return;
 
-  const float t = std::clamp(o.inset, 0.f, 1.f);
+  const Rect &box = s.preview.box;
+  const float t = std::clamp(s.inset, 0.f, 1.f);
   // in the preview the card is dimmed, so that the menu's status reads over it
   constexpr float kCardInPreview = 0.4f;
   const float card_level = 1 - (1 - kCardInPreview) * t;
@@ -257,9 +258,9 @@ void VideoRenderer::draw(unsigned target, int view_w, int view_h, const ViewOpts
   glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
   glEnable(GL_SCISSOR_TEST);
   // in the preview: the picture as the screen would show it at its own size, one of it
-  Rect small = layout(o.box.w, o.box.h, o.aspect, o.fit, 1);
-  small.x += o.box.x;
-  small.y += o.box.y;
+  Rect small = layout(box.w, box.h, o.aspect, o.fit, 1);
+  small.x += box.x;
+  small.y += box.y;
   const int windows = o.stereo ? 2 : 1;
   const float ww = vw / windows;
   for (int i = 0; i < windows; i++) {
@@ -269,7 +270,7 @@ void VideoRenderer::draw(unsigned target, int view_w, int view_h, const ViewOpts
     if (o.stereo) r.x += (i == 0 ? 1 : -1) * o.eye_shift * vw;
     // each window keeps to itself (a cropped or enlarged picture must not run into the other eye's), and on the
     // way into the preview, it and the picture in it move there together
-    const Rect win = lerp({wx, 0, ww, vh}, o.box, t);
+    const Rect win = lerp({wx, 0, ww, vh}, box, t);
     r = lerp(r, small, t);
     const long sx0 = std::lround(win.x), sx1 = std::lround(win.x + win.w);
     const long sy0 = std::lround(vh - win.y - win.h), sy1 = std::lround(vh - win.y);
@@ -277,13 +278,13 @@ void VideoRenderer::draw(unsigned target, int view_w, int view_h, const ViewOpts
     glScissor(static_cast<GLint>(sx0), static_cast<GLint>(sy0), static_cast<GLsizei>(sx1 - sx0),
               static_cast<GLsizei>(sy1 - sy0));
     glUniform4f(_u_clip, win.x, vh - win.y - win.h, win.x + win.w, vh - win.y);
-    glUniform1f(_u_radius, std::min(o.radius * t, 0.5f * std::min(win.w, win.h)));
+    glUniform1f(_u_radius, std::min(s.preview.radius * t, 0.5f * std::min(win.w, win.h)));
     const float rect[4] = {2 * r.x / vw - 1, 1 - 2 * r.y / vh, 2 * (r.x + r.w) / vw - 1, 1 - 2 * (r.y + r.h) / vh};
     glUniform4fv(_u_rect, 1, rect);
     // the card where the picture is not (bicubic only where it is enlarged: smaller, its levels do better), then
     // the picture over it, or added to it while the two cross-fade
     if (card) quad(_card, _card_w, _card_h, (1 - g) * card_level, 1, r.w >= _card_w);
-    if (g > 0) quad(_tex, _tex_w, _tex_h, g * std::clamp(o.bright, 0.f, 1.f), card ? 0 : 1, true);
+    if (g > 0) quad(_tex, _tex_w, _tex_h, g * std::clamp(s.bright, 0.f, 1.f), card ? 0 : 1, true);
   }
   glDisable(GL_SCISSOR_TEST);
   glDisable(GL_BLEND);

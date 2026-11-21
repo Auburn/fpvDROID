@@ -22,8 +22,8 @@ import java.io.File
 
 /**
  * Renders [MenuView] off screen to PNGs, for looking at the menu without a device.
- * The bitmaps start black, as the screen behind the menu is, with a stand-in for the picture where the preview
- * is (on the phone the native screen draws the real one there, through the hole the menu leaves).
+ * The menu is laid over black, as the screen behind it is, with a stand-in for the picture where the preview is
+ * (on the phone the native screen draws the real one there, through the hole the preview clears in the window).
  *
  *   gradle testDebugUnitTest --tests com.kepyur.app.MenuScreenshotTest -Pshots=/some/dir
  *
@@ -93,11 +93,16 @@ class MenuScreenshotTest {
         layout(menu, w, h)
         then(menu)
         shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(600))   // let a fade finish
+        // the menu on its own, as the window has it (see-through where the preview cleared its hole), then over the
+        // black screen and the stand-in, as the compositor lays the window over the video
+        val window = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        window.eraseColor(Color.TRANSPARENT)
+        menu.draw(Canvas(window))
         val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         bitmap.eraseColor(Color.BLACK)
         val canvas = Canvas(bitmap)
         standIn(canvas, quiet)
-        menu.draw(canvas)
+        canvas.drawBitmap(window, 0f, 0f, null)
         File(outDir, "$name.png").outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
     }
 

@@ -88,8 +88,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     private var state = MenuState()
     private var tab = 0
     private val group = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }   // status line, rail + card
-    private lateinit var rail: ViewGroup
-    private lateinit var railPanel: Panel
+    private lateinit var rail: View
     private lateinit var railContent: LinearLayout   // the rail above the preview: the tabs
     private lateinit var preview: PreviewTile
     private lateinit var previewBox: FrameLayout     // the preview and the status badge over it
@@ -168,8 +167,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         // no background: behind the menu the screen is black but for the picture in the preview
         isClickable = true   // touches stop here: nothing behind the menu reacts
         rail = buildRail()
-        railPanel = Panel(Skin.PANEL, dp(22f), Skin.STROKE, dp(1f))
-        rail.background = railPanel
+        rail.background = rounded(Skin.PANEL, dp(22f), Skin.STROKE, dpi(1f))   // the preview clears its own hole in it
         rail.setPadding(dpi(8f), dpi(8f), dpi(8f), dpi(8f))
         card = FrameLayout(ctx).apply {
             background = rounded(Skin.PANEL, dp(22f), Skin.STROKE, dpi(1f))
@@ -240,16 +238,11 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     }
 
     /**
-     * The rail's panel leaves the preview open, and the listener hears where it is (the picture is drawn there).
-     * Whatever moved it (another aspect ratio, another screen), this runs after it.
+     * The listener hears where the preview is (the picture is drawn there). Whatever moved it (another aspect ratio,
+     * another screen), this runs after it.
      */
     override fun onLayout(changed: Boolean, l: Int, t: Int, r: Int, b: Int) {
         super.onLayout(changed, l, t, r, b)
-        val inRail = Rect(0, 0, preview.width, preview.height)
-        rail.offsetDescendantRectToMyCoords(preview, inRail)
-        railPanel.hole.set(inRail)
-        railPanel.holeRadius = preview.radius
-        railPanel.invalidateSelf()
         val at = Rect(0, 0, preview.width, preview.height)
         offsetDescendantRectToMyCoords(preview, at)
         if (at != previewAt) {
@@ -259,7 +252,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     }
 
     // ------------------------------------------------------------------------------------------ rail
-    private fun buildRail(): ViewGroup {
+    private fun buildRail(): View {
         // The tabs at the top, the preview always at the bottom, in place of a Close button; should the tabs not
         // fit above it on some very short screen, they scroll.
         val whole = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
@@ -417,7 +410,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
             addUpdateListener {
                 peekShade = it.animatedValue as Int
                 card.background.alpha = peekShade
-                railPanel.alpha = peekShade
+                rail.background?.alpha = peekShade
             }
             start()
         }
