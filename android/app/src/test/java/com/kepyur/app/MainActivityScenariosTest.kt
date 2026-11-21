@@ -46,8 +46,8 @@ class MainActivityScenariosTest : AppHarness() {
         assertEquals(State.NO_ADAPTER, link.state)
         val c = changes()
         assertTrue(c.toString(), call("setBackdrop", true, true) in c)
-        assertTrue(c.toString(), call("setPicture", true, true, true, false) in c)   // luma comb, clean OSD, smooth lines; no repair
-        assertTrue(c.toString(), call("setComb", false) in c)
+        // luma comb, clean OSD, smooth lines; no repair, no colour comb
+        assertTrue(c.toString(), call("setPicture", true, true, true, false, false) in c)
         assertTrue(c.toString(), call("setView", 4f / 3f, Settings.FIT, 1f, false, 0f) in c)
         assertTrue(c.toString(), call("setWatchRate", 1) in c)
         assertTrue(c.toString(), call("setDiversity", false) in c)
@@ -173,26 +173,26 @@ class MainActivityScenariosTest : AppHarness() {
 
         fake.clearCalls()
         click(comb)   // off
-        assertChanges(call("setPicture", false, false, true, false), call("setComb", false))
+        assertChanges(call("setPicture", false, false, true, false, false))
         assertFalse(savedSettings().lumaComb)
         assertFalse("Clean OSD edges needs the comb filter", clean.isEnabled)
 
         fake.clearCalls()
         click(comb)   // on again: clean OSD (still on) counts again
-        assertChanges(call("setPicture", true, true, true, false), call("setComb", false))
+        assertChanges(call("setPicture", true, true, true, false, false))
 
         fake.clearCalls()
         click(clean)  // off
-        assertChanges(call("setPicture", true, false, true, false), call("setComb", false))
+        assertChanges(call("setPicture", true, false, true, false, false))
         assertFalse(savedSettings().cleanOsd)
 
         fake.clearCalls()
         click(control("Smooth lines"))
-        assertChanges(call("setPicture", true, false, false, false), call("setComb", false))
+        assertChanges(call("setPicture", true, false, false, false, false))
 
         fake.clearCalls()
         click(control("Sparkle repair"))
-        assertChanges(call("setPicture", true, false, false, true), call("setComb", false))
+        assertChanges(call("setPicture", true, false, false, true, false))
         assertTrue(savedSettings().sparkleRepair)
     }
 
@@ -202,7 +202,7 @@ class MainActivityScenariosTest : AppHarness() {
         showTab("Picture")
         fake.clearCalls()
         click(control("Colour comb"))
-        assertChanges(call("setPicture", true, true, true, false), call("setComb", true), call("watch", f2, false))
+        assertChanges(call("setPicture", true, true, true, false, true), call("watch", f2, false))
         assertTrue(savedSettings().colourComb)
     }
 
@@ -211,24 +211,26 @@ class MainActivityScenariosTest : AppHarness() {
         running()
         showTab("Signal")
         val auto = call("setGain", -1.0)
+        val at40 = call("setWatchRate", 1)
+        val at20 = call("setWatchRate", 2)
 
         fake.clearCalls()
         pick(control("Sample rate") as Segmented, 1, 2)   // 20 MS/s
-        assertChanges(call("setWatchRate", 2), auto, call("setDiversity", false), call("setOffsetTuning", true), call("watch", f2, false))
+        assertChanges(at20, auto, call("setDiversity", false), call("setOffsetTuning", true), call("watch", f2, false))
         assertFalse(savedSettings().rate40)
 
         fake.clearCalls()
         click(control("Diversity"))
-        assertChanges(auto, call("setDiversity", true), call("setOffsetTuning", true))   // at once: no re-watch
+        assertChanges(at20, auto, call("setDiversity", true), call("setOffsetTuning", true))   // at once: no re-watch
         assertTrue(savedSettings().diversity)
 
         fake.clearCalls()
         pick(control("Sample rate") as Segmented, 0, 2)   // back to 40
-        assertChanges(call("setWatchRate", 1), auto, call("setDiversity", true), call("setOffsetTuning", true), call("watch", f2, false))
+        assertChanges(at40, auto, call("setDiversity", true), call("setOffsetTuning", true), call("watch", f2, false))
 
         fake.clearCalls()
         click(control("Tune beside the channel"))
-        assertChanges(auto, call("setDiversity", true), call("setOffsetTuning", false), call("watch", f2, false))
+        assertChanges(at40, auto, call("setDiversity", true), call("setOffsetTuning", false), call("watch", f2, false))
         assertFalse(savedSettings().offsetTune)
     }
 
@@ -280,19 +282,19 @@ class MainActivityScenariosTest : AppHarness() {
 
         fake.clearCalls()
         pick(control("Gain") as Segmented, 1, 2)   // Manual
-        assertChanges(call("setGain", 30.0), call("setDiversity", false), call("setOffsetTuning", true), call("watch", f2, false))
+        assertChanges(call("setWatchRate", 1), call("setGain", 30.0), call("setDiversity", false), call("setOffsetTuning", true), call("watch", f2, false))
         assertFalse(savedSettings().gainAuto)
         layOut()
         assertTrue(gainRow.isShown)
 
         fake.clearCalls()
         slide(gainRow as Slider, 0f, Settings.GAIN_MAX, 40f)
-        assertChanges(call("setGain", 40.0), call("setDiversity", false), call("setOffsetTuning", true), call("watch", f2, false))
+        assertChanges(call("setWatchRate", 1), call("setGain", 40.0), call("setDiversity", false), call("setOffsetTuning", true), call("watch", f2, false))
         assertEquals(40f, savedSettings().gainDb, 0.01f)
 
         fake.clearCalls()
         pick(control("Gain") as Segmented, 0, 2)   // Auto
-        assertChanges(call("setGain", -1.0), call("setDiversity", false), call("setOffsetTuning", true), call("watch", f2, false))
+        assertChanges(call("setWatchRate", 1), call("setGain", -1.0), call("setDiversity", false), call("setOffsetTuning", true), call("watch", f2, false))
         assertTrue(savedSettings().gainAuto)
     }
 

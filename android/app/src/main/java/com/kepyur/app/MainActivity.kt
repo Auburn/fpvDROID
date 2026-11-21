@@ -71,15 +71,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     private var noVideoFound = false       // the last scan came back empty
     private var lastDropped = 0L
     private var overloadedUntil = 0L
-    // blocks the adapter's stream gave up on (collected too late): the count at the last refresh, when that was
-    // and whether the radio was watching then, and for each rise seen while watching in the last LATE_WINDOW_MS,
-    // when and by how many (see refresh())
-    private var lastLate = 0L
-    private var lastLateAt = 0L
-    private var lastLateWatching = false
-    private val lateMarks = ArrayDeque<Pair<Long, Long>>()
     private var frameRateFor = ""
-    private var appliedRate = 0
     private var scanOnReturn = false       // a scan is owed: the first one, or one the background cut short
     private var scanStartedAt = 0L         // when the last scan began (elapsedRealtime); 0: none this session
     private var statusBroken = false
@@ -114,8 +106,8 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
 
     /**
      * adb shell am start -n com.kepyur.app/.MainActivity [--es mode usbtest] [--ef gain 30] [--ef record 3] [--ez testcard true]
-     * USB debugging: [--es env WSDR_URB_DEPTH=64,OTHER=1] (wifi-sdr / devourer switches, read at the next open or stream
-     * start; KEY= removes one), [--ez soak true] (a 40 MS/s stream test after every open instead of watching: how long
+     * USB debugging: [--es env WSDR_URB_DEPTH=64,OTHER=1] (wifi-sdr / devourer switches, in place from the next
+     * open; KEY= removes one), [--ez soak true] (a 40 MS/s stream test after every open instead of watching: how long
      * the link holds up, open after open).
      */
     private fun handleIntent(i: Intent?) {
@@ -139,8 +131,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
             if (g >= 0) settings.gainDb = g.coerceAtMost(Settings.GAIN_MAX)
             engine.log("debug: gain ${if (g < 0) "automatic" else "$g dB"}")
             if (::menu.isInitialized) menu.syncGain()
-            applySignal()
-            retune()
+            onSignal()
         }
         if (i.hasExtra("record")) {
             val secs = i.getFloatExtra("record", 3f).toDouble()
@@ -217,20 +208,16 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     }
 
     // ---------------------------------------------------------------------------------------- settings -> native
-    private fun applyPicture() {
-        engine.setPicture(settings.lumaComb, settings.lumaComb && settings.cleanOsd, settings.smoothLines, settings.sparkleRepair)
-        engine.setComb(settings.colourComb)
-    }
+    // Each says whether something changed that a watch only takes when it starts: the native side knows which of its
+    // settings those are, and whether this is a change (Engine).
+    private fun applyPicture(): Boolean = engine.setPicture(settings.lumaComb, settings.lumaComb && settings.cleanOsd,
+        settings.smoothLines, settings.sparkleRepair, settings.colourComb)
 
-    /** True when something changed that only a new tune applies. */
     private fun applySignal(): Boolean {
-        // only when it changed: setting the rate also forgets that 40 had to fall back to 20
-        val rate = if (settings.rate40) 1 else 2
-        if (rate != appliedRate) engine.setWatchRate(rate)
-        appliedRate = rate
-        engine.setGain(if (settings.gainAuto) -1.0 else settings.gainDb.toDouble())
+        val rate = engine.setWatchRate(if (settings.rate40) 1 else 2)
+        val gain = engine.setGain(if (settings.gainAuto) -1.0 else settings.gainDb.toDouble())
         engine.setDiversity(settings.diversity)
-        return engine.setOffsetTuning(settings.offsetTune)
+        return engine.setOffsetTuning(settings.offsetTune) || rate || gain
     }
 
     private fun applyView() =
@@ -275,14 +262,12 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
 
     override fun onView() = applyView()
 
-    override fun onPicture(rebuild: Boolean) {
-        applyPicture()
-        if (rebuild) retune()
+    override fun onPicture() {
+        if (applyPicture()) retune()
     }
 
-    override fun onSignal(retune: Boolean) {
-        applySignal()
-        if (retune) retune()
+    override fun onSignal() {
+        if (applySignal()) retune()
     }
 
     /** A view slider is being dragged: the picture sharp under it, so the change can be judged. */
@@ -322,9 +307,6 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         applyPicture()
         applySignal()
         lastDropped = 0
-        lastLate = 0
-        lastLateWatching = false
-        lateMarks.clear()
         if (menuAuto) closeMenu()   // it only came up to say the picture was away
         when {
             testRequested || soak -> startTest()
@@ -440,31 +422,17 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         }
 
         // Is the phone keeping up? A block lost in the queue behind the USB link or before the decoder, or a thread
-        // with no time to spare, says no at once. A block the adapter's stream itself gave up on (collected too
-        // late) does not: any phone stalls for a moment now and then, a few times a minute. LATE_BLOCKS of them
-        // seen within LATE_WINDOW_MS do (a block counts from the refresh that first shows it, up to a poll late).
-        // Only those of a watch that this screen has been following count: a rise between two refreshes that both
-        // found the radio watching. The ones a scan or a stream test left behind (up to its last moments, after
-        // the last refresh that saw it), or that came in while nothing was refreshed (the app in the background:
-        // the adapter streams on for a while), say nothing about the picture now: the count is then only taken
-        // note of. So is whatever comes in before the first refresh of a watch (up to a poll's length, the
-        // retune into it included): a phone that is not keeping up goes on losing blocks after that.
+        // with no time to spare, says no at once, and for 5 s after. A block the adapter's stream itself gave up on
+        // (collected too late) does not: any phone stalls for a moment now and then, a few times a minute.
+        // LATE_BLOCKS of them in the last few seconds of this watch do: the radio, which sees every block, counts
+        // those (RadioStatus.lateRecent).
         val now = android.os.SystemClock.elapsedRealtime()
-        val late = st.streamDropped
         val queued = st.queueDropped + st.decodeDropped
-        val dropped = late + queued   // lost anywhere on the way, for the figures on the Signal tab
+        val dropped = st.streamDropped + queued   // lost anywhere on the way, for the figures on the Signal tab
         val load = st.load
-        val followed = st.mode == Mode.WATCH && lastLateWatching && late >= lastLate && now - lastLateAt <= LATE_GAP_MS
-        if (!followed) lateMarks.clear()
-        else if (late > lastLate) lateMarks.addLast(now to late - lastLate)
-        while (lateMarks.isNotEmpty() && now - lateMarks.first().first > LATE_WINDOW_MS) lateMarks.removeFirst()
-        val lateBurst = followed && late > lastLate && lateMarks.sumOf { it.second } >= LATE_BLOCKS
-        lastLate = late
-        lastLateAt = now
-        lastLateWatching = st.mode == Mode.WATCH
-        if (mode == Mode.WATCH && (queued > lastDropped || load > 0.95 || lateBurst)) overloadedUntil = now + 5000
+        if (mode == Mode.WATCH && (queued > lastDropped || load > 0.95)) overloadedUntil = now + 5000
         lastDropped = queued
-        val overloaded = mode == Mode.WATCH && now < overloadedUntil
+        val overloaded = mode == Mode.WATCH && (now < overloadedUntil || st.lateRecent >= LATE_BLOCKS)
 
         val name = Channels.nearest(watchHz / 1e6, settings.band, Channels.SAME_CHANNEL_MHZ)?.name
         val where = (if (name != null) "$name · " else "") + "${(watchHz / 1e6).roundToInt()} MHz"   // finite: RadioStatus
@@ -643,10 +611,8 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     companion object {
         const val HINT_MS = 3000L
         const val BACKGROUND_CLOSE_MS = 30000L
+        /** This many blocks the adapter's stream gave up on, in the radio's window (5 s): the phone is not keeping up. */
         const val LATE_BLOCKS = 3
-        const val LATE_WINDOW_MS = 5000L
-        /** No refresh for longer than this (the poll runs every 250 ms): the late blocks counted meanwhile are not this watch's. */
-        const val LATE_GAP_MS = 2000L
         const val OVERLOAD_ADVICE =
             "The phone is not keeping up. Turn off Clean OSD edges, Colour comb or Diversity, or use sample rate 20."
 

@@ -21,18 +21,21 @@ interface Engine {
     /** Stop decoding (the adapter stays open). */
     fun idle()
     fun streamTest(rateSel: Int, seconds: Double)
-    /** The rate watch uses (1 = 40 MS/s, 2 = 20 MS/s), from the next watch on. Also clears a 20 MS/s fallback. */
-    fun setWatchRate(rateSel: Int)
-    /** Debug: gain from the next tune on: < 0 = the chip's AGC, else fixed gain (dB). */
-    fun setGain(db: Double)
-    /** NTSC 3-line chroma comb (fewer rainbows on fine detail, more decode CPU), from the next watch on. */
-    fun setComb(on: Boolean)
+    // A setter that returns a Boolean sets something a watch only takes when it starts: true when that changed,
+    // so that a channel being watched has to be watched again ([watch], not fresh) to have it.
+    /** The rate watch uses (1 = 40 MS/s, 2 = 20 MS/s). A change also clears a 20 MS/s fallback. */
+    fun setWatchRate(rateSel: Int): Boolean
+    /** Gain: < 0 = the chip's AGC, else fixed gain (dB). */
+    fun setGain(db: Double): Boolean
     /** Both antennas combined before demodulation. At once. */
     fun setDiversity(on: Boolean)
-    /** Hardware centre beside the channel (off the chip's DC point). True when it changed: watch again to apply. */
+    /** Hardware centre beside the channel (off the chip's DC point). */
     fun setOffsetTuning(on: Boolean): Boolean
-    /** The decoder's picture switches (native/dsp/video.h). At once. */
-    fun setPicture(lumaComb: Boolean, adaptiveComb: Boolean, smoothLines: Boolean, repair: Boolean)
+    /**
+     * The decoder's picture switches (native/dsp/video.h). At once, all but [colourComb] (the NTSC 3-line chroma
+     * comb: fewer rainbows on fine detail, more decode CPU), which is what the result is about.
+     */
+    fun setPicture(lumaComb: Boolean, adaptiveComb: Boolean, smoothLines: Boolean, repair: Boolean, colourComb: Boolean): Boolean
     /** How the picture is laid out on the Surface. [fit]: 0 fit, 1 stretch, 2 crop. [eyeShift]: fraction of the width. */
     fun setView(aspect: Float, fit: Int, scale: Float, stereo: Boolean, eyeShift: Float)
     /** The menu's backdrop: the picture blurred and dimmed, eased in and out unless [now]. */
@@ -47,7 +50,10 @@ interface Engine {
     fun redraw()
     /** Debug: a moving test picture in place of video (no adapter needed), for looking at the screen side alone. */
     fun testCard(on: Boolean) {}
-    /** Debug: an environment switch wifi-sdr / devourer read at the next open or stream start ("" removes it). */
+    /**
+     * Debug: a switch by name. KP_CONCEAL and KP_FAST_CPUS are the radio's own ("0" turns one off). Any other is an
+     * environment variable for wifi-sdr / devourer, in place from the next open ("" removes it).
+     */
     fun setDebugEnv(key: String, value: String) {}
     /** Keep the picture on screen, dimmed once stale, for up to [ms] (through a close and reopen); the next frame ends it. */
     fun holdPicture(ms: Int) {}
@@ -72,12 +78,11 @@ object Native : Engine {
     external override fun watch(hz: Double, fresh: Boolean)
     external override fun idle()
     external override fun streamTest(rateSel: Int, seconds: Double)
-    external override fun setWatchRate(rateSel: Int)
-    external override fun setGain(db: Double)
-    external override fun setComb(on: Boolean)
+    external override fun setWatchRate(rateSel: Int): Boolean
+    external override fun setGain(db: Double): Boolean
     external override fun setDiversity(on: Boolean)
     external override fun setOffsetTuning(on: Boolean): Boolean
-    external override fun setPicture(lumaComb: Boolean, adaptiveComb: Boolean, smoothLines: Boolean, repair: Boolean)
+    external override fun setPicture(lumaComb: Boolean, adaptiveComb: Boolean, smoothLines: Boolean, repair: Boolean, colourComb: Boolean): Boolean
     external override fun setView(aspect: Float, fit: Int, scale: Float, stereo: Boolean, eyeShift: Float)
     external override fun setBackdrop(on: Boolean, now: Boolean)
     external override fun record(seconds: Double, prefix: String)

@@ -14,6 +14,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "log.h"
@@ -77,6 +78,21 @@ void card_start() {
       std::this_thread::sleep_for(std::chrono::milliseconds(33));
     }
   });
+}
+
+// ---- debug switches for wifi-sdr / devourer (the "env" extra: WSDR_URB_DEPTH and the like) ----
+// They read theirs from the environment, on the radio's threads, and setenv is not safe beside a getenv on another
+// thread. So the ones asked for wait here, and go into the environment in Native_open with the radio closed.
+std::mutex g_env_m;
+std::vector<std::pair<std::string, std::string>> g_env_wanted;  // name, value ("" removes it)
+
+void apply_env() {
+  std::lock_guard<std::mutex> l(g_env_m);
+  for (const auto &[k, v] : g_env_wanted) {
+    if (v.empty()) unsetenv(k.c_str());
+    else setenv(k.c_str(), v.c_str(), 1);
+  }
+  g_env_wanted.clear();
 }
 
 std::string jstring_of(JNIEnv *env, jstring s) {
@@ -151,6 +167,8 @@ JNIEXPORT jstring JNICALL Java_com_kepyur_app_Native_usb3Switch(JNIEnv *env, jcl
 JNIEXPORT jstring JNICALL Java_com_kepyur_app_Native_open(JNIEnv *env, jclass, jint fd) {
   std::lock_guard<std::mutex> l(g_api);
   try {
+    g_radio->close();  // open() would; before the environment changes, so that none of its threads is reading it
+    apply_env();
     g_radio->open(fd);
     return env->NewStringUTF("");
   } catch (const std::exception &e) {
@@ -188,16 +206,13 @@ JNIEXPORT void JNICALL Java_com_kepyur_app_Native_streamTest(JNIEnv *, jclass, j
   if (g_radio) g_radio->stream_test(rate_sel, seconds);
 }
 
-JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setWatchRate(JNIEnv *, jclass, jint rate_sel) {
-  if (g_radio) g_radio->set_watch_rate(rate_sel);
+// The setters that return a jboolean: true when the radio says a watch must be started again to have the change.
+JNIEXPORT jboolean JNICALL Java_com_kepyur_app_Native_setWatchRate(JNIEnv *, jclass, jint rate_sel) {
+  return g_radio && g_radio->set_watch_rate(rate_sel);
 }
 
-JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setGain(JNIEnv *, jclass, jdouble db) {
-  if (g_radio) g_radio->set_gain(db);
-}
-
-JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setComb(JNIEnv *, jclass, jboolean on) {
-  if (g_radio) g_radio->set_comb(on);
+JNIEXPORT jboolean JNICALL Java_com_kepyur_app_Native_setGain(JNIEnv *, jclass, jdouble db) {
+  return g_radio && g_radio->set_gain(db);
 }
 
 JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setDiversity(JNIEnv *, jclass, jboolean on) {
@@ -208,12 +223,14 @@ JNIEXPORT jboolean JNICALL Java_com_kepyur_app_Native_setOffsetTuning(JNIEnv *, 
   return g_radio && g_radio->set_offset_tuning(on);
 }
 
-JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setPicture(JNIEnv *, jclass, jboolean luma_comb, jboolean adaptive,
-                                                             jboolean smooth, jboolean repair) {
+JNIEXPORT jboolean JNICALL Java_com_kepyur_app_Native_setPicture(JNIEnv *, jclass, jboolean luma_comb,
+                                                                 jboolean adaptive, jboolean smooth, jboolean repair,
+                                                                 jboolean colour_comb) {
   set_luma_comb(luma_comb);
   set_adaptive_comb(adaptive);
   set_smooth_lines(smooth);
   set_repair(repair);
+  return g_radio && g_radio->set_comb(colour_comb);
 }
 
 JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setView(JNIEnv *, jclass, jfloat aspect, jint fit, jfloat scale,
@@ -270,13 +287,21 @@ JNIEXPORT void JNICALL Java_com_kepyur_app_Native_holdPicture(JNIEnv *, jclass, 
   if (g_screen) g_screen->hold(ms);
 }
 
-// Debug: an environment switch for wifi-sdr / devourer (WSDR_URB_DEPTH and the like), read at the next open or
-// stream start. An empty value removes it.
+// Debug: a switch by name. The radio's own two are set at once ("0" turns one off; anything else, or nothing, on).
+// Any other is an environment variable for wifi-sdr / devourer, in place from the next open; an empty value
+// removes it.
 JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setDebugEnv(JNIEnv *env, jclass, jstring key, jstring value) {
   const std::string k = jstring_of(env, key), v = jstring_of(env, value);
   if (k.empty()) return;
-  if (v.empty()) unsetenv(k.c_str());
-  else setenv(k.c_str(), v.c_str(), 1);
+  const bool on = v.empty() || v[0] != '0';
+  if (k == "KP_CONCEAL") {
+    if (g_radio) g_radio->set_conceal(on);
+  } else if (k == "KP_FAST_CPUS") {
+    if (g_radio) g_radio->set_fast_cores(on);
+  } else {
+    std::lock_guard<std::mutex> l(g_env_m);
+    g_env_wanted.emplace_back(k, v);
+  }
   KP_LOGI("debug: env %s=%s", k.c_str(), v.c_str());
 }
 

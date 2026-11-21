@@ -36,8 +36,8 @@ class MenuScreenshotTest {
         override fun onTune() {}
         override fun onScan() {}
         override fun onView() {}
-        override fun onPicture(rebuild: Boolean) {}
-        override fun onSignal(retune: Boolean) {}
+        override fun onPicture() {}
+        override fun onSignal() {}
         override fun onPeek(on: Boolean) {}
         override fun onStatusAction() {}
         override fun onClose() {}

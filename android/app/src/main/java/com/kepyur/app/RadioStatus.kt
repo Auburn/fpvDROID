@@ -79,6 +79,8 @@ class RadioStatus private constructor(s: JSONObject) {
     val streamDropped = s.optLong("stream_dropped")
     val queueDropped = s.optLong("dropped")
     val decodeDropped = s.optLong("decode_dropped")
+    /** How many of [streamDropped] the watch now running lost in its last few seconds (0 when not watching). */
+    val lateRecent = s.optLong("late_recent")
     /** The busier of the two processing threads, 0..1 of its time. */
     val load = maxOf(s.num("dsp_load"), s.num("decode_load"))
 

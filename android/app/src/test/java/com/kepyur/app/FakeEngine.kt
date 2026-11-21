@@ -68,6 +68,8 @@ class FakeEngine : Engine {
     var dropped = 0L
     /** Blocks lost on the USB link itself ("stream_dropped" in the status). */
     var streamDropped = 0L
+    /** How many of those the radio counts against the watch now running ("late_recent": its last 5 s). */
+    var lateRecent = 0L
     var dspLoad = 0.3
     val pilots = ArrayList<Pilot>()
     /**
@@ -191,21 +193,34 @@ class FakeEngine : Engine {
         if (isOpen) mode = "test"
     }
 
-    @Synchronized override fun setWatchRate(rateSel: Int) = rec("setWatchRate", rateSel)
-    @Synchronized override fun setGain(db: Double) = rec("setGain", db)
-    @Synchronized override fun setComb(on: Boolean) = rec("setComb", on)
-    @Synchronized override fun setDiversity(on: Boolean) = rec("setDiversity", on)
-
+    // what a watch takes only when it starts, as the real radio has it at first: each setter says whether it changed
+    private var watchRate = 1
+    private var gain = -1.0
     private var offset = false
-    @Synchronized override fun setOffsetTuning(on: Boolean): Boolean {
-        rec("setOffsetTuning", on)
-        val changed = offset != on
-        offset = on
-        return changed
+    private var colourComb = false
+
+    @Synchronized override fun setWatchRate(rateSel: Int): Boolean {
+        rec("setWatchRate", rateSel)
+        return (watchRate != rateSel).also { watchRate = rateSel }
     }
 
-    @Synchronized override fun setPicture(lumaComb: Boolean, adaptiveComb: Boolean, smoothLines: Boolean, repair: Boolean) =
-        rec("setPicture", lumaComb, adaptiveComb, smoothLines, repair)
+    @Synchronized override fun setGain(db: Double): Boolean {
+        rec("setGain", db)
+        return (gain != db).also { gain = db }
+    }
+
+    @Synchronized override fun setDiversity(on: Boolean) = rec("setDiversity", on)
+
+    @Synchronized override fun setOffsetTuning(on: Boolean): Boolean {
+        rec("setOffsetTuning", on)
+        return (offset != on).also { offset = on }
+    }
+
+    @Synchronized override fun setPicture(lumaComb: Boolean, adaptiveComb: Boolean, smoothLines: Boolean, repair: Boolean,
+                                          colourComb: Boolean): Boolean {
+        rec("setPicture", lumaComb, adaptiveComb, smoothLines, repair, colourComb)
+        return (this.colourComb != colourComb).also { this.colourComb = colourComb }
+    }
 
     @Synchronized override fun setView(aspect: Float, fit: Int, scale: Float, stereo: Boolean, eyeShift: Float) =
         rec("setView", aspect, fit, scale, stereo, eyeShift)
@@ -237,6 +252,7 @@ class FakeEngine : Engine {
         o.put("banks", banks)
         o.put("dropped", dropped)
         o.put("stream_dropped", streamDropped)
+        o.put("late_recent", if (mode == "watch") lateRecent else 0)
         o.put("decode_dropped", 0)
         o.put("restarts", 0)
         o.put("dsp_load", dspLoad)

@@ -58,10 +58,10 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         fun onScan()
         /** A view setting changed (aspect, scaling, size, goggles). */
         fun onView()
-        /** A picture switch changed. [rebuild]: one the decoder only takes when the channel is tuned again. */
-        fun onPicture(rebuild: Boolean)
-        /** A signal setting changed. [retune]: it applies on the next tune. */
-        fun onSignal(retune: Boolean)
+        /** A picture switch changed. */
+        fun onPicture()
+        /** A signal setting changed. */
+        fun onSignal()
         /**
          * A view slider is being dragged ([on]) or was let go: while it is, the menu steps aside (all but that
          * slider) so the picture can be seen changing, and the picture should be shown sharp.
@@ -486,10 +486,10 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     // ------------------------------------------------------------------------------------------ picture
     private fun buildPicturePage(): View {
         val p = page()
-        fun toggle(title: String, words: String, value: Boolean, rebuild: Boolean = false, set: (Boolean) -> Unit) =
+        fun toggle(title: String, words: String, value: Boolean, set: (Boolean) -> Unit) =
             SettingRow(context, title, words, Toggle(context, value) { v ->
                 set(v)
-                on.onPicture(rebuild)
+                on.onPicture()
             })
         p.addView(toggle("Comb filter", "A sharper picture with no echo after edges (NTSC cameras)", s.lumaComb) {
             s.lumaComb = it
@@ -504,7 +504,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         p.addView(divider(context))
         p.addView(toggle("Sparkle repair", "Patches the white and black sparkles of a weak signal", s.sparkleRepair) { s.sparkleRepair = it })
         p.addView(divider(context))
-        p.addView(toggle("Colour comb", "Fewer rainbows on fine detail, at the cost of more processing (NTSC cameras)", s.colourComb, rebuild = true) { s.colourComb = it })
+        p.addView(toggle("Colour comb", "Fewer rainbows on fine detail, at the cost of more processing (NTSC cameras)", s.colourComb) { s.colourComb = it })
         return p
     }
 
@@ -515,22 +515,22 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
             Segmented(context, listOf("40 MS/s", "20 MS/s"), if (s.rate40) 0 else 1) { i ->
                 s.rate40 = i == 0
                 offsetRow.setAvailable(s.rate40)
-                on.onSignal(retune = true)
+                on.onSignal()
             }.sized(dpi(184f))))
         p.addView(divider(context))
         p.addView(SettingRow(context, "Diversity", "Both of the adapter's antennas combined, so a fade on one is covered by the other",
-            Toggle(context, s.diversity) { v -> s.diversity = v; on.onSignal(retune = false) }))
+            Toggle(context, s.diversity) { v -> s.diversity = v; on.onSignal() }))
         p.addView(divider(context))
         // at 20 MS/s the stream is too narrow to sit beside the channel, and the radio stays centred whatever this says
         offsetRow = SettingRow(context, "Tune beside the channel", "Keeps the picture clear of the chip's blind spot: no stripes at the left edge, no ghost outlines. Needs sample rate 40",
-            Toggle(context, s.offsetTune) { v -> s.offsetTune = v; on.onSignal(retune = true) })
+            Toggle(context, s.offsetTune) { v -> s.offsetTune = v; on.onSignal() })
         offsetRow.setAvailable(s.rate40)
         p.addView(offsetRow)
         p.addView(divider(context))
         gainPicker = Segmented(context, listOf("Auto", "Manual"), if (s.gainAuto) 0 else 1) { i ->
             s.gainAuto = i == 0
             showGainRow()
-            on.onSignal(retune = true)
+            on.onSignal()
         }.sized(dpi(170f))
         p.addView(SettingRow(context, "Gain", "Automatic suits most flying. By hand for a transmitter so close that it washes the picture out",
             gainPicker))
@@ -540,10 +540,10 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
             Slider(context, 0f, Settings.GAIN_MAX, s.gainDb, 30f) { v, done ->
                 s.gainDb = v.roundToInt().toFloat()
                 gainRow.detailView.text = gainWords()
-                // a retune interrupts the picture: once, when the finger lifts, and only for a new value
+                // a new gain interrupts the picture: told once, when the finger lifts, and only for a new value
                 if (done && s.gainDb != gainApplied) {
                     gainApplied = s.gainDb
-                    on.onSignal(retune = true)
+                    on.onSignal()
                 }
             }.apply { spoken = { "${it.roundToInt()} dB" } }.sized(dpi(216f)))
         p.addView(gainRow)
