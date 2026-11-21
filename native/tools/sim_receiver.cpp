@@ -8,6 +8,8 @@
 // tap"). A combiner that adds the two as they come loses the colour on it.
 // KP_SIM_DROP_EVERY=N loses every Nth bank the way the adapter's stream drops one it collected too late: not
 // delivered, counted in RxStatus::mid_drops, and BankMeta::seq steps over it.
+// KP_SIM_RESTART_EVERY_MS=N ends each run of the stream after N ms the way a fault does: counted in
+// RxStatus::restarts, and the next run starts with a new BankMeta::gen and seq 0.
 #include <chrono>
 #include <cmath>
 #include <complex>
@@ -40,7 +42,8 @@ struct Sim {
   std::vector<int16_t> rec;  // I,Q (value << 4)
   size_t pos = 0;
   double rec_centre = 5770e6;
-  unsigned drop_every = 0;  // KP_SIM_DROP_EVERY
+  unsigned drop_every = 0;        // KP_SIM_DROP_EVERY
+  unsigned restart_every_ms = 0;  // KP_SIM_RESTART_EVERY_MS
 };
 Sim *g_sim = nullptr;
 constexpr double kLeadB = 146e-9;  // path B ahead of path A
@@ -68,6 +71,8 @@ void Receiver::open(uint16_t pid, const RxSettings &initial, int, const std::str
   if (std::fread(g_sim->rec.data(), 2, g_sim->rec.size(), fp) != g_sim->rec.size()) throw std::runtime_error("short read");
   std::fclose(fp);
   if (const char *d = std::getenv("KP_SIM_DROP_EVERY")) g_sim->drop_every = static_cast<unsigned>(std::atoi(d));
+  if (const char *d = std::getenv("KP_SIM_RESTART_EVERY_MS"))
+    g_sim->restart_every_ms = static_cast<unsigned>(std::atoi(d));
   _set = initial;
   _caps = {};
   _caps.pid = pid;
@@ -130,7 +135,7 @@ void Receiver::worker() {
   std::vector<std::complex<float>> clean(N + 16);  // the bank before noise, and the next samples path B is ahead by
   uint64_t seq = 0, run_banks = 0;
   double ph = 0;
-  auto t_next = std::chrono::steady_clock::now();
+  auto t_next = std::chrono::steady_clock::now(), t_run = t_next;  // the next bank's time; when this run began
   RxSettings s;
   BankMeta m;
   bool first = true;
@@ -141,6 +146,12 @@ void Receiver::worker() {
       restart = _restart || first;
       _restart = false;
       s = _set;
+      if (!restart && g_sim->restart_every_ms &&
+          std::chrono::steady_clock::now() - t_run >= std::chrono::milliseconds(g_sim->restart_every_ms)) {
+        restart = true;
+        _st.restarts++;
+        _st.last_fault = "simulated fault (KP_SIM_RESTART_EVERY_MS)";
+      }
     }
     if (restart) {
       if (!first) std::this_thread::sleep_for(std::chrono::milliseconds(150));  // retune + stream restart
@@ -153,7 +164,7 @@ void Receiver::worker() {
       m.shift_hz = s.freq - m.centre_hz;
       seq = 0;
       run_banks = 0;
-      t_next = std::chrono::steady_clock::now();
+      t_next = t_run = std::chrono::steady_clock::now();
       std::lock_guard<std::mutex> l(_m);
       _st.state = RxState::Streaming;
       _st.fs = m.fs;
