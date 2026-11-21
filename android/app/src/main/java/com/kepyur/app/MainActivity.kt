@@ -301,7 +301,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
             // the picture has just gone, with nothing on screen to say why: the menu does (and steps aside
             // again by itself once the radio is back, see onRadioUp). Not for the few seconds of a reopen after the
             // USB data path wedged: on some phones that comes every minute or so, and fixes itself.
-            if (wasRunning && foreground && !link.reopeningAfterWedge) showMenuForTrouble()
+            if (wasRunning && foreground && link.state != UsbLink.State.REOPENING) showMenuForTrouble()
         }
         wasRunning = running
         refresh()
@@ -394,7 +394,8 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         UsbLink.State.PERMISSION -> MenuState(Tone.BUSY, "Allow USB access", "Android is asking whether Kepyur may use the adapter.")
         UsbLink.State.DENIED -> MenuState(Tone.WARN, "Permission needed", "Kepyur cannot use the adapter without it.", "Ask again")
         UsbLink.State.SWITCHING -> MenuState(Tone.BUSY, "Switching to USB 3", "The adapter restarts itself. This takes a few seconds.")
-        UsbLink.State.OPENING -> MenuState(Tone.BUSY, "Starting the radio", link.message.ifEmpty { "About five seconds." })
+        UsbLink.State.OPENING, UsbLink.State.REOPENING ->
+            MenuState(Tone.BUSY, "Starting the radio", link.message.ifEmpty { "About five seconds." })
         UsbLink.State.WAITING -> MenuState(Tone.WARN, "Trying again", link.message, "Try now")
         UsbLink.State.FAILED -> MenuState(Tone.ERROR, "Adapter problem", link.message, "Try again")
         UsbLink.State.USB2 -> MenuState(Tone.WARN, "USB 2 link",

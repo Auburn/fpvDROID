@@ -40,6 +40,8 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
         DENIED,       // the user said no
         SWITCHING,    // the adapter is re-enumerating as a USB 3 device
         OPENING,      // chip bring-up (about five seconds)
+        REOPENING,    // the same, at once, because the USB data path wedged ([message] says so): a gap of a few
+                      // seconds that fixes itself, not trouble to open the menu for
         RUNNING,
         USB2,         // open, but on a link too slow for video
         WAITING,      // something failed; trying again shortly ([message] says what)
@@ -68,15 +70,10 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
     private var askedFor: String? = null
     private var switchRequests = 0
     private var switchDeadline = 0L
-    /** Shown while the adapter is opened again because its USB data path wedged; "" otherwise. */
-    private var reopenNote = ""
     /** When the data path wedged, over the last [WEDGE_WINDOW_MS] (elapsedRealtime). */
     private val wedges = ArrayDeque<Long>()
-    /**
-     * The adapter is being opened again, at once, because its USB data path wedged ([reopenAfterWedge]): a gap of a
-     * few seconds that fixes itself, not trouble to open the menu for.
-     */
-    val reopeningAfterWedge get() = reopenNote.isNotEmpty()
+    /** The chip is being brought up: an open is in flight on the worker. */
+    private val opening get() = state == State.OPENING || state == State.REOPENING
     // the bank counter of the last status, and when it last moved (a stream that has silently stopped)
     private var lastBanks = -1L
     private var banksMovedAt = 0L
@@ -115,7 +112,6 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
         askedFor = null
         switchDeadline = 0
         failures = 0
-        reopenNote = ""
         wedges.clear()
     }
 
@@ -138,7 +134,7 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
 
     /** Called from the app's own launch intent when Android started it for an attached adapter. */
     fun onAttachedIntent() {
-        if (state != State.RUNNING && state != State.OPENING) connect(force = true)
+        if (state != State.RUNNING && !opening) connect(force = true)
     }
 
     // ---------------------------------------------------------------------------------------- connecting
@@ -155,8 +151,16 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
 
     private fun connect(force: Boolean = false) {
         if (!started) return
-        if (state == State.OPENING || state == State.RUNNING || state == State.USB2) return
+        if (opening || state == State.RUNNING || state == State.USB2) return
         if (state == State.DENIED && !force) return
+        open(State.OPENING)
+    }
+
+    /**
+     * Find the adapter, ask for permission if it has none yet, and bring the radio up: as [State.OPENING], or as
+     * [State.REOPENING] with the [note] that says why.
+     */
+    private fun open(bringUp: State, note: String = "") {
         ui.removeCallbacks(retry)
         val d = usb.deviceList.values.firstOrNull { ours(it) }
         if (d == null) {
@@ -189,11 +193,11 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
         val fd = c.fileDescriptor
         val gen = ++generation
         engine.log("adapter ${d.deviceName} ${"%04x:%04x".format(d.vendorId, d.productId)} fd=$fd")
-        set(State.OPENING, reopenNote)
+        set(bringUp, note)
         // bring-up cannot be interrupted from here, but pulling the plug ends it: say so if it drags on
         ui.postDelayed({
-            if (gen == generation && state == State.OPENING)
-                set(State.OPENING, "This is taking longer than it should. Unplug the adapter and plug it in again.")
+            if (gen == generation && opening)
+                set(state, "This is taking longer than it should. Unplug the adapter and plug it in again.")
         }, SLOW_OPEN_MS)
         val trySwitch = switchRequests < MAX_SWITCH_REQUESTS
         worker.execute {
@@ -217,12 +221,10 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
             val fast = err.isEmpty() && engine.superspeed()
             ui.post {
                 if (gen != generation) return@post   // unplugged meanwhile: the close queued behind us tidies up
-                if (err.isNotEmpty() || !fast) reopenNote = ""   // trouble of another kind: said as such
                 when {
                     err.isNotEmpty() -> failLater("The radio did not start: $err")
                     !fast -> set(State.USB2)
                     else -> {
-                        reopenNote = ""
                         // failures is not forgotten yet: a radio that opens and then never streams is still failing
                         lastBanks = -1
                         banksMovedAt = SystemClock.elapsedRealtime()
@@ -302,7 +304,6 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
      */
     private fun failLater(msg: String) {
         engine.log("link: $msg (failure ${failures + 1})")
-        reopenNote = ""
         giveUpAdapter()
         failures++
         val persistent = failures >= PERSISTENT_FAILURES
@@ -374,7 +375,7 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
      * The chip's USB data path has wedged (wifi-sdr's C2H wedge, which the radio reports as "wedged"): on some USB 3
      * ports (a Pixel 8 Pro's, for one) it happens every few seconds to minutes, and only opening the adapter again
      * brings it back. That takes about three seconds, so it is done at once: not as a failure (no wait, nothing
-     * counted towards slower retries), and quietly ([reopeningAfterWedge]). When it keeps happening, [message] says
+     * counted towards slower retries), and quietly ([State.REOPENING]). When it keeps happening, [message] says
      * that this phone and this adapter do not get on.
      */
     private fun reopenAfterWedge(status: JSONObject) {
@@ -387,12 +388,10 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
             status.optString("rx_error"))
         engine.holdPicture(HOLD_PICTURE_MS)   // the last picture stays, dimmed, until the reopened radio's first frame
         giveUpAdapter()
-        reopenNote = if (n >= WEDGE_ADVICE_COUNT)
+        open(State.REOPENING, if (n >= WEDGE_ADVICE_COUNT)
             "The adapter's USB link locked up $n times in $minutes minutes: starting it again. This phone's USB 3 " +
                 "port and this adapter do not get on; another phone or adapter may hold up better."
-        else "The adapter's USB link locked up: starting it again."
-        state = State.WAITING   // quietly: connect() says OPENING (with the note) straight away
-        connect(force = true)
+        else "The adapter's USB link locked up: starting it again.")
     }
 
     // ---------------------------------------------------------------------------------------- broadcasts
@@ -413,12 +412,11 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
                     giveUpAdapter()
                     failures = 0
                     askedFor = null
-                    reopenNote = ""
                     if (switching) awaitSwitch() else { switchRequests = 0; set(State.NO_ADAPTER) }
                 }
                 UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
                     engine.log("adapter attached")
-                    if (state != State.RUNNING && state != State.OPENING) connect(force = true)
+                    if (state != State.RUNNING && !opening) connect(force = true)
                 }
             }
         }

@@ -142,7 +142,7 @@ class UsbLinkScenariosTest : AppHarness() {
     fun wedgeWhileOpeningSaysSoAndKeepsHappeningSaysWhatToTry() {
         running()
         wedgeIntoHeldOpen()
-        assertEquals(State.OPENING, link.state)
+        assertEquals(State.REOPENING, link.state)
         assertEquals("The adapter's USB link locked up: starting it again.", link.message)
         releaseUntilRunning()
         assertEquals("", link.message)
@@ -154,7 +154,7 @@ class UsbLinkScenariosTest : AppHarness() {
         advance(5000)
         wedgeIntoHeldOpen()
         assertEquals(4, fake.count("open"))
-        assertEquals(State.OPENING, link.state)
+        assertEquals(State.REOPENING, link.state)
         assertTrue(link.message, link.message.startsWith("The adapter's USB link locked up 3 times in 2 minutes"))
         releaseUntilRunning()
         assertEquals("", link.message)
