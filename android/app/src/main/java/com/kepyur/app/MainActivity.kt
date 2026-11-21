@@ -27,9 +27,10 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /**
- * kepyur: one screen. The picture fills it; the menu ([MenuView]) lies over the picture, blurred behind it,
- * and is open when the app starts. With the menu closed there is nothing on screen but the picture: a tap
- * brings up a MENU button for three seconds.
+ * kepyur: one screen. The picture fills it; the menu ([MenuView]) lies over a black screen with the picture moved
+ * into its preview (tapping that closes the menu), and is open when the app starts. With the menu closed there is
+ * nothing on screen but the picture: a tap brings up a MENU button for three seconds. Where there is no picture,
+ * full size or small, the screen shows colour bars naming the chosen channel (NO SIGNAL before there is one).
  *
  * USB stream test (for the first hardware check):  adb shell am start -n com.kepyur.app/.MainActivity --es mode usbtest
  */
@@ -91,6 +92,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         applyPicture()
         applySignal()
         applyView()
+        showChannel()
         engine.setBackdrop(true, true)
         buildUi()
         link = UsbLink(this, engine, this)
@@ -225,6 +227,18 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     private fun applyView() =
         engine.setView(settings.aspect, settings.fit, settings.scale, settings.goggles, settings.eyeShift)
 
+    /**
+     * Where there is no picture, the screen's card names the chosen channel ("R8"; a frequency off every channel by
+     * its MHz), or says NO SIGNAL when none has been chosen yet.
+     */
+    private fun showChannel() {
+        val mhz = settings.channelMhz
+        engine.setCardLabel(if (mhz <= 0) "" else channelAt(mhz.toDouble())?.name ?: "$mhz")
+    }
+
+    /** The channel [mhz] is on, the chosen band's if two share it; null: on none (a transmitter off every channel). */
+    private fun channelAt(mhz: Double) = Channels.nearest(mhz, settings.band, Channels.SAME_CHANNEL_MHZ)
+
     /** The frequency for the chosen channel: where a scan measured its transmitter, if it found one, else the nominal one. */
     private fun channelHz(): Double {
         val mhz = settings.channelMhz
@@ -249,7 +263,10 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     }
 
     // ---------------------------------------------------------------------------------------- MenuView.Listener
-    override fun onTune() = tune(fresh = true)
+    override fun onTune() {
+        showChannel()
+        tune(fresh = true)
+    }
 
     override fun onScan() {
         if (link.state != UsbLink.State.RUNNING || testRunning) return
@@ -270,8 +287,12 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         if (applySignal()) retune()
     }
 
-    /** A view slider is being dragged: the picture sharp under it, so the change can be judged. */
+    /** A view slider is being dragged: the picture full size under it, so the change can be judged. */
     override fun onPeek(on: Boolean) = engine.setBackdrop(menuOpen && !on, false)
+
+    /** The menu and the video fill the same screen: the preview's place in the menu is its place on the Surface. */
+    override fun onPreview(left: Int, top: Int, right: Int, bottom: Int, radius: Float) =
+        engine.setPreview(left, top, right, bottom, radius)
 
     /** A finger on the menu: whoever opened it, it now stays until it is closed. */
     override fun onTouched() {
@@ -434,7 +455,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         lastDropped = queued
         val overloaded = mode == Mode.WATCH && (now < overloadedUntil || st.lateRecent >= LATE_BLOCKS)
 
-        val name = Channels.nearest(watchHz / 1e6, settings.band, Channels.SAME_CHANNEL_MHZ)?.name
+        val name = channelAt(watchHz / 1e6)?.name
         val where = (if (name != null) "$name · " else "") + "${(watchHz / 1e6).roundToInt()} MHz"   // finite: RadioStatus
         val stats = buildString {
             append(if (st.usb3) "USB 3" else "USB 2")
@@ -447,7 +468,8 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
             }
         }
         val base = MenuState(radioReady = !testRunning, scanning = mode == Mode.SCAN, scanStep = st.scanStep,
-            scanSteps = st.scanSteps, found = found, scanFoundNothing = noVideoFound, stats = stats)
+            scanSteps = st.scanSteps, found = found, scanFoundNothing = noVideoFound, stats = stats,
+            locked = mode == Mode.WATCH && locked)
         return when (mode) {
             Mode.SCAN -> base.copy(tone = Tone.BUSY, headline = "Scanning", detail = "Looking for video on every channel.")
             Mode.TEST -> base.copy(tone = Tone.BUSY, headline = "USB test", detail = st.test?.let {
@@ -477,12 +499,13 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     private fun adoptChannel(mhz: Double) {
         if (!mhz.isFinite() || mhz <= 0) return
         // a transmitter further than that from a channel is not on it: it is kept by its own frequency
-        val ch = Channels.nearest(mhz, settings.band, Channels.SAME_CHANNEL_MHZ)
+        val ch = channelAt(mhz)
         val to = ch?.mhz ?: mhz.roundToInt()
         if (to == settings.channelMhz && (ch == null || ch.band == settings.band)) return
         settings.channelMhz = to
         if (ch != null) settings.band = ch.band
         menu.syncChannel()
+        showChannel()
     }
 
     /** Ask for a display mode that fits the camera's field rate, so frames do not beat against the refresh. */

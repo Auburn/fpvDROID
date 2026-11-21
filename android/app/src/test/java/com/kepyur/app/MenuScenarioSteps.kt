@@ -36,7 +36,7 @@ abstract class MenuScenarioSteps : AppHarness() {
     protected val menuShowing get() = menu.visibility == View.VISIBLE
 
     protected fun closeTheMenu() {
-        click(pill("Close menu"))
+        click(preview())
         looper.idleFor(Duration.ofMillis(300))
         assertFalse("the menu should be closed", menuShowing)
     }

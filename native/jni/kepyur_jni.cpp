@@ -250,6 +250,17 @@ JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setBackdrop(JNIEnv *, jclass, 
   if (g_screen) g_screen->set_backdrop(on, now);
 }
 
+JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setCardLabel(JNIEnv *env, jclass, jstring label) {
+  if (g_screen) g_screen->set_card_label(jstring_of(env, label));
+}
+
+JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setPreview(JNIEnv *, jclass, jint left, jint top, jint right,
+                                                             jint bottom, jfloat radius) {
+  if (!g_screen) return;
+  const float w = static_cast<float>(std::max(0, right - left)), h = static_cast<float>(std::max(0, bottom - top));
+  g_screen->set_preview(Preview{Rect{static_cast<float>(left), static_cast<float>(top), w, h}, std::max(0.f, radius)});
+}
+
 JNIEXPORT void JNICALL Java_com_kepyur_app_Native_record(JNIEnv *env, jclass, jdouble seconds, jstring prefix) {
   const std::string p = jstring_of(env, prefix);
   if (g_radio) g_radio->record(seconds, p);

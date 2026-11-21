@@ -81,7 +81,7 @@ class MenuControlScenariosTest : MenuScenarioSteps() {
         assertEquals(listOf(call("setBackdrop", false, false), call("setBackdrop", true, false)), fake.calls("setBackdrop"))
     }
 
-    /** Close menu pressed (its click, as the button does) while a slider is held: no blurred picture without a menu. */
+    /** The preview tapped (its click, as a tap does) while a slider is held: no picture in a preview without a menu. */
     @Test
     fun closeMenuDuringAPeekLeavesThePictureSharpAndTheMenuGone() {
         running()
@@ -95,7 +95,7 @@ class MenuControlScenariosTest : MenuScenarioSteps() {
         for (i in 1..8) finger(MotionEvent.ACTION_MOVE, x0 + (x1 - x0) * i / 8, y, t)
         assertEquals(call("setBackdrop", false, false), lastBackdrop())
         fake.clearCalls()
-        pill("Close menu").performClick()
+        preview().performClick()
         settle()
         finger(MotionEvent.ACTION_UP, x1, y, t)   // the first finger lifts
         settle()
@@ -105,7 +105,7 @@ class MenuControlScenariosTest : MenuScenarioSteps() {
     }
 
     /**
-     * The same with a real second finger on Close menu: the commit makes other fingers go nowhere during a peek, so
+     * The same with a real second finger on the preview: the commit makes other fingers go nowhere during a peek, so
      * the menu stays; either way the backdrop must follow the menu.
      */
     @Test
@@ -116,7 +116,7 @@ class MenuControlScenariosTest : MenuScenarioSteps() {
         val y = midY(s)
         val x0 = xOf(s, Settings.SCALE_MIN, Settings.SCALE_MAX, 1f)
         val x1 = xOf(s, Settings.SCALE_MIN, Settings.SCALE_MAX, 1.2f)
-        val close = at(pill("Close menu"))
+        val close = at(preview())
         val t = SystemClock.uptimeMillis()
         finger(MotionEvent.ACTION_DOWN, x0, y, t)
         for (i in 1..8) finger(MotionEvent.ACTION_MOVE, x0 + (x1 - x0) * i / 8, y, t)
@@ -134,7 +134,7 @@ class MenuControlScenariosTest : MenuScenarioSteps() {
         assertEquals(1.2f, s.value, 0.02f)
     }
 
-    /** The control for the test above: the same two-finger events, with no peek, do press Close menu. */
+    /** The control for the test above: the same two-finger events, with no peek, do tap the preview (closing the menu). */
     @Test
     fun secondFingerOnCloseMenuWithNothingPeekingClosesIt() {
         running()
@@ -142,7 +142,7 @@ class MenuControlScenariosTest : MenuScenarioSteps() {
         val s = sizeSlider()
         val y = midY(s)
         val x0 = xOf(s, Settings.SCALE_MIN, Settings.SCALE_MAX, 1f)
-        val close = at(pill("Close menu"))
+        val close = at(preview())
         val t = SystemClock.uptimeMillis()
         finger(MotionEvent.ACTION_DOWN, x0, y, t)   // resting on the slider, not dragging it
         twoFingers(pointer1(MotionEvent.ACTION_POINTER_DOWN), t, x0, y, close[0], close[1])
@@ -151,7 +151,7 @@ class MenuControlScenariosTest : MenuScenarioSteps() {
         finger(MotionEvent.ACTION_UP, x0, y, t)
         settle()
         fades()
-        assertFalse("Close menu pressed by the second finger", menuShowing)
+        assertFalse("the preview tapped by the second finger closes the menu", menuShowing)
         assertEquals(call("setBackdrop", false, false), lastBackdrop())
     }
 

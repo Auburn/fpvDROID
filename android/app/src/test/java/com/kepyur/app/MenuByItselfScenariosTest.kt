@@ -48,8 +48,8 @@ class MenuByItselfScenariosTest : MenuScenarioSteps() {
         settle()
         assertTrue(menuShowing)
         fades()
-        // a finger on the status text (no action in NO_ADAPTER: harmless)
-        val status = views(menu).filterIsInstance<TextView>().first { it.text.toString() == "No adapter" }
+        // a finger on the status's words along the top (no action in NO_ADAPTER: harmless)
+        val status = views(menu).filterIsInstance<TextView>().first { it.text.toString().startsWith("Plug the Wi-Fi adapter") }
         tapOn(status)
         assertEquals(State.NO_ADAPTER, link.state)
 
