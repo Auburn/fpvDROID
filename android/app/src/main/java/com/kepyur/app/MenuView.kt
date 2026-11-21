@@ -379,7 +379,6 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         p.addView(head)
         bandPicker = Segmented(context, Channels.bands.map { it.first.toString() }, bandIndex()) { i ->
             s.band = Channels.bands[i].first
-            s.save()
             syncChannel()
         }
         p.addView(bandPicker, LinearLayout.LayoutParams(-1, dpi(38f)).apply { topMargin = dpi(8f) })
@@ -392,7 +391,6 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
                     val ch = tile.channel ?: return@setOnClickListener
                     s.channelMhz = ch.mhz
                     s.band = ch.band
-                    s.save()
                     syncChannel()
                     on.onTune()
                 }
@@ -437,14 +435,14 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     private fun buildViewPage(): View {
         val p = page()
         p.addView(SettingRow(context, "Aspect ratio", "How the camera's picture is shaped",
-            Segmented(context, listOf("4:3", "16:9"), if (s.wide) 1 else 0) { i -> s.wide = i == 1; changedView() }
+            Segmented(context, listOf("4:3", "16:9"), if (s.wide) 1 else 0) { i -> s.wide = i == 1; on.onView() }
                 .sized(dpi(150f))))
         p.addView(divider(context))
         fitRow = SettingRow(context, "Scaling", fitWords[s.fit],
             Segmented(context, listOf("Fit", "Stretch", "Crop"), s.fit) { i ->
                 s.fit = i
                 fitRow.detailView.text = fitWords[i]
-                changedView()
+                on.onView()
             }.sized(dpi(216f)))
         p.addView(fitRow)
         p.addView(divider(context))
@@ -453,7 +451,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
                 s.scale = v
                 sizeRow.detailView.text = sizeWords()
                 peek(if (done) null else sizeRow)
-                changedView(save = done)
+                on.onView()
             }.sized(dpi(216f)))
         p.addView(sizeRow)
         p.addView(divider(context))
@@ -461,7 +459,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
             Toggle(context, s.goggles) { v ->
                 s.goggles = v
                 showEyeRow()
-                changedView()
+                on.onView()
             }))
         eyeDivider = divider(context)
         p.addView(eyeDivider)
@@ -469,7 +467,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
             Slider(context, -1f, 1f, s.eyeSpacing, 0f, fromDetent = true) { v, done ->
                 s.eyeSpacing = v
                 peek(if (done) null else eyeRow)
-                changedView(save = done)
+                on.onView()
             }.sized(dpi(216f)))
         p.addView(eyeRow)
         showEyeRow()
@@ -485,18 +483,12 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         if (s.goggles && was != View.VISIBLE) reveal(eyeRow)
     }
 
-    private fun changedView(save: Boolean = true) {
-        if (save) s.save()
-        on.onView()
-    }
-
     // ------------------------------------------------------------------------------------------ picture
     private fun buildPicturePage(): View {
         val p = page()
         fun toggle(title: String, words: String, value: Boolean, rebuild: Boolean = false, set: (Boolean) -> Unit) =
             SettingRow(context, title, words, Toggle(context, value) { v ->
                 set(v)
-                s.save()
                 on.onPicture(rebuild)
             })
         p.addView(toggle("Comb filter", "A sharper picture with no echo after edges (NTSC cameras)", s.lumaComb) {
@@ -522,23 +514,21 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         p.addView(SettingRow(context, "Sample rate", "40 hears more of the channel. 20 is easier on the USB link, and takes over by itself when 40 keeps dropping out",
             Segmented(context, listOf("40 MS/s", "20 MS/s"), if (s.rate40) 0 else 1) { i ->
                 s.rate40 = i == 0
-                s.save()
                 offsetRow.setAvailable(s.rate40)
                 on.onSignal(retune = true)
             }.sized(dpi(184f))))
         p.addView(divider(context))
         p.addView(SettingRow(context, "Diversity", "Both of the adapter's antennas combined, so a fade on one is covered by the other",
-            Toggle(context, s.diversity) { v -> s.diversity = v; s.save(); on.onSignal(retune = false) }))
+            Toggle(context, s.diversity) { v -> s.diversity = v; on.onSignal(retune = false) }))
         p.addView(divider(context))
         // at 20 MS/s the stream is too narrow to sit beside the channel, and the radio stays centred whatever this says
         offsetRow = SettingRow(context, "Tune beside the channel", "Keeps the picture clear of the chip's blind spot: no stripes at the left edge, no ghost outlines. Needs sample rate 40",
-            Toggle(context, s.offsetTune) { v -> s.offsetTune = v; s.save(); on.onSignal(retune = true) })
+            Toggle(context, s.offsetTune) { v -> s.offsetTune = v; on.onSignal(retune = true) })
         offsetRow.setAvailable(s.rate40)
         p.addView(offsetRow)
         p.addView(divider(context))
         gainPicker = Segmented(context, listOf("Auto", "Manual"), if (s.gainAuto) 0 else 1) { i ->
             s.gainAuto = i == 0
-            s.save()
             showGainRow()
             on.onSignal(retune = true)
         }.sized(dpi(170f))
@@ -553,7 +543,6 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
                 // a retune interrupts the picture: once, when the finger lifts, and only for a new value
                 if (done && s.gainDb != gainApplied) {
                     gainApplied = s.gainDb
-                    s.save()
                     on.onSignal(retune = true)
                 }
             }.apply { spoken = { "${it.roundToInt()} dB" } }.sized(dpi(216f)))
@@ -637,7 +626,6 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
                 chip.setOnClickListener {
                     s.channelMhz = ch?.mhz ?: f.mhz.roundToInt()
                     if (ch != null) s.band = ch.band
-                    s.save()
                     syncChannel()
                     on.onTune()
                 }

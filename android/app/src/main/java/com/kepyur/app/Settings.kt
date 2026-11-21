@@ -3,6 +3,7 @@ package com.kepyur.app
 import android.content.Context
 import android.content.SharedPreferences
 import kotlin.math.abs
+import kotlin.reflect.KProperty
 
 /** A standard analog 5.8 GHz channel. The table matches native/dsp/spectrum.cpp (fpv_channels). */
 data class Channel(val band: Char, val number: Int, val mhz: Int) {
@@ -40,48 +41,51 @@ object Channels {
     }
 }
 
-/** Everything the menu sets, kept across launches. */
+/** Everything the menu sets, kept across launches: each is read when this is made, and kept as soon as it is set. */
 class Settings(private val prefs: SharedPreferences) {
     constructor(ctx: Context) : this(ctx.getSharedPreferences("settings", Context.MODE_PRIVATE))
 
     // channel
-    var channelMhz = prefs.getInt("channel_mhz", 0)          // 0: none picked yet
-    var band = prefs.getString("band", "R")!!.first()
+    var channelMhz by pref("channel_mhz", 0)                 // 0: none picked yet
+    var band by pref("band", 'R')
     // view
-    var wide = prefs.getBoolean("wide", false)               // false 4:3, true 16:9
-    var fit = prefs.getInt("fit", FIT)
-    var scale = prefs.getFloat("scale", 1f)                  // SCALE_MIN..SCALE_MAX
-    var goggles = prefs.getBoolean("goggles", false)
-    var eyeSpacing = prefs.getFloat("eye_spacing", 0f)       // -1..1: pictures apart .. together
+    var wide by pref("wide", false)                          // false 4:3, true 16:9
+    var fit by pref("fit", FIT)
+    var scale by pref("scale", 1f)                           // SCALE_MIN..SCALE_MAX
+    var goggles by pref("goggles", false)
+    var eyeSpacing by pref("eye_spacing", 0f)                // -1..1: pictures apart .. together
     // picture
-    var lumaComb = prefs.getBoolean("luma_comb", true)
-    var cleanOsd = prefs.getBoolean("clean_osd", true)
-    var smoothLines = prefs.getBoolean("smooth_lines", true)
-    var sparkleRepair = prefs.getBoolean("sparkle_repair", false)
-    var colourComb = prefs.getBoolean("comb", false)         // the 3-line chroma comb (the key predates this menu)
+    var lumaComb by pref("luma_comb", true)
+    var cleanOsd by pref("clean_osd", true)
+    var smoothLines by pref("smooth_lines", true)
+    var sparkleRepair by pref("sparkle_repair", false)
+    var colourComb by pref("comb", false)                    // the 3-line chroma comb (the key predates this menu)
     // signal
-    var rate40 = prefs.getBoolean("rate40", true)
-    var diversity = prefs.getBoolean("diversity", false)
-    var offsetTune = prefs.getBoolean("offset_tune", true)
-    var gainAuto = prefs.getBoolean("gain_auto", true)       // the chip's own gain control
-    var gainDb = prefs.getFloat("gain_db", 30f)              // when it is not: 0..GAIN_MAX
+    var rate40 by pref("rate40", true)
+    var diversity by pref("diversity", false)
+    var offsetTune by pref("offset_tune", true)
+    var gainAuto by pref("gain_auto", true)                  // the chip's own gain control
+    var gainDb by pref("gain_db", 30f)                       // when it is not: 0..GAIN_MAX
 
     val aspect get() = if (wide) 16f / 9f else 4f / 3f
     /** Fraction of the screen width each eye's picture moves toward the middle. */
     val eyeShift get() = eyeSpacing * EYE_SHIFT_MAX
 
-    fun save() {
-        prefs.edit()
-            .putInt("channel_mhz", channelMhz).putString("band", band.toString())
-            .putBoolean("wide", wide).putInt("fit", fit).putFloat("scale", scale)
-            .putBoolean("goggles", goggles).putFloat("eye_spacing", eyeSpacing)
-            .putBoolean("luma_comb", lumaComb).putBoolean("clean_osd", cleanOsd)
-            .putBoolean("smooth_lines", smoothLines).putBoolean("sparkle_repair", sparkleRepair)
-            .putBoolean("comb", colourComb)
-            .putBoolean("rate40", rate40).putBoolean("diversity", diversity).putBoolean("offset_tune", offsetTune)
-            .putBoolean("gain_auto", gainAuto).putFloat("gain_db", gainDb)
-            .apply()
+    /** One setting: its value, and how it is written back when it is set. */
+    private inner class Pref<T>(private var value: T, private val put: SharedPreferences.Editor.(T) -> Unit) {
+        operator fun getValue(owner: Settings, property: KProperty<*>): T = value
+        operator fun setValue(owner: Settings, property: KProperty<*>, to: T) {
+            value = to
+            prefs.edit().apply { put(to) }.apply()
+        }
     }
+
+    private fun pref(key: String, default: Boolean) = Pref(prefs.getBoolean(key, default)) { putBoolean(key, it) }
+    private fun pref(key: String, default: Int) = Pref(prefs.getInt(key, default)) { putInt(key, it) }
+    private fun pref(key: String, default: Float) = Pref(prefs.getFloat(key, default)) { putFloat(key, it) }
+    /** A letter, kept as a string. */
+    private fun pref(key: String, default: Char) =
+        Pref(prefs.getString(key, default.toString())!!.first()) { putString(key, it.toString()) }
 
     companion object {
         const val FIT = 0

@@ -114,7 +114,6 @@ abstract class AppHarness {
         val s = Settings(app)
         s.channelMhz = mhz
         s.band = band
-        s.save()
     }
 
     fun savedSettings() = Settings(app)

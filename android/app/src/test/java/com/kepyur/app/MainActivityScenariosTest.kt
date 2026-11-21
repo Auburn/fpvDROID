@@ -255,7 +255,7 @@ class MainActivityScenariosTest : AppHarness() {
 
     @Test
     fun tuningBesideTheChannelIsGreyedOutFromTheStartWhenTheSavedRateIs20() {
-        Settings(app).apply { rate40 = false; save() }
+        Settings(app).rate40 = false
         running()
         showTab("Signal")
         val toggle = control("Tune beside the channel")
@@ -301,7 +301,6 @@ class MainActivityScenariosTest : AppHarness() {
         val s = Settings(app)
         s.gainAuto = false
         s.gainDb = 20f
-        s.save()
         running()
         val opened = fake.calls.indexOfFirst { it.name == "open" }
         assertTrue(fake.calls.drop(opened).contains(call("setGain", 20.0)))

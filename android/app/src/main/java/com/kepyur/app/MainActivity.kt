@@ -132,7 +132,6 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
             val g = i.getFloatExtra("gain", -1f)
             settings.gainAuto = g < 0
             if (g >= 0) settings.gainDb = g.coerceAtMost(Settings.GAIN_MAX)
-            settings.save()
             engine.log("debug: gain ${if (g < 0) "automatic" else "$g dB"}")
             if (::menu.isInitialized) menu.syncGain()
             applySignal()
@@ -527,7 +526,6 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         if (to == settings.channelMhz && (ch == null || ch.band == settings.band)) return
         settings.channelMhz = to
         if (ch != null) settings.band = ch.band
-        settings.save()
         menu.syncChannel()
     }
 
