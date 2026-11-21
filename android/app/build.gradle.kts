@@ -63,9 +63,12 @@ android {
         unitTests {
             isIncludeAndroidResources = true
             all { test ->
-                // MenuScreenshotTest writes its PNGs here (gradle testDebugUnitTest -Pshots=/some/dir)
-                (findProperty("shots") as String?)?.let { test.systemProperty("kepyur.shots", it) }
-                test.outputs.upToDateWhen { false }
+                // MenuScreenshotTest writes its PNGs here (gradle testDebugUnitTest -Pshots=/some/dir). Gradle does
+                // not know of them as an output, so with -Pshots the tests run even when nothing has changed.
+                (findProperty("shots") as String?)?.let {
+                    test.systemProperty("kepyur.shots", it)
+                    test.outputs.upToDateWhen { false }
+                }
                 // Robolectric's own downloader gets HTTP 429 from Maven Central's mirror here: let Gradle fetch the
                 // Android 15 framework jar and run Robolectric offline against it
                 test.inputs.files(robolectricSdk)
