@@ -3,73 +3,34 @@
 #include "video.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 
+#include "biquad.h"
+#include "deinterlace.h"
+#include "line_draw.h"
 #include "log.h"
+#include "picture_filters.h"
+#include "rings.h"
+#include "sparkle.h"
 
 namespace kp {
 
 const VideoStd kNtsc{63.5556, 9.4, 52.6, 240, 18, "NTSC"};
 const VideoStd kPal{64.0, 10.5, 52.0, 288, 22, "PAL"};
 
-namespace {
-
-inline float fast_atan2(float y, float x) {
-  const float ax = std::fabs(x), ay = std::fabs(y);
-  const float mx = std::max(ax, ay), mn = std::min(ax, ay);
-  const float a = mn / (mx + 1e-20f);
-  const float s = a * a;
-  float r = ((-0.0464964749f * s + 0.15931422f) * s - 0.327622764f) * s * a + a;
-  if (ay > ax) r = 1.57079637f - r;
-  if (x < 0) r = 3.14159274f - r;
-  if (y < 0) r = -r;
-  return r;
-}
-
-struct Biquad {  // RBJ low-pass
-  float b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0, z1 = 0, z2 = 0;
-  void design(double fc, double fs, double q = 0.7071) {
-    const double w = 2 * M_PI * fc / fs, c = std::cos(w), s = std::sin(w), al = s / (2 * q);
-    const double a0 = 1 + al;
-    b0 = static_cast<float>((1 - c) / 2 / a0);
-    b1 = static_cast<float>((1 - c) / a0);
-    b2 = b0;
-    a1 = static_cast<float>(-2 * c / a0);
-    a2 = static_cast<float>((1 - al) / a0);
-  }
-  void notch(double fc, double fs, double q) {
-    const double w = 2 * M_PI * fc / fs, c = std::cos(w), al = std::sin(w) / (2 * q);
-    const double a0 = 1 + al;
-    b0 = static_cast<float>(1 / a0);
-    b1 = static_cast<float>(-2 * c / a0);
-    b2 = b0;
-    a1 = b1;
-    a2 = static_cast<float>((1 - al) / a0);
-  }
-  inline float run(float x) {
-    const float y = b0 * x + z1;
-    z1 = b1 * x - a1 * y + z2;
-    z2 = b2 * x - a2 * y;
-    return y;
-  }
-};
-
-}  // namespace
-
-// ---- the decoder (streaming, one sample of discriminator output at a time, MHz) ----------------------
+// ---- the decoder: discriminator output (MHz) in, frames out ---------------------------------------------
+// It finds the sync pulses (levels, acquisition, a line PLL that freewheels and re-phases), which is all its own;
+// for the rest it runs the modules: the luma and colour paths behind the pulse tracking into the sample rings
+// (picture_filters.h, rings.h), and as each line ends, its burst, sparkle repair (sparkle.h), the line into a row
+// (line_draw.h) and, as each field ends, the frame (deinterlace.h).
 class Decoder {
 public:
-  Decoder(double fs, FrameSink sink, const DecoderOpts &o) : fs(fs), sink(std::move(sink)), o(o) {
-    luma_ring.assign(8192, 0);
-    chroma_ring.assign(8192, cf{});
-    ring_mask = 8191;
-    // chroma: mixed down by the subcarrier, 4th-order Butterworth low-pass at 1.2 MHz (U/V bandwidth)
-    for (Biquad *b : {&cl_r1, &cl_i1}) b->design(1.2e6, fs, 0.54);
-    for (Biquad *b : {&cl_r2, &cl_i2}) b->design(1.2e6, fs, 1.31);
-    lp_luma.design(3.0e6, fs, 0.54);
-    lp_luma2.design(3.0e6, fs, 1.31);
+  // picture: the switches, which whoever owns the decoder may change at any time (FrontEnd::set_picture)
+  Decoder(double fs, FrameSink sink, const DecoderOpts &o, const std::atomic<PictureOpts> &picture)
+      : fs(fs), sink(std::move(sink)), o(o), picture(picture), drawer(o.width, fs), filt(fs, o.colour), spark(fs) {
     lp_sync.design(1.0e6, fs);
     acq.resize(static_cast<size_t>(fs * 0.06));  // 60 ms
     hist.assign(800, 0);
@@ -94,61 +55,48 @@ public:
     s.rephases = rephases;
     s.colour = colour_on;
     s.burst_err = c_err;
+    s.clicks_repaired = spark.clicks_repaired;
+    s.lines_mended = spark.lines_mended;
     return s;
   }
 
-  inline void push(float d) {
-    // sync path: 5 MHz LP + 3-point median; luma path: 3 MHz LP (two sections)
-    const float s = lp_sync.run(d);
-    const float m = std::max(std::min(med_a, med_b), std::min(std::max(med_a, med_b), s));
-    med_b = med_a;
-    med_a = s;
-    luma_ring[n & ring_mask] = luma_notch.run(lp_luma2.run(lp_luma.run(d)));
-    if (o.colour) {
-      // the oscillator's phase belongs to the absolute sample index: burst and picture share it
-      const cf c = d * std::conj(lo);
-      lo *= lo_step;
-      if ((n & 4095) == 0) lo /= std::abs(lo);
-      chroma_ring[n & ring_mask] = cf(cl_r2.run(cl_r1.run(c.real())), cl_i2.run(cl_i1.run(c.imag())));
-    }
-    const uint64_t now = n++;
-    if (acquiring) {
-      if (acq_n < acq.size())
-        acq[acq_n++] = m;
-      else
-        acquire();
-      return;
-    }
-    if (gated_lines < 64) track_levels(m);  // until the sync-gated measurement has settled
-    const float w = sign * m;
-    // pulse tracking
-    if (!low && w < thr) {
-      low = true;
-      low_start = now;
-      longrun = false;
-    } else if (low) {
-      if (!longrun && now - low_start > 0.3 * T) {
-        longrun = true;
-        if (!line_has_longrun) {
-          line_has_longrun = true;
-          line_longrun_start = low_start;
+  // A block of discriminator output, MHz; bad: the front end's click marks for it (sparkle repair), or null.
+  // Each piece of up to kPiece samples goes through in two passes. First the sync path (a 1 MHz low-pass and a
+  // 3-point median), whose filter never changes, over the whole piece. Then the pulse tracking, a sample at a
+  // time (track), with the luma and colour paths following behind (filter_to): they are brought up to the
+  // sample in hand before anything that reads their rings or changes their switches (an hsync, a line that
+  // ends, acquisition), and at the end of the piece. So their filters run in tight loops with the state in
+  // registers (a sample at a time through everything, each filter's state goes through memory for every
+  // sample: a third of the decode thread on a Pixel 8 Pro), and every sample still gets the same arithmetic,
+  // in the same order, with the switches as they were when it came.
+  void push_block(const float *d, const uint8_t *bad, size_t cnt) {
+    float mb[kPiece];
+    while (cnt > 0) {
+      const size_t pn = std::min(cnt, kPiece);
+      piece_d = d;
+      piece_bad = bad;
+      piece_n0 = n;
+      {
+        Biquad ls = lp_sync;
+        float a = med_a, b = med_b;
+        for (size_t k = 0; k < pn; k++) {
+          const float s = ls.run(d[k]);
+          mb[k] = std::max(std::min(a, b), std::min(std::max(a, b), s));
+          b = a;
+          a = s;
         }
+        lp_sync = ls;
+        med_a = a;
+        med_b = b;
       }
-      if (w >= thr) {
-        low = false;
-        const double wid = (now - low_start) / fs * 1e6;
-        if (wid > 3.0 && wid < 6.5) on_hsync(static_cast<double>(low_start));
+      for (size_t k = 0; k < pn;) {
+        k += quiet_run(mb + k, pn - k);
+        if (k < pn) track(mb[k++]);
       }
-      line_low++;
-    }
-    // freewheel: line overdue by > 8 % with no edge
-    if (line_start >= 0 && now > line_start + T * 1.08) {
-      const double ls = line_start;
-      miss_run++;
-      count_line(false);
-      render_line(ls, false);
-      close_line(ls + T);
-      check_lost();
+      filter_to(n);
+      d += pn;
+      if (bad) bad += pn;
+      cnt -= pn;
     }
   }
 
@@ -156,54 +104,49 @@ private:
   double fs;
   FrameSink sink;
   DecoderOpts o;
+  const std::atomic<PictureOpts> &picture;
+  PictureOpts pic;  // ... as of the start of the line being received (refresh_switches)
   const VideoStd *std_ = &kNtsc;
   float sign = +1, tip = -1, blank = 0, thr = -0.5f;
-  uint64_t n = 0;
-  std::vector<float> luma_ring;
-  std::vector<cf> chroma_ring;  // chroma at baseband (U/V before the burst rotation)
-  // kepyur: NTSC chroma comb (DecoderOpts::comb). The subcarrier is 227.5 x the line rate, so at the same
-  // place one line away chroma comes back with the subcarrier's sign flipped while luma detail does not:
-  // combing cancels the luma near the subcarrier that the 1.2 MHz chroma filter lets through as rainbows.
-  // It works on the baseband chroma already in chroma_ring, inside render_line: each line is drawn one line
-  // late, once the line below is in, and combed with both neighbours (centred, so chroma stays on luma's
-  // line). Adaptive: per pixel a neighbour only counts as far as its luma there matches this line's, so the
-  // top and bottom edges of OSD glyphs fall back to the plain filter instead of keeping half the rainbow.
-  // Luma keeps the notch. PAL (2H subcarrier pattern) is unchanged.
-  struct CombLine {
-    double ls = -1;
-    int64_t k = -1;
-    int field = -1;
-    bool col = false;  // drawn in colour
-    bool ok = false;   // usable as a neighbour: locked, in colour, burst on the PLL's predicted phase
-    uint64_t epoch = 0;
-    double phase = 0;  // c_phase and c_mag after this line's burst: it is drawn after the next line's
-    float mag = 0;
-  };
-  static constexpr float kCombFull = 0.08f, kCombNone = 0.25f;  // luma mismatch, of black-to-white
+  uint64_t n = 0;  // samples taken (the pulse tracking's count)
+  // push_block: the piece in hand (piece_n0: n at its first sample)
+  static constexpr size_t kPiece = 512;
+  const float *piece_d = nullptr;
+  const uint8_t *piece_bad = nullptr;
+  uint64_t piece_n0 = 0;
+  // overdue_at: the line_start and T it was worked out for
+  bool od_valid = false;
+  double od_ls = 0, od_T = 0;
+  uint64_t od_at = UINT64_MAX;
+  SampleRings R;  // what the filters below have made of the samples so far (R.n <= n: filter_to)
+  LineDrawer drawer;
+  // NTSC chroma comb (PictureOpts::chroma_comb; LineDrawer::draw does the combing): each line is drawn one line late,
+  // once the line below is in, and combed with both neighbours (centred, so chroma stays on luma's line).
+  // Luma keeps the notch. PAL (its subcarrier pattern repeats over two lines) is not combed.
   static constexpr float kCombMaxErr = 0.35f;  // rad: a burst further off means the stream jumped
   bool comb = false;
-  double comb_w = 0;           // the mixing oscillator's frequency, rad per sample
   uint64_t comb_epoch = 0;     // bumped where the sample stream may have jumped: lines across it don't mix
-  CombLine comb_up, comb_mid;  // the two lines before the current one
+  LineInfo comb_up, comb_mid;  // the two lines before the current one
   float burst_e = 0;           // |phase error| of the last burst against the PLL's prediction
-  std::vector<float> comb_m;   // draw_line: the comb on every other pixel (see there)
-  std::vector<cf> comb_o;
-  size_t ring_mask;
-  // kepyur: colour. A free-running oscillator at the nominal subcarrier mixes chroma to baseband; a
-  // per-line PLL on the burst tracks the transmitter's subcarrier phase (and its small frequency error);
-  // PAL: the burst's +-45 degree swing gives the V switch, and adjacent lines are averaged (PAL-D).
-  Biquad luma_notch, cl_r1, cl_r2, cl_i1, cl_i2;
-  cf lo{1, 0}, lo_step{1, 0};
+  // kepyur: colour. A per-line PLL on the burst tracks the transmitter's subcarrier phase (and its small
+  // frequency error) against the filters' free-running oscillator. PAL: the burst's +-45 degree swing gives
+  // the V switch, and adjacent lines are averaged (PAL-D).
   double c_phase = 0, c_dphi = 0;  // burst reference phase (rad) and its drift per line
   int64_t c_last_line = -1;
   float c_mag = 0, c_err = 1;      // burst amplitude (MHz), mean |phase error| (rad)
   bool colour_on = false;
   int c_good = 0;
-  std::vector<cf> prev_uv;         // PAL-D: the previous line's U/V
   float med_a = 0, med_b = 0;
-  Biquad lp_luma, lp_luma2, lp_sync;
+  Biquad lp_sync;  // the sync path: a 1 MHz low-pass, then a 3-point median (med_a, med_b)
+  // The luma and colour paths, which follow behind the pulse tracking (filter_to). Their switches are set once
+  // per line (refresh_switches).
+  PictureFilters filt;
+  float inv_depth = 1;  // 1 / sync depth, as of the line's start
+  SparkleRepair spark;  // sparkle repair (PictureOpts::repair), on the click marks in R.bad
   bool low = false, longrun = false;
   uint64_t low_start = 0;
+  static constexpr double kHsMinUs = 3.0, kHsMaxUs = 6.5;  // an hsync: a pulse this long (4.7 us nominal)
+  double hs_len = 0;  // how long hsyncs have been lately, in samples (on_hsync)
   double T = 0, line_start = -1;
   uint64_t lines = 0, lines_locked = 0, line_idx = 0, acquisitions = 0, losses = 0;
   uint64_t line_low = 0;
@@ -214,6 +157,7 @@ private:
   size_t acq_n = 0;
   bool acquiring = true;
   std::vector<uint8_t> fieldA, fieldB, frame;
+  Deinterlacer deint;
   bool haveA = false, haveB = false;
   int cur_field = -1;
   int64_t field_line0 = 0;
@@ -237,23 +181,132 @@ private:
   uint8_t recent[kRecent] = {};
   int recent_pos = 0, recent_n = 0, recent_locked = 0;
 
+  // The pulse tracking for the next sample (m: its sync-path value). The luma and colour paths are behind it
+  // (see push_block): filter_to(n) brings them up to and including this sample before anything that uses them.
+  inline void track(float m) {
+    const uint64_t now = n++;
+    if (acquiring) {
+      if (acq_n < acq.size()) {
+        acq[acq_n++] = m;
+      } else {
+        filter_to(n);
+        acquire();
+      }
+      return;
+    }
+    if (gated_lines < 64) track_levels(m);  // until the sync-gated measurement has settled
+    const float w = sign * m;
+    if (!low && w < thr) {
+      low = true;
+      low_start = now;
+      longrun = false;
+    } else if (low) {
+      if (!longrun && now - low_start > 0.3 * T) {
+        longrun = true;
+        if (!line_has_longrun) {
+          line_has_longrun = true;
+          line_longrun_start = low_start;
+        }
+      }
+      if (w >= thr) {
+        low = false;
+        const double wid = (now - low_start) / fs * 1e6;
+        if (wid > kHsMinUs && wid < kHsMaxUs) {
+          filter_to(n);
+          on_hsync(static_cast<double>(low_start), static_cast<double>(now - low_start));
+        }
+      }
+      line_low++;
+    }
+    // freewheel: line overdue by > 8 % with no edge. A pulse that is low now and may yet be an hsync counts as
+    // an edge: what it is shows only when it ends, 4.7 us after it began, and the line is overdue 5.1 us after
+    // its hsync was due. Without the wait an hsync more than 0.4 us late was never taken, though the window is
+    // 5.1 us either side: the line freewheeled, the pulse came out as a stray one line off, and so did every
+    // hsync after it, until the run of strays re-phased the grid six lines on.
+    if (now > overdue_at() && !(low && (now - low_start) / fs * 1e6 < kHsMaxUs)) {
+      filter_to(n);
+      const double ls = line_start;
+      miss_run++;
+      count_line(false);
+      render_line(ls, false);
+      close_line(ls + T);
+      check_lost();
+    }
+  }
+
+  // How many of the next samples (sync-path values m[0..cnt)) track() would do nothing with: locked on (not
+  // acquiring, the levels settled), between pulses, still above the threshold, and the line not yet overdue.
+  // They are passed over here, n moved on past them; the first that would do something is left to track().
+  // ~90 % of the samples, looked at eight at a time (a vector compare), where track() takes each on its own.
+  size_t quiet_run(const float *m, size_t cnt) {
+    if (acquiring || gated_lines < 64 || low) return 0;
+    const uint64_t od = overdue_at();
+    if (od < n) return 0;  // the next sample is overdue
+    if (od - n < cnt) cnt = static_cast<size_t>(od - n) + 1;  // samples up to and including od are not
+    const float s = sign, t = thr;
+    size_t j = 0;
+    for (; j + 8 <= cnt; j += 8) {
+      bool hit = false;
+      for (int q = 0; q < 8; q++) hit |= s * m[j + q] < t;
+      if (hit) break;
+    }
+    while (j < cnt && !(s * m[j] < t)) j++;
+    n += j;
+    return j;
+  }
+
+  // The first sample past which the line is overdue (line_start + 8 % of T; none while there is no line), as
+  // an integer, worked out again only when line_start or T has changed: for a whole number now, now > x exactly
+  // when now > floor(x). Per sample in doubles it cost ~10 % of the decode thread on a phone.
+  uint64_t overdue_at() {
+    if (!od_valid || line_start != od_ls || T != od_T) {
+      od_valid = true;
+      od_ls = line_start;
+      od_T = T;
+      const double x = line_start + T * 1.08;
+      od_at = line_start < 0 || !(x < 1.8e19) ? UINT64_MAX : static_cast<uint64_t>(std::floor(x));
+    }
+    return od_at;
+  }
+
+  // The luma and colour paths (and the click marks' ring) up to sample `to`, not included (see push_block).
+  void filter_to(uint64_t to) {
+    if (R.n >= to) return;
+    const size_t k0 = static_cast<size_t>(R.n - piece_n0), cnt = static_cast<size_t>(to - R.n);
+    const uint8_t *bd = piece_bad ? piece_bad + k0 : nullptr;
+    filt.run(R, piece_d + k0, bd, cnt);
+  }
+
   void set_std(const VideoStd &s) {
     std_ = &s;
     T = s.T_us * 1e-6 * fs;
     fieldA.assign(static_cast<size_t>(o.width) * s.active * 4, 0);
     fieldB = fieldA;
     frame.assign(static_cast<size_t>(o.width) * s.active * 2 * 4, 0);
-    const double fsc = &s == &kPal ? 4.43361875e6 : 315e6 / 88;
-    const double a = 2 * M_PI * fsc / fs;
-    lo_step = cf(static_cast<float>(std::cos(a)), static_cast<float>(std::sin(a)));
-    luma_notch.notch(fsc, fs, 1.5);  // the subcarrier out of the picture (also the B/W herringbone)
-    comb = o.comb && &s != &kPal;
-    comb_w = a;
+    filt.set_std(s);
+    refresh_switches();
     comb_epoch++;
-    prev_uv.assign(o.width, cf{});
+    drawer.set_std(s, filt.comb_w());
     colour_on = false;
     c_good = 0;
     c_last_line = -1;
+  }
+
+  // The picture switches as they now stand, and the timing, for the line that begins. PAL's colour repeats over
+  // two lines, not one: it keeps the notch and is not combed.
+  void refresh_switches() {
+    pic = picture.load(std::memory_order_relaxed);
+    const bool ntsc = std_ != &kPal;
+    const bool luma_comb = pic.luma_comb && ntsc;
+    if (comb != (pic.chroma_comb && ntsc)) {
+      // The chroma comb comes on or goes off. Lines either side of the change do not mix, and the line the comb
+      // was holding back (it draws each a line late) is not drawn: its row keeps what the frame before had.
+      comb = !comb;
+      comb_epoch++;
+      comb_up = comb_mid = LineInfo{};
+    }
+    inv_depth = 1.f / std::max(blank - tip, 0.2f);
+    filt.set_line(luma_comb, luma_comb && pic.adaptive_comb, comb, T, inv_depth);
   }
 
   void count_line(bool locked) {
@@ -289,6 +342,7 @@ private:
     gated_lines = 0;
     miss_run = stray_run = 0;
     last_stray = -1;
+    hs_len = 0;
     comb_epoch++;
   }
 
@@ -445,9 +499,9 @@ private:
   bool burst(double ls, bool &pal_v) {
     const double us = 1e-6 * fs;
     const int64_t i0 = static_cast<int64_t>(ls + 6.0 * us), i1 = static_cast<int64_t>(ls + 7.8 * us);
-    if (i1 >= static_cast<int64_t>(n) || static_cast<int64_t>(n) - i0 > static_cast<int64_t>(ring_mask)) return false;
+    if (!R.has(i0, i1)) return false;
     cf b{};
-    for (int64_t i = i0; i < i1; i++) b += chroma_ring[i & ring_mask];
+    for (int64_t i = i0; i < i1; i++) b += R.chroma[i & R.mask];
     b /= static_cast<float>(i1 - i0);
     const float mag = std::abs(b);
     const int64_t li = static_cast<int64_t>(line_idx);
@@ -480,165 +534,128 @@ private:
     return colour_on;
   }
 
-  void render_line(double ls, bool locked_line) {
-    if (cur_field < 0) return;
-    const int64_t k = static_cast<int64_t>(line_idx) - field_line0 - std_->skip;
-    if (comb) {
-      comb_line(ls, k, locked_line);
-      return;
-    }
-    if (k < 0 || k >= std_->active) return;
-    if (locked_line) measure_levels(ls);
-    bool pal_v = false;
-    const bool col = o.colour && locked_line && burst(ls, pal_v);
-    draw_line(ls, k, col, pal_v, false, false, c_phase, c_mag);
+  bool in_picture(int64_t k) const { return k >= 0 && k < std_->active; }
+
+  // The line that has just ended (ls: its start; k: its row; locked: its hsync was found), ready to be drawn:
+  // levels measured on it, then its picture put right in the rings (the top line with the luma comb, sparkle
+  // repair), then its burst. In that order: each reads what the one before left.
+  LineInfo measure(double ls, int64_t k, bool locked) {
+    LineInfo l;
+    l.ls = ls;
+    l.k = k;
+    l.field = cur_field;
+    l.epoch = comb_epoch;
+    if (!in_picture(k)) return l;
+    if (locked) measure_levels(ls);
+    if (filt.luma_comb()) top_line(ls, k);
+    l.hit = pic.repair && patch_line(ls);
+    l.col = o.colour && locked && burst(ls, l.pal_v);
+    l.ok = l.col && burst_e < kCombMaxErr;
+    l.phase = c_phase;
+    l.mag = c_mag;
+    l.fade = filt.fade_noted();
+    return l;
   }
 
-  // NTSC comb: line k is measured now (levels, burst) and the previous one, k - 1, is drawn, combed with
-  // k - 2 and k. A neighbour is used only if both lines are locked and in colour, in the same field and on
-  // the same side of any jump in the stream (comb_epoch, and a burst on its predicted phase).
-  void comb_line(double ls, int64_t k, bool locked_line) {
-    CombLine cur;
-    cur.ls = ls;
-    cur.k = k;
-    cur.field = cur_field;
-    cur.epoch = comb_epoch;
-    if (k >= 0 && k < std_->active) {
-      if (locked_line) measure_levels(ls);
-      bool pal_v = false;
-      cur.col = o.colour && locked_line && burst(ls, pal_v);
-      cur.ok = cur.col && burst_e < kCombMaxErr;
-      cur.phase = c_phase;
-      cur.mag = c_mag;
+  // A line has ended: it is drawn, or with the 3-line comb the one before it is.
+  void render_line(double ls, bool locked) {
+    if (cur_field < 0) return;
+    const LineInfo cur = measure(ls, static_cast<int64_t>(line_idx) - field_line0 - std_->skip, locked);
+    if (comb) {
+      comb_line(cur);
+    } else if (in_picture(cur.k)) {
+      draw_line(cur, false, false);
+      if (pic.repair) mend_rows(cur.k, cur.hit);
     }
-    const CombLine &m = comb_mid;
-    if (m.field == cur_field && m.k == k - 1 && m.k >= 0 && m.k < std_->active) {
-      const auto pair = [&](const CombLine &x, int64_t dk) {
+  }
+
+  // NTSC comb: the line before cur, k - 1, is drawn, combed with k - 2 and k. A neighbour is used only if both
+  // lines are locked and in colour, in the same field and on the same side of any jump in the stream
+  // (comb_epoch, and a burst on its predicted phase).
+  void comb_line(const LineInfo &cur) {
+    const LineInfo &m = comb_mid;
+    if (m.field == cur_field && m.k == cur.k - 1 && in_picture(m.k)) {
+      const auto pair = [&](const LineInfo &x, int64_t dk) {
         return m.ok && x.ok && x.field == m.field && x.k == m.k + dk && x.epoch == m.epoch;
       };
-      draw_line(m.ls, m.k, m.col, false, pair(comb_up, -1), pair(cur, 1), m.phase, m.mag);
+      draw_line(m, pair(comb_up, -1), pair(cur, 1));
+      if (pic.repair) mend_rows(m.k, m.hit);
     }
     comb_up = comb_mid;
     comb_mid = cur;
   }
 
-  // up / dn: comb this line's chroma with the line above / below (see comb_line)
-  void draw_line(double ls, int64_t k, bool col, bool pal_v, bool up, bool dn, double phase, float mag) {
-    uint32_t *row = reinterpret_cast<uint32_t *>((cur_field == 0 ? fieldA : fieldB).data()) + static_cast<size_t>(k) * o.width;
-    const double a0 = std_->a0_us * 1e-6 * fs, aw = std_->aw_us * 1e-6 * fs;
-    const float white = blank + 2.5f * (blank - tip);
-    const float yscale = 1.f / (white - blank);
-    // chroma -> U/V in luma units: the burst is 20/92.5 (NTSC) or 0.15/0.7 (PAL) of black-to-white, and
-    // demodulated chroma comes out as -(U + jV)/2 against a burst of +1/2 (see fpv_sim.py's composite())
-    const float k_uv = 0.215f / std::max(mag, 1e-6f);
-    const cf rot = std::polar(1.f, static_cast<float>(-phase));
-    const double cdel = 0.21e-6 * fs;  // chroma filter delay minus luma filter delay
-    const bool pal = std_ == &kPal;
-    // the comb's neighbours sit one line period T (Ti whole samples and Tf more) away, turned onto this
-    // line's subcarrier phase: the oscillator runs on the absolute sample index, so what is mixed down one
-    // line away comes out turned by w*T
-    if (dn && ls + a0 + aw + cdel + T + 2 >= static_cast<double>(n)) dn = false;
-    if (up && static_cast<double>(n) - (ls + a0 - T) > static_cast<double>(ring_mask) - 8) up = false;
-    // The comb, on every other pixel (chroma is 1.2 MHz wide; per pixel cost twice as much for nothing
-    // visible) and interpolated in between below: chroma becomes c * (1 - comb_m) - comb_o.
-    const bool comb_on = col && (up || dn);
-    if (comb_on) {
-      const int64_t Ti = static_cast<int64_t>(T);
-      const float Tf = static_cast<float>(T - Ti);
-      const cf turn = std::polar(1.f, static_cast<float>(-comb_w * T));  // the line above; below: conj
-      const float wk = std::fabs(yscale) / (kCombNone - kCombFull), w1 = kCombNone / (kCombNone - kCombFull);
-      const int nc = (o.width + 1) / 2;
-      comb_m.resize(nc + 1);
-      comb_o.resize(nc + 1);
-      const double step = 2 * aw / o.width;
-      for (int h = 0; h < nc; h++) {
-        comb_m[h] = 0;
-        comb_o[h] = cf{};
-        const double p = ls + a0 + step * h, pc = p + cdel;
-        const int64_t i0 = static_cast<int64_t>(p + 0.5), j0 = static_cast<int64_t>(pc);
-        if (j0 + Ti + 3 >= static_cast<int64_t>(n) || static_cast<int64_t>(n) - (i0 - Ti) > static_cast<int64_t>(ring_mask) - 8) continue;
-        // a neighbour's weight: 1 while its luma here is within kCombFull of this line's, 0 past kCombNone
-        const float y0 = luma_ring[i0 & ring_mask];
-        const float wu = up ? std::clamp(w1 - std::fabs(luma_ring[(i0 - Ti) & ring_mask] - y0) * wk, 0.f, 1.f) : 0.f;
-        const float wd = dn ? std::clamp(w1 - std::fabs(luma_ring[(i0 + Ti) & ring_mask] - y0) * wk, 0.f, 1.f) : 0.f;
-        if (wu + wd <= 0) continue;
-        // A neighbour turned onto this line has chroma -c and the same luma detail, so c + the neighbours' mean
-        // is twice the detail: take out half of it per unit of the best weight (all of it at 1).
-        const float m = 0.5f * std::max(wu, wd), sc = m / (wu + wd);
-        const float fc = static_cast<float>(pc - j0);
-        // chroma_ring at j + t (0 <= t < 2), in plain floats: branch-free, and std::complex cost more here
-        float orr = 0, oi = 0;
-        const auto take = [&](int64_t j, float t, float rr, float ri) {
-          const int iw = static_cast<int>(t);
-          j += iw;
-          t -= static_cast<float>(iw);
-          const cf a = chroma_ring[j & ring_mask], b = chroma_ring[(j + 1) & ring_mask];
-          const float xr = a.real() + (b.real() - a.real()) * t, xi = a.imag() + (b.imag() - a.imag()) * t;
-          orr += xr * rr - xi * ri;
-          oi += xr * ri + xi * rr;
-        };
-        if (wu > 0) take(j0 - Ti - 1, fc + 1 - Tf, turn.real() * sc * wu, turn.imag() * sc * wu);
-        if (wd > 0) take(j0 + Ti, fc + Tf, turn.real() * sc * wd, -turn.imag() * sc * wd);
-        comb_m[h] = m;
-        comb_o[h] = cf(orr, oi);
-      }
-      comb_m[nc] = comb_m[nc - 1];
-      comb_o[nc] = comb_o[nc - 1];
-    }
-    for (int x = 0; x < o.width; x++) {
-      const double p = ls + a0 + aw * x / o.width;
-      const int64_t i0 = static_cast<int64_t>(p);
-      if (i0 + 8 >= static_cast<int64_t>(n) || static_cast<int64_t>(n) - i0 > static_cast<int64_t>(ring_mask) - 8) {
-        row[x] = 0xff000000u;
-        continue;
-      }
-      const float f = static_cast<float>(p - i0);
-      const float v0 = luma_ring[i0 & ring_mask], v1 = luma_ring[(i0 + 1) & ring_mask];
-      const float y = sign * (v0 + (v1 - v0) * f - sign * blank) * yscale;
-      float r = y, g = y, bl = y;
-      if (col) {
-        const double pc = p + cdel;
-        const int64_t j0 = static_cast<int64_t>(pc);
-        const float fc = static_cast<float>(pc - j0);
-        const cf c0 = chroma_ring[j0 & ring_mask], c1 = chroma_ring[(j0 + 1) & ring_mask];
-        cf c = c0 + (c1 - c0) * fc;
-        if (comb_on) {
-          const int h = x >> 1;
-          if (x & 1) c = c * (1 - 0.5f * (comb_m[h] + comb_m[h + 1])) - 0.5f * (comb_o[h] + comb_o[h + 1]);
-          else c = c * (1 - comb_m[h]) - comb_o[h];
-        }
-        c = c * rot * k_uv;
-        float u = -c.real(), v = -c.imag();
-        if (pal) {
-          if (pal_v) v = -v;
-          const cf cur(u, v);
-          const cf avg = 0.5f * (cur + prev_uv[x]);  // PAL-D: hue errors cancel between lines
-          prev_uv[x] = cur;
-          u = avg.real();
-          v = avg.imag();
-        }
-        r = y + 1.140f * v;
-        g = y - 0.395f * u - 0.581f * v;
-        bl = y + 2.032f * u;
-      }
-      const auto q = [](float z) { return static_cast<uint32_t>(std::clamp(z * 255.f, 0.f, 255.f)); };
-      row[x] = 0xff000000u | q(bl) << 16 | q(g) << 8 | q(r);  // bytes R, G, B, X
-    }
+  // The line into its row of the field being built (line_draw.h). up / dn: comb its chroma with the line above /
+  // below (comb_line).
+  void draw_line(const LineInfo &l, bool up, bool dn) {
+    uint32_t *row = reinterpret_cast<uint32_t *>((cur_field == 0 ? fieldA : fieldB).data()) + static_cast<size_t>(l.k) * o.width;
+    drawer.draw(row, R, l, up, dn, DrawParams{sign, tip, blank, T, filt.cdel()});
   }
 
-  float ring_mean(double from, double to) {
+  // The top of the picture with the luma comb. The first picture line of a field has blanking above it, not
+  // picture, and the luma comb works each line out against the line before. Against blanking it leaves half of
+  // the colour in the brightness as dots, and the adaptive comb, which sees a line that differs all the way
+  // along, fades the colour out as it does under any horizontal edge: the top rows of every frame would be grey.
+  // There is nothing above that line to keep rainbows off, so its picture is worked out again, the way the
+  // decoder does without the luma comb (PictureFilters::redo_without_comb). Only the picture's own stretch of
+  // that one line is replaced: levels, burst and every other line are as the comb left them.
+  // Which line that is depends on the camera and on where the field was found to start: the first drawn row
+  // (k = 0) or one of the next few, with blank rows above it. So it is looked for: the first of rows 0..kTopRows
+  // that has picture (it averages kTopPicture sync depths above blanking or more: the level from which the
+  // adaptive comb starts to see a difference) while every row above it, and the line before row 0, averages
+  // within kTopBlank sync depths of blanking. The second limit is the tighter one on purpose: black picture
+  // sits 7.5 IRE (0.19 sync depths) above blanking, and a row under black rows of picture is a line inside the
+  // picture, which keeps the comb's fade. (A camera that sends black at the blanking level cannot be told
+  // apart this way: under up to kTopRows black rows at the top of its picture, the first brighter row is taken
+  // for the top line and drawn as without the luma comb.) A field that begins with the standard's half line has
+  // it just above row 0 here: then row 0 has blanking above its left half only, and only that half is done (to
+  // the middle, where the half line's picture has begun and the comb is right again). A line further down that
+  // follows a dark line is not touched: there the fade is Play RX's trade.
+  static constexpr int kTopRows = 4;
+  static constexpr float kTopPicture = 0.25f, kTopBlank = 0.10f;
+  void top_line(double ls, int64_t k) {
+    if (k > kTopRows) return;
+    const double a0 = std_->a0_us * 1e-6 * fs, aw = std_->aw_us * 1e-6 * fs;
+    // no picture over the part [x0, x1) of the width of the line that starts at l?
+    const auto blanking = [&](double l, double x0, double x1, float limit = kTopBlank) {
+      float m;
+      return ring_mean(l + a0 + aw * x0, l + a0 + aw * x1, m) && (m - blank) * inv_depth < limit;
+    };
+    if (blanking(ls, 0, 1, kTopPicture)) return;
+    for (int64_t up = 2; up <= k + 1; up++)  // the rows above the line before, and the line before row 0
+      if (!blanking(ls - static_cast<double>(up) * T, 0, 1)) return;
+    const bool whole = blanking(ls - T, 0, 1);
+    if (!whole && (k > 0 || !blanking(ls - T, 0, 0.4))) return;
+    filt.redo_without_comb(R, ls + a0, aw, whole);
+  }
+
+  // Sparkle repair (sparkle.h): the picture of the line that starts at ls patched in the rings, before it is
+  // drawn; true when it is still badly hit, which mend_rows is told once the row (k) is drawn.
+  bool patch_line(double ls) {
+    const double a0 = std_->a0_us * 1e-6 * fs, aw = std_->aw_us * 1e-6 * fs;
+    return spark.patch_line(R, ls + a0, aw, T, filt.luma_comb(), filt.colour_fades());
+  }
+  void mend_rows(int64_t k, bool hit) {
+    spark.mend_rows((cur_field == 0 ? fieldA : fieldB).data(), o.width, fields_seen, cur_field, k, hit);
+  }
+
+  // The mean of R.luma over [from, to) into out; false when that stretch is not in the ring. (Not a NaN
+  // return: this file is built with -ffast-math, under which a test for NaN may be compiled away.)
+  bool ring_mean(double from, double to, float &out) {
     const int64_t i0 = static_cast<int64_t>(from), i1 = static_cast<int64_t>(to);
-    if (i1 >= static_cast<int64_t>(n) || static_cast<int64_t>(n) - i0 > static_cast<int64_t>(ring_mask)) return NAN;
+    if (!R.has(i0, i1)) return false;
     float s = 0;
-    for (int64_t i = i0; i < i1; i++) s += luma_ring[i & ring_mask];
-    return sign * s / static_cast<float>(i1 - i0);
+    for (int64_t i = i0; i < i1; i++) s += R.luma[i & R.mask];
+    out = sign * s / static_cast<float>(i1 - i0);
+    return true;
   }
 
   void measure_levels(double ls) {
     const double us = 1e-6 * fs;
-    const float t = ring_mean(ls + 1.2 * us, ls + 3.6 * us);  // hsync is 4.7 us
-    const float b = ring_mean(ls + 5.8 * us, ls + 8.8 * us);  // back porch (burst averages out)
-    if (std::isnan(t) || std::isnan(b) || b - t < 0.05f) return;
+    float t, b;
+    if (!ring_mean(ls + 1.2 * us, ls + 3.6 * us, t)) return;  // hsync is 4.7 us
+    if (!ring_mean(ls + 5.8 * us, ls + 8.8 * us, b)) return;  // back porch (burst averages out)
+    if (b - t < 0.05f) return;
     const float a = gated_lines < 64 ? 0.1f : 1.f / 64;
     tip += a * (t - tip);
     blank += a * (b - blank);
@@ -646,12 +663,17 @@ private:
     gated_lines++;
   }
 
+  // A frame to the sink: from one field with its lines interpolated (smooth lines), or from two (the same one
+  // twice: each line doubled).
+  void emit_field(const std::vector<uint8_t> &f, bool upper) {
+    deint.smooth(f.data(), upper, o.width, std_->active, frame.data());
+    emit_frame();
+  }
   void emit(const std::vector<uint8_t> &a, const std::vector<uint8_t> &b) {
-    const size_t rowb = static_cast<size_t>(o.width) * 4;
-    for (int r = 0; r < std_->active; r++) {
-      std::memcpy(frame.data() + (2 * r) * rowb, a.data() + r * rowb, rowb);
-      std::memcpy(frame.data() + (2 * r + 1) * rowb, b.data() + r * rowb, rowb);
-    }
+    weave(a.data(), b.data(), o.width, std_->active, frame.data());
+    emit_frame();
+  }
+  void emit_frame() {
     frames_out++;
     if (sink) sink(Frame{frame.data(), o.width, 2 * std_->active, std_});
   }
@@ -663,13 +685,15 @@ private:
       double ph = (static_cast<double>(line_longrun_start) - line_start) / T;
       ph -= std::floor(ph + 0.25);  // -> [-0.25, 0.75)
       const bool odd = std::fabs(ph) < 0.25;
+      // smooth lines: A is the lower field, B the upper one (B's line k is drawn above A's line k)
+      const bool smooth = pic.smooth_lines;
       if (cur_field == 0) {
         haveA = true;
-        if (o.fields) emit(fieldA, fieldA);
+        if (o.fields) smooth ? emit_field(fieldA, false) : emit(fieldA, fieldA);
       }
       if (cur_field == 1) {
         haveB = true;
-        if (o.fields) emit(fieldB, fieldB);
+        if (o.fields) smooth ? emit_field(fieldB, true) : emit(fieldB, fieldB);
       }
       if (!o.fields && haveA && haveB) {
         emit(fieldA, fieldB);
@@ -685,16 +709,32 @@ private:
     line_low = 0;
     line_has_longrun = false;
     line_start = next_start;
+    refresh_switches();
   }
 
-  void on_hsync(double edge) {
+  // An hsync-width pulse has ended: it began at edge and was len samples long.
+  void on_hsync(double edge, double len) {
     if (line_start < 0) {
       line_start = edge;
       return;
     }
     const double pred = line_start + T;
-    if (std::fabs(edge - pred) <= 0.08 * T) {
-      const double ns = 0.6 * edge + 0.4 * pred;
+    // Where the hsync began. A dip in the signal just ahead of the pulse (a click, the black edge of an OSD
+    // character at the end of the picture) runs into it, and the pulse seems to begin early; one inside it
+    // splits it, and the part that is left begins late. The pulse's end is then still right, and where the hsync
+    // began follows from that and from how long hsyncs are (hs_len); with a dip behind the pulse it is the other
+    // way round. So when the pulse is not as long as hsyncs are (by more than 0.1 us: they vary by a sample), of
+    // the two, its own beginning and its end less hs_len, the one nearer to where the hsync was due is taken.
+    // (Taken by its beginning alone, a pulse that began 0.85 us early moved the grid 0.5 us at once, 7 pixels,
+    // for the lines after it to pull back.)
+    const double by_end = edge + len - hs_len;
+    const bool odd = hs_len > 0 && std::fabs(len - hs_len) > 0.1e-6 * fs;
+    const double at = odd && std::fabs(by_end - pred) < std::fabs(edge - pred) ? by_end : edge;
+    if (std::fabs(at - pred) <= 0.08 * T) {
+      // hs_len follows the pulses a sixteenth of a sample at a time, whatever their length: one that something
+      // ran into does not move it
+      hs_len = hs_len > 0 ? hs_len + std::clamp(len - hs_len, -1.0, 1.0) * (1.0 / 16) : len;
+      const double ns = 0.6 * at + 0.4 * pred;
       T = 0.995 * T + 0.005 * (ns - line_start);
       miss_run = 0;
       stray_run = 0;
@@ -711,7 +751,14 @@ private:
     if (stray_run >= 6 && miss_run >= 4) {
       rephases++;
       comb_epoch++;
-      KP_LOGD("video: re-phased the line grid by %.1f us", (edge - line_start) / fs * 1e6);
+      // In the log every time, with how far the grid moved (the shorter way round), because that says why. A
+      // block of samples lost on the way here (the decode queue drops 4096 at a time, the stream a bank, which
+      // is as many) moves it by that many samples less whole lines: -14.1 us for each at 20 MS/s NTSC, -12.8 us
+      // PAL. A stream restart moves it by anything. A small move the late way (+) with nothing lost is hsyncs
+      // that came later than their line.
+      KP_LOGI("video: re-phased the line grid by %+.2f us at line %lld of the field, after %d lines without an hsync",
+              std::remainder(edge - line_start, T) / fs * 1e6,
+              cur_field < 0 ? -1LL : static_cast<long long>(line_idx) - static_cast<long long>(field_line0), miss_run);
       line_start = edge;
       line_low = 0;
       line_has_longrun = false;
@@ -725,8 +772,8 @@ private:
 // kepyur: block-wise and branch-free so the compiler vectorises it (the spike's per-sample loop used a whole
 // phone core at 40 MS/s). Per chunk of <= kTab samples: DC removal (block mean, smoothed), mix by a
 // precomputed rotation table, halfband /2 over a work array with 22 samples of history, discriminator.
-FrontEnd::FrontEnd(double fs_in, double shift_hz, FrameSink sink, const DecoderOpts &o)
-    : _fs_in(fs_in), _fs_out(fs_in >= 40e6 ? fs_in / 2 : fs_in), _decimate(fs_in >= 40e6) {
+FrontEnd::FrontEnd(double fs_in, double shift_hz, FrameSink sink, const DecoderOpts &o, const PictureOpts &p)
+    : _fs_in(fs_in), _fs_out(fs_in >= 40e6 ? fs_in / 2 : fs_in), _decimate(fs_in >= 40e6), _picture(p) {
   for (int i = 0; i < kHb; i++) {
     const int k = i - kHb / 2;
     const double w = 0.5 - 0.5 * std::cos(2 * M_PI * (i + 0.5) / kHb);
@@ -734,11 +781,15 @@ FrontEnd::FrontEnd(double fs_in, double shift_hz, FrameSink sink, const DecoderO
   }
   _wr.assign(kHb - 1 + kTab, 0.f);
   _wi.assign(kHb - 1 + kTab, 0.f);
-  _dec = new Decoder(_fs_out, std::move(sink), o);
+  _dec = new Decoder(_fs_out, std::move(sink), o, _picture);
+  _clicks = new ClickDetector(_fs_out);
   set_shift(shift_hz);
 }
 
-FrontEnd::~FrontEnd() { delete _dec; }
+FrontEnd::~FrontEnd() {
+  delete _clicks;
+  delete _dec;
+}
 
 void FrontEnd::set_shift(double s) {
   _shift = s;
@@ -757,7 +808,7 @@ void FrontEnd::set_shift(double s) {
 DecoderStats FrontEnd::stats() const { return _dec->stats(); }
 
 namespace {
-// branch-free atan2 (same polynomial as fast_atan2) so the discriminator loop vectorises
+// branch-free atan2 (a polynomial, max error ~1e-4 rad) so the discriminator loop vectorises
 inline float atan2_bf(float y, float x) {
   const float ax = std::fabs(x), ay = std::fabs(y);
   const float mx = ax > ay ? ax : ay, mn = ax > ay ? ay : ax;
@@ -770,8 +821,11 @@ inline float atan2_bf(float y, float x) {
 }
 }  // namespace
 
-void FrontEnd::demod(const cf *xs, size_t n, std::vector<float> &out) {
+void FrontEnd::demod(const cf *xs, size_t n, std::vector<float> &out, std::vector<uint8_t> &bad) {
   out.clear();
+  const bool rep = _picture.load(std::memory_order_relaxed).repair;
+  _clicks->begin(rep);
+  bad.clear();
   const float k = static_cast<float>(_fs_out / (2 * M_PI) / 1e6);  // rad/sample -> MHz
   constexpr int H = kHb - 1;
   while (n > 0) {
@@ -836,18 +890,20 @@ void FrontEnd::demod(const cf *xs, size_t n, std::vector<float> &out) {
       }
       _prev = cf(_yr[ny - 1], _yi[ny - 1]);
     }
+    if (rep) _clicks->envelope(_yr.data(), _yi.data(), ny);
     xs += m;
     n -= m;
   }
+  if (rep) _clicks->mark(out, bad);
 }
 
-void FrontEnd::decode(const float *d, size_t n) {
-  for (size_t i = 0; i < n; i++) _dec->push(d[i]);
+void FrontEnd::decode(const std::vector<float> &d, const std::vector<uint8_t> &bad) {
+  _dec->push_block(d.data(), bad.size() == d.size() ? bad.data() : nullptr, d.size());
 }
 
 void FrontEnd::feed(const cf *xs, size_t n) {
-  demod(xs, n, _dbuf);
-  decode(_dbuf.data(), _dbuf.size());
+  demod(xs, n, _dbuf, _badbuf);
+  decode(_dbuf, _badbuf);
 }
 
 }  // namespace kp

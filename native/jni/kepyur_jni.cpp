@@ -1,23 +1,29 @@
-// kepyur JNI: the Kotlin app's view of the radio (com.kepyur.app.Native).
-// Frames go straight to the video Surface on a render thread (latest frame wins, the DSP thread never waits).
-#include <android/native_window.h>
+// kepyur JNI: the Kotlin app's view of the radio and the screen (com.kepyur.app.Native).
 #include <android/native_window_jni.h>
 #include <jni.h>
+#include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
-#include <condition_variable>
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "log.h"
 #include "radio.h"
+#include "screen.h"
+#include "test_card.h"
 #include "usbmode.h"
+#include "video.h"
+#include "video_renderer.h"
 
 using namespace kp;
 
@@ -39,99 +45,113 @@ void file_sink(LogLevel l, const char *line) {
   std::fflush(g_log);
 }
 
-// ---- video output ----
-class Renderer {
-public:
-  Renderer() : _th([this] { loop(); }) {}
-  ~Renderer() {
-    {
-      std::lock_guard<std::mutex> l(_m);
-      _stop = true;
-    }
-    _cv.notify_all();
-    _th.join();
-    set_window(nullptr);
-  }
-  void set_window(ANativeWindow *w) {
-    std::lock_guard<std::mutex> l(_m);
-    if (_win) ANativeWindow_release(_win);
-    _win = w;
-    _geom_w = _geom_h = 0;
-  }
-  // DSP thread: copy and go
-  void post(const Frame &f) {
-    {
-      std::lock_guard<std::mutex> l(_m);
-      _w = f.width;
-      _h = f.height;
-      _pending.assign(f.data, f.data + static_cast<size_t>(f.width) * f.height * 4);
-      _have = true;
-    }
-    _cv.notify_one();
-  }
-
-private:
-  void loop() {
-    std::vector<uint8_t> px;  // RGBX
-    int w = 0, h = 0;
-    for (;;) {
-      ANativeWindow *win;
-      {
-        std::unique_lock<std::mutex> l(_m);
-        _cv.wait(l, [&] { return _have || _stop; });
-        if (_stop) return;
-        px.swap(_pending);
-        w = _w;
-        h = _h;
-        _have = false;
-        win = _win;
-        if (!win) continue;
-        if (_geom_w != w || _geom_h != h) {
-          ANativeWindow_setBuffersGeometry(win, w, h, WINDOW_FORMAT_RGBX_8888);
-          _geom_w = w;
-          _geom_h = h;
-        }
-        ANativeWindow_acquire(win);
-      }
-      ANativeWindow_Buffer buf;
-      if (ANativeWindow_lock(win, &buf, nullptr) == 0) {
-        const int rows = std::min(h, buf.height), cols = std::min(w, buf.width);
-        for (int y = 0; y < rows; y++)
-          std::memcpy(static_cast<uint32_t *>(buf.bits) + static_cast<size_t>(y) * buf.stride,
-                      px.data() + static_cast<size_t>(y) * w * 4, static_cast<size_t>(cols) * 4);
-        ANativeWindow_unlockAndPost(win);
-      }
-      ANativeWindow_release(win);
-    }
-  }
-  std::mutex _m;
-  std::condition_variable _cv;
-  ANativeWindow *_win = nullptr;
-  int _geom_w = 0, _geom_h = 0;
-  std::vector<uint8_t> _pending;
-  int _w = 0, _h = 0;
-  bool _have = false, _stop = false;
-  std::thread _th;
-};
-
-std::unique_ptr<Renderer> g_render;
+std::unique_ptr<Screen> g_screen;
 std::unique_ptr<Radio> g_radio;
-std::mutex g_api;  // serialises open/close against the other calls
+// Keeps an open and a close from overlapping. Only the worker that opens and closes takes it: the mode calls (scan,
+// watch, idle, streamTest) come from the main thread, which must never wait out a radio bring-up, and they need
+// no more than the radio's own lock (each only sets the mode, the radio ignores them while it is not open, and
+// an open or close sets the mode itself when it is done).
+std::mutex g_api;
+
+// ---- test picture ----
+// The screen side of the app without an adapter (the "testcard" extra): the test card as if it were decoded
+// video, 30 times a second, with its bar moving.
+std::mutex g_card_m;
+std::thread g_card;
+std::atomic<bool> g_card_on{false};
+
+void card_stop() {
+  std::lock_guard<std::mutex> l(g_card_m);
+  g_card_on = false;
+  if (g_card.joinable()) g_card.join();
+}
+
+void card_start() {
+  card_stop();
+  std::lock_guard<std::mutex> l(g_card_m);
+  g_card_on = true;
+  g_card = std::thread([] {
+    std::vector<uint8_t> px;
+    for (int tick = 1; g_card_on; tick++) {
+      test_card(px, 720, 480, tick);
+      if (g_screen) g_screen->post(Frame{px.data(), 720, 480, &kNtsc});
+      std::this_thread::sleep_for(std::chrono::milliseconds(33));
+    }
+  });
+}
+
+// ---- debug switches for wifi-sdr / devourer (the "env" extra: WSDR_URB_DEPTH and the like) ----
+// They read theirs from the environment, on the radio's threads, and setenv is not safe beside a getenv on another
+// thread. So the ones asked for wait here, and go into the environment in Native_open with the radio closed.
+std::mutex g_env_m;
+std::vector<std::pair<std::string, std::string>> g_env_wanted;  // name, value ("" removes it)
+
+void apply_env() {
+  std::lock_guard<std::mutex> l(g_env_m);
+  for (const auto &[k, v] : g_env_wanted) {
+    if (v.empty()) unsetenv(k.c_str());
+    else setenv(k.c_str(), v.c_str(), 1);
+  }
+  g_env_wanted.clear();
+}
+
+std::string jstring_of(JNIEnv *env, jstring s) {
+  const char *p = env->GetStringUTFChars(s, nullptr);
+  std::string out = p ? p : "";
+  if (p) env->ReleaseStringUTFChars(s, p);
+  return out;
+}
+
+// wifi-sdr reports what its stream does (a start that had to be repeated, a bank dropped, where the chip's CPU got
+// to) on stderr, which Android sends nowhere. Into the log with it, a line at a time.
+void forward_stderr() {
+  int p[2];
+  if (pipe(p) != 0) return;
+  if (dup2(p[1], STDERR_FILENO) < 0) {
+    close(p[0]);
+    close(p[1]);
+    return;
+  }
+  close(p[1]);
+  setvbuf(stderr, nullptr, _IOLBF, 0);
+  std::thread([fd = p[0]] {
+    std::string line;
+    char buf[512];
+    for (;;) {
+      const ssize_t n = read(fd, buf, sizeof buf);
+      if (n <= 0) return;
+      for (ssize_t i = 0; i < n; i++) {
+        if (buf[i] != '\n') {
+          line += buf[i];
+          continue;
+        }
+        if (!line.empty()) KP_LOGW("wsdr: %s", line.c_str());
+        line.clear();
+      }
+    }
+  }).detach();
+}
 }  // namespace
 
+// Native is a Kotlin object: these are its instance methods, and the second argument is that one instance
+// (unused), whatever its type is spelled as.
 extern "C" {
 
+// Every new activity calls this on its main thread, possibly while an earlier one's radio is still being opened
+// (seconds, or for ever if the adapter hangs): so not under g_api, and the screen and radio are made only once.
 JNIEXPORT void JNICALL Java_com_kepyur_app_Native_init(JNIEnv *env, jclass, jstring log_path) {
-  std::lock_guard<std::mutex> l(g_api);
-  const char *p = env->GetStringUTFChars(log_path, nullptr);
+  const std::string p = jstring_of(env, log_path);
   {
     std::lock_guard<std::mutex> lk(g_log_m);
-    if (!g_log) g_log = std::fopen(p, "a");
+    if (!g_log) g_log = std::fopen(p.c_str(), "a");
   }
-  env->ReleaseStringUTFChars(log_path, p);
   set_log_sink(file_sink);
-  if (!g_render) g_render = std::make_unique<Renderer>();
-  if (!g_radio) g_radio = std::make_unique<Radio>([](const Frame &f) { g_render->post(f); });
+  static std::once_flag made;
+  std::call_once(made, [] {
+    forward_stderr();
+    g_screen = std::make_unique<Screen>();
+    g_radio = std::make_unique<Radio>([](const Frame &f) { g_screen->post(f); });
+  });
   KP_LOGI("kepyur native ready");
 }
 
@@ -147,6 +167,8 @@ JNIEXPORT jstring JNICALL Java_com_kepyur_app_Native_usb3Switch(JNIEnv *env, jcl
 JNIEXPORT jstring JNICALL Java_com_kepyur_app_Native_open(JNIEnv *env, jclass, jint fd) {
   std::lock_guard<std::mutex> l(g_api);
   try {
+    g_radio->close();  // open() would; before the environment changes, so that none of its threads is reading it
+    apply_env();
     g_radio->open(fd);
     return env->NewStringUTF("");
   } catch (const std::exception &e) {
@@ -158,43 +180,90 @@ JNIEXPORT jstring JNICALL Java_com_kepyur_app_Native_open(JNIEnv *env, jclass, j
 JNIEXPORT void JNICALL Java_com_kepyur_app_Native_close(JNIEnv *, jclass) {
   std::lock_guard<std::mutex> l(g_api);
   if (g_radio) g_radio->close();
+  if (g_screen) g_screen->clear();
 }
 
 JNIEXPORT jboolean JNICALL Java_com_kepyur_app_Native_superspeed(JNIEnv *, jclass) {
   return g_radio && g_radio->superspeed();
 }
 
-JNIEXPORT void JNICALL Java_com_kepyur_app_Native_scan(JNIEnv *, jclass) {
-  std::lock_guard<std::mutex> l(g_api);
-  if (g_radio && g_radio->is_open()) g_radio->scan();
+JNIEXPORT void JNICALL Java_com_kepyur_app_Native_scan(JNIEnv *, jclass, jdouble prefer_hz) {
+  if (g_radio) g_radio->scan(prefer_hz);
+  if (g_screen) g_screen->clear();
 }
 
-JNIEXPORT void JNICALL Java_com_kepyur_app_Native_watch(JNIEnv *, jclass, jdouble hz) {
-  std::lock_guard<std::mutex> l(g_api);
-  if (g_radio && g_radio->is_open()) g_radio->watch(hz);
+// fresh: another channel (the old picture goes at once), not the same one again after a settings change
+JNIEXPORT void JNICALL Java_com_kepyur_app_Native_watch(JNIEnv *, jclass, jdouble hz, jboolean fresh) {
+  if (g_radio) g_radio->watch(hz);
+  if (fresh && g_screen) g_screen->clear();
+}
+
+JNIEXPORT void JNICALL Java_com_kepyur_app_Native_idle(JNIEnv *, jclass) {
+  if (g_radio) g_radio->idle();
 }
 
 JNIEXPORT void JNICALL Java_com_kepyur_app_Native_streamTest(JNIEnv *, jclass, jint rate_sel, jdouble seconds) {
-  std::lock_guard<std::mutex> l(g_api);
-  if (g_radio && g_radio->is_open()) g_radio->stream_test(rate_sel, seconds);
+  if (g_radio) g_radio->stream_test(rate_sel, seconds);
 }
 
-JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setWatchRate(JNIEnv *, jclass, jint rate_sel) {
-  if (g_radio) g_radio->set_watch_rate(rate_sel);
+// The setters that return a jboolean: true when the radio says a watch must be started again to have the change.
+JNIEXPORT jboolean JNICALL Java_com_kepyur_app_Native_setWatchRate(JNIEnv *, jclass, jint rate_sel) {
+  return g_radio && g_radio->set_watch_rate(rate_sel);
 }
 
-JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setGain(JNIEnv *, jclass, jdouble db) {
-  if (g_radio) g_radio->set_gain(db);
+JNIEXPORT jboolean JNICALL Java_com_kepyur_app_Native_setGain(JNIEnv *, jclass, jdouble db) {
+  return g_radio && g_radio->set_gain(db);
 }
 
-JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setComb(JNIEnv *, jclass, jboolean on) {
-  if (g_radio) g_radio->set_comb(on);
+JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setDiversity(JNIEnv *, jclass, jboolean on) {
+  if (g_radio) g_radio->set_combine(on);
+}
+
+JNIEXPORT jboolean JNICALL Java_com_kepyur_app_Native_setOffsetTuning(JNIEnv *, jclass, jboolean on) {
+  return g_radio && g_radio->set_offset_tuning(on);
+}
+
+JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setPicture(JNIEnv *, jclass, jboolean luma_comb, jboolean adaptive,
+                                                             jboolean smooth, jboolean repair, jboolean colour_comb) {
+  PictureOpts p;
+  p.luma_comb = luma_comb;
+  p.adaptive_comb = adaptive;
+  p.smooth_lines = smooth;
+  p.repair = repair;
+  p.chroma_comb = colour_comb;
+  if (g_radio) g_radio->set_picture(p);
+}
+
+JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setView(JNIEnv *, jclass, jfloat aspect, jint fit, jfloat scale,
+                                                          jboolean stereo, jfloat eye_shift) {
+  if (!g_screen) return;
+  ViewOpts v;
+  v.aspect = aspect > 0 ? aspect : 4.f / 3;
+  v.fit = fit == 1 ? Fit::Stretch : fit == 2 ? Fit::Crop : Fit::Fit;
+  v.scale = std::clamp(scale, 0.2f, 3.f);
+  v.stereo = stereo;
+  v.eye_shift = std::clamp(eye_shift, -0.25f, 0.25f);
+  g_screen->set_view(v);
+}
+
+JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setBackdrop(JNIEnv *, jclass, jboolean on, jboolean now) {
+  if (g_screen) g_screen->set_backdrop(on, now);
+}
+
+JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setCardLabel(JNIEnv *env, jclass, jstring label) {
+  if (g_screen) g_screen->set_card_label(jstring_of(env, label));
+}
+
+JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setPreview(JNIEnv *, jclass, jint left, jint top, jint right,
+                                                             jint bottom, jfloat radius) {
+  if (!g_screen) return;
+  const float w = static_cast<float>(std::max(0, right - left)), h = static_cast<float>(std::max(0, bottom - top));
+  g_screen->set_preview(Preview{Rect{static_cast<float>(left), static_cast<float>(top), w, h}, std::max(0.f, radius)});
 }
 
 JNIEXPORT void JNICALL Java_com_kepyur_app_Native_record(JNIEnv *env, jclass, jdouble seconds, jstring prefix) {
-  const char *p = env->GetStringUTFChars(prefix, nullptr);
+  const std::string p = jstring_of(env, prefix);
   if (g_radio) g_radio->record(seconds, p);
-  env->ReleaseStringUTFChars(prefix, p);
 }
 
 JNIEXPORT jstring JNICALL Java_com_kepyur_app_Native_status(JNIEnv *env, jclass) {
@@ -203,14 +272,49 @@ JNIEXPORT jstring JNICALL Java_com_kepyur_app_Native_status(JNIEnv *env, jclass)
 }
 
 JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setSurface(JNIEnv *env, jclass, jobject surface) {
-  if (!g_render) return;
-  g_render->set_window(surface ? ANativeWindow_fromSurface(env, surface) : nullptr);
+  if (!g_screen) return;
+  g_screen->set_window(surface ? ANativeWindow_fromSurface(env, surface) : nullptr);
+}
+
+JNIEXPORT void JNICALL Java_com_kepyur_app_Native_redraw(JNIEnv *, jclass) {
+  if (g_screen) g_screen->redraw();
+}
+
+JNIEXPORT void JNICALL Java_com_kepyur_app_Native_testCard(JNIEnv *, jclass, jboolean on) {
+  KP_LOGI("test picture %s", on ? "on" : "off");
+  if (on) {
+    card_start();
+  } else {
+    card_stop();
+    if (g_screen) g_screen->clear();
+  }
 }
 
 JNIEXPORT void JNICALL Java_com_kepyur_app_Native_log(JNIEnv *env, jclass, jstring msg) {
-  const char *p = env->GetStringUTFChars(msg, nullptr);
-  KP_LOGI("app: %s", p);
-  env->ReleaseStringUTFChars(msg, p);
+  KP_LOGI("app: %s", jstring_of(env, msg).c_str());
+}
+
+// Keep the picture on screen (dimmed once stale) for up to `ms`, through the close and reopen of a wedged adapter.
+JNIEXPORT void JNICALL Java_com_kepyur_app_Native_holdPicture(JNIEnv *, jclass, jint ms) {
+  if (g_screen) g_screen->hold(ms);
+}
+
+// Debug: a switch by name. The radio's own two are set at once ("0" turns one off; anything else, or nothing, on).
+// Any other is an environment variable for wifi-sdr / devourer, in place from the next open; an empty value
+// removes it.
+JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setDebugEnv(JNIEnv *env, jclass, jstring key, jstring value) {
+  const std::string k = jstring_of(env, key), v = jstring_of(env, value);
+  if (k.empty()) return;
+  const bool on = v.empty() || v[0] != '0';
+  if (k == "KP_CONCEAL") {
+    if (g_radio) g_radio->set_conceal(on);
+  } else if (k == "KP_FAST_CPUS") {
+    if (g_radio) g_radio->set_fast_cores(on);
+  } else {
+    std::lock_guard<std::mutex> l(g_env_m);
+    g_env_wanted.emplace_back(k, v);
+  }
+  KP_LOGI("debug: env %s=%s", k.c_str(), v.c_str());
 }
 
 }  // extern "C"

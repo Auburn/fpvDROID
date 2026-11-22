@@ -13,18 +13,24 @@ set(KP_EXC -fwasm-exceptions -pthread)
 add_compile_options(${KP_EXC} -msimd128)
 set(ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
+set(KEPYUR_ROOT ${ROOT})
+include(${ROOT}/native/cmake/patches.cmake)  # the same wifi-sdr + devourer patches as the app (patches/)
 add_subdirectory(${ROOT}/third_party/wifi-sdr wifi-sdr EXCLUDE_FROM_ALL)
 # the stream's bulk-IN reads queued from JavaScript (wifi-sdr bulkin_js.h; worker.js wsdrBulkStart/Stop): libusb's
 # proxied transfers missed the chip's deadline at 20 MS/s (90.8 % of banks, 11 restarts in 20 s; this: 100 %, 0)
 target_compile_definitions(wsdrcore PRIVATE WSDR_JS_BULKIN)
 
-add_library(kepyur_dsp STATIC ${ROOT}/native/dsp/video.cpp ${ROOT}/native/dsp/spectrum.cpp ${ROOT}/native/dsp/log.cpp)
+add_library(kepyur_dsp STATIC ${ROOT}/native/dsp/video.cpp ${ROOT}/native/dsp/deinterlace.cpp
+            ${ROOT}/native/dsp/line_draw.cpp ${ROOT}/native/dsp/picture_filters.cpp ${ROOT}/native/dsp/sparkle.cpp
+            ${ROOT}/native/dsp/spectrum.cpp ${ROOT}/native/dsp/log.cpp)
 target_include_directories(kepyur_dsp PUBLIC ${ROOT}/native/dsp)
 target_compile_options(kepyur_dsp PRIVATE -O3 -ffast-math)
 
 set(LIBUSB_PREFIX "" CACHE PATH "where web/libusb installed libusb-1.0.a")
 # usb_abort.cpp: WebUSB cannot cancel a transfer; a stopped stream's reads are aborted instead (--wrap)
-add_executable(kepyur kepyur_web.cpp usb_abort.cpp ${ROOT}/native/radio/radio.cpp)
+add_executable(kepyur kepyur_web.cpp usb_abort.cpp ${ROOT}/native/radio/radio.cpp ${ROOT}/native/radio/combine.cpp
+  ${ROOT}/native/radio/decode_queue.cpp ${ROOT}/native/radio/fallback_policy.cpp
+  ${ROOT}/native/radio/frame_gate.cpp ${ROOT}/native/radio/thread_placement.cpp)
 target_include_directories(kepyur PRIVATE ${ROOT}/native/radio)
 target_compile_options(kepyur PRIVATE -O2 -Wall)
 target_link_libraries(kepyur kepyur_dsp wsdrcore)

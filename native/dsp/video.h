@@ -6,6 +6,7 @@
 //
 // Single-threaded: feed() and every callback run on the caller's thread.
 #pragma once
+#include <atomic>
 #include <complex>
 #include <cstdint>
 #include <functional>
@@ -40,6 +41,8 @@ struct DecoderStats {
   uint64_t fields = 0, frames = 0;        // since construction
   uint64_t acquisitions = 0, losses = 0;  // successful acquisitions, lock losses
   uint64_t rephases = 0;                  // line grid moved onto a jumped signal without re-acquiring
+  uint64_t clicks_repaired = 0;           // sparkle repair: FM clicks patched over ...
+  uint64_t lines_mended = 0;              // ... and badly hit lines redrawn from the lines above and below
   double line_us = 0;                     // tracked line period
   float lock_recent = 0;                  // locked fraction over the last ~2 fields
   bool colour = false;                    // colour is being decoded (burst present and steady)
@@ -53,24 +56,58 @@ struct DecoderOpts {
   int std_force = 0;           // 0 auto, 1 NTSC, 2 PAL
   bool force_invert = false;   // only try sync at the high-frequency end
   bool colour = true;          // decode colour (falls back to grey when there is no usable burst)
-  bool comb = false;           // NTSC: adaptive 3-line comb for chroma (fewer rainbows on fine detail and
-                               // OSD text; ~+15 % decode CPU)
+};
+
+// The picture switches: one value, given to a FrontEnd when it is made and changed with set_picture(). A new set
+// takes effect within a line of video, without rebuilding the decoder, and none of the switches holds the
+// picture back (no added delay). All off by default. The first four are from Play RX
+// (github.com/scerstt/PlayRX, GPL-2.0), where they were tuned on RTL8812BU adapters.
+// One byte, so that a set is stored and read whole (std::atomic<PictureOpts>).
+struct PictureOpts {
+  // Luma comb (NTSC; PAL always uses the notch): how colour is kept out of the picture's brightness.
+  //  off: a 3 MHz 4th-order low-pass + a notch at the subcarrier (rings ~4 px after every edge)
+  //  on:  a gentle 4.8 MHz low-pass, colour cancelled with the line before (no ringing, sharper)
+  bool luma_comb : 1 = false;
+  // Adaptive comb (NTSC, with the luma comb on). The comb separates colour from brightness by comparing each
+  // line with the one before; where that line is clearly different (OSD text, horizons) it leaves a halo and
+  // false colour. There the brightness falls back to the notch filter and the colour is faded out. With the
+  // chroma comb the colour is only faded where that comb finds no matching line below either.
+  bool adaptive_comb : 1 = false;
+  // Sparkle repair. The white / black sparkles of a weak signal are FM "clicks": the carrier's envelope
+  // collapses for a moment and its phase slips a turn. The front end marks those instants (a longer dip of the
+  // envelope, as an echo makes at one brightness, is not one); the decoder, which draws each line about a line
+  // after it arrives, patches the picture over each mark (a straight line between the good points either side;
+  // sync is left alone) and redraws a badly hit line from the lines above and below it.
+  bool repair : 1 = false;
+  // Smooth lines (DecoderOpts::fields). A field is every other line of the picture; shown with each line twice
+  // it has stair-stepped edges, and the two fields sit half a line apart, so the picture shimmers up and down.
+  // On: each field's lines go in their own place and the lines between are interpolated along edges (edge-based
+  // line averaging), as each field ends.
+  bool smooth_lines : 1 = false;
+  // Chroma comb (NTSC): an adaptive 3-line comb for the colour: fewer rainbows on fine detail and OSD text, for
+  // ~15 % more decode CPU. Each line is then drawn one line late, combed with the lines above and below it.
+  bool chroma_comb : 1 = false;
 };
 
 class Decoder;
+class ClickDetector;
 
 // IQ (at fs_in) -> DC removal -> NCO -> [halfband /2 when fs_in >= 40e6] -> FM discriminator -> Decoder.
 class FrontEnd {
 public:
-  FrontEnd(double fs_in, double shift_hz, FrameSink sink, const DecoderOpts &o = {});
+  FrontEnd(double fs_in, double shift_hz, FrameSink sink, const DecoderOpts &o = {}, const PictureOpts &p = {});
   ~FrontEnd();
   void set_shift(double shift_hz);  // carrier offset from the stream centre (Hz) to bring to 0
   double shift() const { return _shift; }
+  // Any thread. demod() takes the new set at its next call, decode() at the next line of video.
+  void set_picture(const PictureOpts &p) { _picture.store(p, std::memory_order_relaxed); }
   void feed(const cf *x, size_t n);  // demod + decode
   // The two halves, for running them on two threads: demod() -> discriminator output (MHz at fs_demod),
   // decode() -> frames. Each half is single-threaded.
-  void demod(const cf *x, size_t n, std::vector<float> &out);
-  void decode(const float *d, size_t n);
+  // bad (sparkle repair): per output sample, 1 = the carrier collapsed there (a click). demod() leaves it empty
+  // while sparkle repair is off, and decode() takes an empty one as no marks.
+  void demod(const cf *x, size_t n, std::vector<float> &out, std::vector<uint8_t> &bad);
+  void decode(const std::vector<float> &d, const std::vector<uint8_t> &bad);
   DecoderStats stats() const;
   double fs_demod() const { return _fs_out; }
 
@@ -86,7 +123,10 @@ private:
   std::vector<float> _yr, _yi;     // decimated
   int _phase = 0;                  // start of the next halfband window in the next chunk (0 or 1)
   std::vector<float> _dbuf;
+  std::vector<uint8_t> _badbuf;
+  std::atomic<PictureOpts> _picture;  // set_picture(): read by demod() at each call, by the decoder at each line
   Decoder *_dec;
+  ClickDetector *_clicks;  // sparkle repair's half of demod() (sparkle.h)
 };
 
 }  // namespace kp
