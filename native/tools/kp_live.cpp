@@ -2,6 +2,7 @@
 //   kp_live --scan [--frames]               scan, then watch the strongest pilot
 //   kp_live --watch 5769 [--frames]         watch one frequency (MHz)
 //   kp_live --test 1 60                     stream test: rate_sel (1 = 40 MS/s, 2 = 20 MS/s), seconds
+//   kp_live --sweep 5635 5955               the spectrum page's sweep (MHz): the band picture every second
 //   options: --offset-tune (hardware centre beside the pilot), --diversity (antennas A + B combined; their numbers
 //   printed every second), --msps 20 (watch at 20 MS/s instead of 40), --repair (sparkle repair), --luma-comb,
 //   --adaptive (comb), --smooth (lines), --comb (the 3-line colour comb)
@@ -22,7 +23,7 @@ static std::atomic<bool> g_stop{false};
 
 int main(int argc, char **argv) {
   std::string mode = "scan";
-  double mhz = 5769, secs = 60;
+  double mhz = 5769, secs = 60, lo = 5635, hi = 5955;
   int rate = 1, watch_rate = 1;
   bool frames = false, offset = false, diversity = false;
   PictureOpts pic;
@@ -31,6 +32,7 @@ int main(int argc, char **argv) {
     if (k == "--scan") mode = "scan";
     else if (k == "--watch" && i + 1 < argc) { mode = "watch"; mhz = std::atof(argv[++i]); }
     else if (k == "--test" && i + 2 < argc) { mode = "test"; rate = std::atoi(argv[++i]); secs = std::atof(argv[++i]); }
+    else if (k == "--sweep" && i + 2 < argc) { mode = "sweep"; lo = std::atof(argv[++i]); hi = std::atof(argv[++i]); }
     else if (k == "--frames") frames = true;
     else if (k == "--offset-tune") offset = true;
     else if (k == "--diversity") diversity = true;
@@ -42,7 +44,7 @@ int main(int argc, char **argv) {
     else if (k == "--comb") pic.chroma_comb = true;
     else if (k == "-v") set_log_debug(true);
     else {
-      std::fprintf(stderr, "usage: kp_live [--scan | --watch MHZ | --test RATE_SEL SECONDS] [--frames] [-v]\n"
+      std::fprintf(stderr, "usage: kp_live [--scan | --watch MHZ | --test RATE_SEL SECONDS | --sweep LO HI] [--frames] [-v]\n"
                    "        [--offset-tune] [--diversity] [--msps 20|40] [--repair] [--luma-comb] [--adaptive]\n"
                    "        [--smooth] [--comb]\n");
       return 2;
@@ -72,12 +74,14 @@ int main(int argc, char **argv) {
   radio.set_watch_rate(watch_rate);
   if (mode == "scan") radio.scan();
   else if (mode == "watch") radio.watch(mhz * 1e6);
+  else if (mode == "sweep") radio.sweep(lo * 1e6, hi * 1e6);
   else radio.stream_test(rate, secs);
   const auto t0 = std::chrono::steady_clock::now();
   while (!g_stop) {
     std::this_thread::sleep_for(std::chrono::seconds(1));
     const std::string st = radio.status_json();
     std::fprintf(stderr, "%s\n", st.c_str());
+    if (mode == "sweep") std::fprintf(stderr, "spectrum: %s\n", radio.spectrum_json(lo * 1e6, hi * 1e6).c_str());
     if (diversity) {
       const auto c = radio.combine_status();
       std::fprintf(stderr, "antennas: %s snr A %.1f B %.1f combined %.1f dB, B share %.2f, A faded %.3f "

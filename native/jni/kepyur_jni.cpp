@@ -202,6 +202,18 @@ JNIEXPORT void JNICALL Java_com_kepyur_app_Native_idle(JNIEnv *, jclass) {
   if (g_radio) g_radio->idle();
 }
 
+// The Spectrum tab: no picture while it sweeps, so the preview shows the channel's card (as in a scan), not a
+// frame that looks live.
+JNIEXPORT void JNICALL Java_com_kepyur_app_Native_sweep(JNIEnv *, jclass, jdouble lo_hz, jdouble hi_hz) {
+  if (g_radio) g_radio->sweep(lo_hz, hi_hz);
+  if (g_screen) g_screen->clear();
+}
+
+JNIEXPORT jstring JNICALL Java_com_kepyur_app_Native_spectrum(JNIEnv *env, jclass, jdouble lo_hz, jdouble hi_hz) {
+  const std::string s = g_radio ? g_radio->spectrum_json(lo_hz, hi_hz) : std::string("{}");
+  return env->NewStringUTF(s.c_str());
+}
+
 JNIEXPORT void JNICALL Java_com_kepyur_app_Native_streamTest(JNIEnv *, jclass, jint rate_sel, jdouble seconds) {
   if (g_radio) g_radio->stream_test(rate_sel, seconds);
 }

@@ -2,6 +2,7 @@
 //   scan   - sweep the analog FPV bands at 40 MS/s, list pilots (humps that pass a sync check)
 //   watch  - tune to one pilot and decode its video (frames to the FrameSink)
 //   test   - stream at a given rate and only count banks (USB/controller soak, no DSP)
+//   sweep  - the spectrum page: step across a span over and over for its spectrum alone (no sync check, no picture)
 // The Receiver's sink only copies banks into a queue (wifi-sdr rule); everything else runs on the DSP thread.
 // Two-antenna combining, off-centre tuning and the sparkle repair plumbing come from Play RX
 // (github.com/scerstt/PlayRX, GPL-2.0), a Windows receiver built on kepyur.
@@ -22,6 +23,8 @@
 #include "fallback_policy.h"
 #include "frame_gate.h"
 #include "spectrum.h"
+#include "steps.h"
+#include "sweep.h"
 #include "video.h"
 
 namespace wsdr {
@@ -62,6 +65,9 @@ public:
   void scan(double prefer_hz = 0);
   void watch(double hz);
   void stream_test(int rate_sel, double seconds);
+  // Sweep lo..hi at 40 MS/s until the next mode call (sweep.h: a retune every 30 MHz), each step's spectrum into the
+  // band picture (spectrum_json). One pass over 300 MHz is 11 or 12 retunes. Scans add their steps to it too.
+  void sweep(double lo_hz, double hi_hz);
   void idle();
   // The three setters below only take effect at the next watch() (the next tune). Each returns true when it
   // changed something, so that a watch already running has to be started again (watch()) to have it.
@@ -103,9 +109,14 @@ public:
 
   std::string status_json();   // for the UI (polled)
   std::vector<Pilot> pilots();
+  // The band picture over lo..hi, for the spectrum page (polled while it is shown):
+  //   {"first_mhz", "bin_mhz", "db": [dB over the noise floor, null where nothing has been seen],
+  //    "carriers": [{"mhz", "width", "snr"}], "at_mhz": the step being taken now (0: not sweeping or scanning),
+  //    "at_width_mhz", "sweeps": passes finished since sweep() (0 while the first is under way)}
+  std::string spectrum_json(double lo_hz, double hi_hz);
 
 private:
-  enum class Mode { Idle, Scan, Watch, Test };
+  enum class Mode { Idle, Scan, Watch, Test, Sweep };
   struct Bank {
     std::vector<uint8_t> data;
     uint64_t seq;
@@ -120,6 +131,7 @@ private:
   void tune(double hz, int rate_sel, bool watching = false);
   void begin_watch();
   void begin_scan();
+  void begin_sweep();
   void begin_test();
   // a watched bank, step by step (handle_watch)
   void handle_watch(Bank &b);
@@ -134,9 +146,15 @@ private:
   void end_recording();
   void combine_antennas(const Bank &b, bool gap, int64_t t_ms);
   void demod_for_decoder(bool gap);
+  // the steps of a scan or a sweep (_steps), each a retune
+  void start_steps(std::vector<double> plan);
+  bool next_step();
+  bool capture_step(const Bank &b);
   void handle_scan(Bank &b);
+  void handle_sweep(Bank &b);
   void handle_test(Bank &b);
   void scan_step_done();
+  void add_spectrum(const std::vector<float> &db, double centre_hz);
   static void unpack(const Bank &b, Path path, std::vector<cf> &out);
   void note_faults(const wsdr::RxStatus &st);  // log each stream restart the receiver has made since the last call
 
@@ -164,6 +182,8 @@ private:
   uint64_t _rec_left = 0, _rec_samples = 0;
   double _rec_fs = 0, _rec_centre = 0, _rec_shift = 0;
   std::vector<Pilot> _pilots;
+  BandMap _band;  // what scans and sweeps have seen (Sweep::kBandLo..kBandHi)
+  Sweep _sweep;   // the span and the passes of the sweep asked for last
   bool _superspeed = false, _open = false;
   std::string _chip;
 
@@ -207,20 +227,12 @@ private:
   Combiner _combiner;
   int64_t _comb_t0_ms = 0;
   ComboStatus _comb_status;  // under _m
-  // scan
-  std::vector<double> _plan;
-  size_t _at = 0;  // the step the scan is on
-  // The scan's progress as status_json() shows it (_step: _at, _plan_n: _plan.size()). Atomic: read there while
-  // the DSP thread moves it on, and set back to the start by scan() for the status to show until that thread
-  // takes the new scan up.
+  // scan, and sweep
+  Steps _steps;  // the retunes of the scan or of the sweep's pass, and the capture of the one under way
+  // The scan's progress as status_json() shows it (steps done, of how many). Atomic: read there while the DSP
+  // thread moves it on, and set back to the start by scan() for the status to show until that thread takes the
+  // new scan up.
   std::atomic<size_t> _step{0}, _plan_n{0};
-  int _settle = 0;
-  uint64_t _cap_last_seq = 0;
-  uint32_t _cap_gen = 0;
-  int _cap_restarts = 0;  // of this step's capture, after a gap
-  std::vector<std::complex<int16_t>> _cap;
-  size_t _cap_need = 0;
-  double _cap_centre = 0;    // hardware centre of the capture (humps are measured from it)
   std::vector<Hump> _humps;  // this step's candidates (from the first kPsdSpan of the capture)
   double _resume_hz = 0;
   // test

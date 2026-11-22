@@ -22,13 +22,26 @@ locally built kepyur is installed, uninstall it first (`adb uninstall com.kepyur
 The picture fills the screen. The menu lies over a black screen, with the picture moved into a small preview
 at the foot of its left-hand column; the menu is open when the app starts. Tapping the preview closes the menu
 and leaves nothing on screen but the picture. A tap on the picture brings up a **MENU** button (bottom centre)
-for three seconds; Back does the same. Where there is no picture (no adapter, a scan, a channel with nothing on
+for three seconds; Back does the same. Where there is no picture (no adapter, a scan or sweep, a channel with nothing on
 it, a picture that has stopped), full size or in the preview, colour bars show the chosen channel (**R8**), or
 **NO SIGNAL** before one has been chosen.
 
 - **Channel** — the band (Raceband, Fatshark, Boscam A / B / E, Lowband) and its eight channels. **Scan** is
   optional: it sweeps every band, marks the channels with video on them and tunes the strongest (or the one
   you were on, if it is still there). The channel is remembered for the next start.
+- **Spectrum** — a spectrum analyser: the band swept over and over (5635–5955 MHz, or 5340–5640 for Lowband),
+  each channel of the chosen band marked under it, the ones with something on the air lit and listed (any
+  transmitter, analog or not, at least 2 MHz wide and 6 dB over the noise). A pass takes about two seconds
+  (11 or 12 retunes). The picture is paused while it sweeps: the sweep starts when the tab is opened (or
+  **Sweep** is pressed) and ends when a channel is picked on it, which tunes that channel, or when another tab
+  is opened or the menu closed, which goes back to the channel. Besides the analog bands it can mark the
+  channels of the digital systems flown beside them: **DJI** V1/V2 (the DJI FPV System's CH1–CH8; Walksnail
+  Avatar uses the same ones), O3 and O4 (CH1–CH3 at 20 or 10 MHz and the one 40/60 MHz channel, from DJI's
+  spec pages: the O4's CH2 and CH3 are not the O3's), and **HDZero** (R1–R8, E1, F1, F2, F4; its unlockable
+  L1–L8 are the Lowband channels). A signal is then named by that system's channel, and for DJI by its width
+  too, since DJI numbers its wide modes apart: 30 MHz or wider is V1/V2 at 50 Mbps (its CH1–CH3 are the 25 Mbps
+  CH2, CH4 and CH6, per Oscar Liang's chart; DJI publishes only the 25 Mbps table) or the O3's or O4's widest
+  channel. Only analog video can be watched, so picking a digital channel tunes nothing.
 - **View** — aspect ratio (4:3, or 16:9 for a widescreen camera), scaling (**Fit** the whole picture,
   **Stretch** it to the screen, or **Crop** it to fill the screen), size (50–150 %), and **Goggles**: the
   picture twice, side by side, for goggles that hold a phone, with an eye spacing slider to line the two
@@ -82,11 +95,14 @@ On screen: the OSD pill (channel, frequency, SNR, decode → screen latency) can
 ## Layout
 
 - `native/dsp/` — video decoder (`video.cpp`: FM discriminator, sync, fields; the luma and colour filters,
-  line drawing, sparkle repair and deinterlacing in files of their own), spectrum + pilot finding. No hardware.
-- `native/radio/` — the adapter (wifi-sdr `Receiver`) + a DSP thread: scan, watch, stream test; antenna
+  line drawing, sparkle repair and deinterlacing in files of their own), spectrum + pilot finding, the band picture the Spectrum tab draws
+  (`BandMap`). No hardware.
+- `native/radio/` — the adapter (wifi-sdr `Receiver`) + a DSP thread: scan, watch, sweep, stream test; antenna
   combining (`combine.cpp`); when 40 MS/s gives way to 20 (`fallback_policy.cpp`); torn frames kept off the
-  screen (`frame_gate.cpp`).
-- `native/tests/` — unit tests of the radio's rules, no hardware (`ctest`; `scripts/build-desktop.sh` runs them).
+  screen (`frame_gate.cpp`); the retunes of a scan or sweep and each one's capture (`steps.cpp`); the sweep's
+  passes and the band picture as the app reads it (`sweep.cpp`).
+- `native/tests/` — unit tests of the radio's rules, the decoder's sync and the Spectrum tab's band picture, no
+  hardware (`ctest`; `scripts/build-desktop.sh` runs them).
 - `native/render/` — the picture on screen (OpenGL ES 3): layout, side-by-side view, the menu's preview,
   the NO SIGNAL card.
 - `native/jni/` — the app's native side; a render thread draws each frame on the video Surface as it is decoded.
@@ -154,6 +170,7 @@ cores, where they fall behind).
 build/desktop/kp_gen rec/r4 --mhz 5769 --label R4 --cnr 12   # a synthetic transmitter: rec/r4.cs16 + .json
 build/desktop/kp_replay rec/r4.cs16 --luma-comb --adaptive --smooth --repair   # the picture switches (--comb: colour comb)
 KP_SIM_FILE=rec/r4.cs16 build/desktop/kp_sim --scan --offset-tune --diversity   # the radio's switches, no hardware
+KP_SIM_FILE=rec/r4.cs16 build/desktop/kp_sim --sweep 5635 5955   # the Spectrum tab's sweep: its band picture every second
 KP_SIM_FILE=rec/r4.cs16 KP_SIM_DROP_EVERY=700 build/desktop/kp_sim --watch 5769   # a link that loses every 700th block: falls back to 20 MS/s (after the 10 s grace)
 KP_SIM_FILE=rec/r4.cs16 KP_SIM_RESTART_EVERY_MS=1500 build/desktop/kp_sim --watch 5769   # a stream that restarts every 1.5 s: torn frames hidden, then 20 MS/s
 KP_SIM_FILE=rec/r4.cs16 build/desktop/kp_sim --watch 5769 --msps 20               # watch at 20 MS/s (kp_live takes --msps too)

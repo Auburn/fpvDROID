@@ -76,6 +76,11 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     private var scanOnReturn = false       // a scan is owed: the first one, or one the background cut short
     private var scanStartedAt = 0L         // when the last scan began (elapsedRealtime); 0: none this session
     private var statusBroken = false
+    /**
+     * The Spectrum tab wants the radio sweeping: from when it is opened (or Sweep is pressed) until a channel is
+     * picked, another tab is opened or the menu is closed. Opening the menu again does not start it by itself.
+     */
+    private var sweepOn = false
 
     // USB stream test
     private val testPlan = ArrayDeque<Pair<Int, Double>>()
@@ -156,9 +161,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         }
         // back from the background, where decoding was stopped
         if (link.state == UsbLink.State.RUNNING) {
-            if (!testRunning) {
-                if (scanOnReturn) onScan() else if (mode == Mode.IDLE) tune(fresh = true)
-            }
+            if (scanOnReturn || mode == Mode.IDLE) resume()
         } else {
             showMenuForTrouble()   // the adapter went, or the radio died, while nobody was looking
         }
@@ -262,10 +265,57 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         if (mode == Mode.WATCH) tune(fresh = false)
     }
 
+    private fun sweepWanted() = sweepOn && foreground
+
+    /** The Spectrum tab's sweep, over the span of the channels it shows. */
+    private fun startSweep() {
+        if (link.state != UsbLink.State.RUNNING || testRunning) return
+        val (lo, hi) = Plans.of(settings).span
+        engine.sweep(lo * 1e6, hi * 1e6)
+        mode = Mode.SWEEP
+    }
+
+    /**
+     * The radio does what this screen wants of it now: a scan that is owed, else the Spectrum tab's sweep, else the
+     * chosen channel; with none chosen, a scan to find one when [firstRun] (the radio has just come up), else nothing.
+     */
+    private fun resume(firstRun: Boolean = false) {
+        if (link.state != UsbLink.State.RUNNING || testRunning) return
+        when {
+            scanOnReturn -> onScan()
+            sweepWanted() -> startSweep()
+            settings.channelMhz > 0 -> tune(fresh = true)
+            firstRun -> onScan()
+            mode != Mode.IDLE -> { engine.idle(); mode = Mode.IDLE }
+        }
+    }
+
+    /**
+     * The radio sweeps while the Spectrum tab wants it to (a scan under way keeps the radio until it ends, and then
+     * hands over: [radioState]); a sweep it no longer wants gives way to the channel.
+     */
+    private fun syncSweep() {
+        when {
+            !sweepWanted() -> if (mode == Mode.SWEEP) resume()
+            mode != Mode.SCAN && mode != Mode.SWEEP -> startSweep()
+        }
+    }
+
     // ---------------------------------------------------------------------------------------- MenuView.Listener
     override fun onTune() {
+        sweepOn = false   // a channel picked on the Spectrum tab: the picture it was looking for
         showChannel()
         tune(fresh = true)
+    }
+
+    override fun onSweep(on: Boolean) {
+        sweepOn = on && menuOpen
+        syncSweep()
+        refresh()
+    }
+
+    override fun onSpectrumSpan() {
+        if (mode == Mode.SWEEP) startSweep()   // the sweep moves to the new span
     }
 
     override fun onScan() {
@@ -336,9 +386,9 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
                 mode = Mode.IDLE
                 scanOnReturn = settings.channelMhz <= 0
             }
-            scanOnReturn -> onScan()   // one was cut short before the adapter was let go
-            settings.channelMhz > 0 -> tune(fresh = true)
-            else -> onScan()   // first run: find something to show
+            // a scan cut short before the adapter was let go, the Spectrum tab waiting for the radio, the channel;
+            // on the first run, a scan to find something to show
+            else -> resume(firstRun = true)
         }
         refresh()
     }
@@ -363,7 +413,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
             engine.log("usbtest: all done: ${testResults.joinToString(" | ")}")
             engine.log("usbtest: now decoding for the rest of the session")
             applySignal()
-            if (settings.channelMhz > 0) tune(fresh = true) else onScan()
+            resume(firstRun = true)
             return
         }
         testRunning = true
@@ -382,8 +432,15 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
 
     private fun refresh() {
         if (!::menu.isInitialized) return
-        val st = if (link.state == UsbLink.State.RUNNING) radioState() else linkState()
-        if (menuOpen) menu.render(st)
+        val running = link.state == UsbLink.State.RUNNING
+        val st = if (running) radioState() else linkState()
+        if (menuOpen) menu.render(if (running && menu.tab == Tab.SPECTRUM) st.copy(spectrum = spectrum()) else st)
+    }
+
+    /** What the radio has seen of the span the Spectrum tab shows. */
+    private fun spectrum(): Spectrum? {
+        val (lo, hi) = Plans.of(settings).span
+        return Spectrum.parse(engine.spectrum(lo * 1e6, hi * 1e6))
     }
 
     private fun linkState(): MenuState = linkHeadline().let { st ->
@@ -429,10 +486,12 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         found = if (scanStartedAt == 0L) emptyList() else st.pilots
             .filter { it.mhz > 0 && it.ageS * 1000 <= sinceScan + 1500 }   // seen in this scan
             .map { Found(it.mhz, it.name, it.snrDb, it.std) }
-        // a scan has just ended: it left the radio on the channel it judged best, and the picker follows
+        // a scan has just ended: it left the radio on the channel it judged best, and the picker follows; a sweep
+        // the Spectrum tab was waiting for starts now
         if (before == Mode.SCAN && st.mode != Mode.SCAN) {
             noVideoFound = found.isEmpty()
             if (st.mode == Mode.WATCH) adoptChannel(watchHz / 1e6)
+            if (sweepWanted()) startSweep()
         }
         if (testRunning && st.mode == Mode.IDLE) {
             st.test?.let { if (it.done) { testResults.add(it.json); nextTest() } }
@@ -469,9 +528,10 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         }
         val base = MenuState(radioReady = !testRunning, scanning = mode == Mode.SCAN, scanStep = st.scanStep,
             scanSteps = st.scanSteps, found = found, scanFoundNothing = noVideoFound, stats = stats,
-            locked = mode == Mode.WATCH && locked)
+            locked = mode == Mode.WATCH && locked, sweeping = mode == Mode.SWEEP)
         return when (mode) {
             Mode.SCAN -> base.copy(tone = Tone.BUSY, headline = "Scanning", detail = "Looking for video on every channel.")
+            Mode.SWEEP -> base.copy(tone = Tone.BUSY, headline = "Spectrum", detail = "Picture paused while sweeping.")
             Mode.TEST -> base.copy(tone = Tone.BUSY, headline = "USB test", detail = st.test?.let {
                 "%.0f MS/s · %.0f s\n%d of %d blocks · %d gaps · %d restarts".format(it.rateMsps, it.seconds,
                     it.banks, it.expected, it.seqGaps, it.restarts)
@@ -502,8 +562,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         val ch = channelAt(mhz)
         val to = ch?.mhz ?: mhz.roundToInt()
         if (to == settings.channelMhz && (ch == null || ch.band == settings.band)) return
-        settings.channelMhz = to
-        if (ch != null) settings.band = ch.band
+        settings.choose(ch, mhz)
         menu.syncChannel()
         showChannel()
     }
@@ -603,6 +662,8 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         if (!menuOpen) return
         menuOpen = false
         menuAuto = false
+        sweepOn = false
+        syncSweep()   // a sweep under way gives way to the picture
         menu.endPeek()
         engine.setBackdrop(false, false)
         menu.animate().cancel()

@@ -3,6 +3,7 @@ package com.kepyur.app
 import android.content.Context
 import android.content.SharedPreferences
 import kotlin.math.abs
+import kotlin.math.roundToInt
 import kotlin.reflect.KProperty
 
 /** A standard analog 5.8 GHz channel. The table matches native/dsp/spectrum.cpp (fpv_channels). */
@@ -27,6 +28,9 @@ object Channels {
     )
 
     fun of(band: Char): List<Channel> = table.getValue(band).mapIndexed { i, mhz -> Channel(band, i + 1, mhz) }
+
+    /** Where [band] is in [bands] (the pickers' order). */
+    fun indexOf(band: Char) = bands.indexOfFirst { it.first == band }.coerceAtLeast(0)
 
     /** The channel a frequency belongs to: within [maxOff] MHz, the nearest; [preferBand] wins a tie (F8 and R7 share 5880). */
     fun nearest(mhz: Double, preferBand: Char? = null, maxOff: Double = 6.0): Channel? {
@@ -66,6 +70,15 @@ class Settings(private val prefs: SharedPreferences) {
     var offsetTune by pref("offset_tune", true)
     var gainAuto by pref("gain_auto", true)                  // the chip's own gain control
     var gainDb by pref("gain_db", 30f)                       // when it is not: 0..GAIN_MAX
+    // spectrum: whose channels it marks (Plans)
+    var spectrumSystem by pref("spectrum_marks", ChannelSystem.ANALOG)
+    var djiModel by pref("dji_model", 0)                     // Plans.djiModels
+
+    /** The channel picked is [ch]; on none, the frequency [mhz] itself (a transmitter off every channel). */
+    fun choose(ch: Channel?, mhz: Double) {
+        channelMhz = ch?.mhz ?: mhz.roundToInt()
+        if (ch != null) band = ch.band
+    }
 
     val aspect get() = if (wide) 16f / 9f else 4f / 3f
     /** Fraction of the screen width each eye's picture moves toward the middle. */
@@ -86,6 +99,9 @@ class Settings(private val prefs: SharedPreferences) {
     /** A letter, kept as a string. */
     private fun pref(key: String, default: Char) =
         Pref(prefs.getString(key, default.toString())!!.first()) { putString(key, it.toString()) }
+    /** One of an enum's values, kept by its name (a name it no longer has: the default). */
+    private inline fun <reified E : Enum<E>> pref(key: String, default: E) =
+        Pref(enumValues<E>().firstOrNull { it.name == prefs.getString(key, null) } ?: default) { putString(key, it.name) }
 
     companion object {
         const val FIT = 0

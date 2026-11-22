@@ -20,6 +20,10 @@ interface Engine {
     fun watch(hz: Double, fresh: Boolean)
     /** Stop decoding (the adapter stays open). */
     fun idle()
+    /** Sweep [loHz]..[hiHz] over and over for the spectrum page, until the next mode call. No picture meanwhile. */
+    fun sweep(loHz: Double, hiHz: Double)
+    /** What sweeps and scans have seen of [loHz]..[hiHz], as JSON (native/radio/radio.h, Radio::spectrum_json). */
+    fun spectrum(loHz: Double, hiHz: Double): String
     fun streamTest(rateSel: Int, seconds: Double)
     // A setter that returns a Boolean sets something a watch only takes when it starts: true when that changed,
     // so that a channel being watched has to be watched again ([watch], not fresh) to have it.
@@ -84,6 +88,8 @@ object Native : Engine {
     external override fun scan(preferHz: Double)
     external override fun watch(hz: Double, fresh: Boolean)
     external override fun idle()
+    external override fun sweep(loHz: Double, hiHz: Double)
+    external override fun spectrum(loHz: Double, hiHz: Double): String
     external override fun streamTest(rateSel: Int, seconds: Double)
     external override fun setWatchRate(rateSel: Int): Boolean
     external override fun setGain(db: Double): Boolean

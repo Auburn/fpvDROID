@@ -24,6 +24,11 @@ import kotlin.math.roundToInt
 
 enum class Tone { IDLE, BUSY, LIVE, WARN, ERROR }
 
+/** The menu's tabs, in the rail's order. */
+enum class Tab(val title: String) {
+    CHANNEL("Channel"), SPECTRUM("Spectrum"), VIEW("View"), PICTURE("Picture"), SIGNAL("Signal")
+}
+
 /** A signal a scan found. */
 data class Found(val mhz: Double, val name: String, val snrDb: Float, val std: String)
 
@@ -48,10 +53,14 @@ data class MenuState(
     val scanFoundNothing: Boolean = false,
     /** A line of numbers for the Signal tab (USB speed, sample rate, CPU, drops). */
     val stats: String = "",
+    /** The radio is sweeping for the Spectrum tab (the picture is paused meanwhile). */
+    val sweeping: Boolean = false,
+    /** What the Spectrum tab draws; null: nothing (it is not on screen, or there is no radio). */
+    val spectrum: Spectrum? = null,
 )
 
 /**
- * The menu: everything the app has to offer, over a black screen. A rail on the left (the four tabs, and at its
+ * The menu: everything the app has to offer, over a black screen. A rail on the left (the five tabs, and at its
  * foot the picture, small, with the status dot and headline over its top left: tapping it closes the menu), the
  * chosen tab's settings on the right, and a line of the status's words along the top, the whole width. It changes
  * [Settings] itself and tells the [Listener] which kind of thing changed; it knows nothing of the radio. The
@@ -74,6 +83,13 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
          * slider) so the picture can be seen changing, and the picture should be shown full size.
          */
         fun onPeek(on: Boolean)
+        /**
+         * The Spectrum tab wants the radio sweeping ([on]: the tab was opened, or Sweep pressed), or no longer
+         * does (another tab was opened). Picking a channel on it comes as [onTune], and ends the sweep too.
+         */
+        fun onSweep(on: Boolean) {}
+        /** The Spectrum tab now shows another span (another band or system: [Plans.of] says which). */
+        fun onSpectrumSpan() {}
         /** A finger has come down somewhere on the menu. */
         fun onTouched() {}
         fun onStatusAction()
@@ -86,7 +102,9 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     }
 
     private var state = MenuState()
-    private var tab = 0
+    /** The tab chosen (whether or not the menu is open). */
+    var tab = Tab.CHANNEL
+        private set
     private val group = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }   // status line, rail + card
     private lateinit var rail: View
     private lateinit var railContent: LinearLayout   // the rail above the preview: the tabs
@@ -124,7 +142,6 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     }
 
     // rail
-    private val tabNames = listOf("Channel", "View", "Picture", "Signal")
     private val tabViews = ArrayList<TextView>()
     private val pages = ArrayList<View>()
 
@@ -137,6 +154,8 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     private val scanText = label(ctx, "", 12.5f, Skin.TEXT_2)
     private val foundRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
     private var foundShown: List<Found>? = null
+
+    private lateinit var spectrumPage: SpectrumPage
 
     // view page
     private lateinit var fitRow: SettingRow
@@ -173,10 +192,13 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
             background = rounded(Skin.PANEL, dp(22f), Skin.STROKE, dpi(1f))
             clipToOutline = true
         }
-        pages += scrolling(buildChannelPage())
-        pages += scrolling(buildViewPage())
-        pages += scrolling(buildPicturePage())
-        pages += scrolling(buildSignalPage())
+        for (t in Tab.entries) pages += scrolling(when (t) {
+            Tab.CHANNEL -> buildChannelPage()
+            Tab.SPECTRUM -> page().also { spectrumPage = SpectrumPage(it, s, on, ::syncChannel) }
+            Tab.VIEW -> buildViewPage()
+            Tab.PICTURE -> buildPicturePage()
+            Tab.SIGNAL -> buildSignalPage()
+        })
         for (p in pages) card.addView(p, LayoutParams(-1, -1))
         // along the top, the whole width: a line of the status's words, in from either end as far as the tabs' and
         // the card's words are; under it the rail and the card
@@ -202,7 +224,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
             }
             insets
         }
-        showTab(0, animate = false)
+        showTab(Tab.CHANNEL, animate = false)
         syncChannel()
         render(state)
     }
@@ -258,12 +280,12 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         val whole = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
         val rail = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
         railContent = rail
-        for ((i, name) in tabNames.withIndex()) {
-            val t = label(context, name, 15f, Skin.TEXT_2).apply {
+        for ((i, which) in Tab.entries.withIndex()) {
+            val t = label(context, which.title, 15f, Skin.TEXT_2).apply {
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(dpi(14f), 0, dpi(14f), 0)
                 isClickable = true
-                setOnClickListener { showTab(i) }
+                setOnClickListener { showTab(which) }
             }
             tabViews += t
             rail.addView(t, LinearLayout.LayoutParams(-1, dpi(42f)).apply { topMargin = if (i == 0) 0 else dpi(2f) })
@@ -312,9 +334,12 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         if (previewBox.layoutParams.height != tile) previewBox.layoutParams.height = tile
     }
 
-    fun showTab(index: Int, animate: Boolean = true) {
+    fun showTab(to: Tab, animate: Boolean = true) {
         endPeek()
-        tab = index
+        val was = tab
+        tab = to
+        if ((was == Tab.SPECTRUM) != (to == Tab.SPECTRUM)) on.onSweep(to == Tab.SPECTRUM)
+        val index = to.ordinal
         for ((i, t) in tabViews.withIndex()) {
             val sel = i == index
             t.isSelected = sel
@@ -390,7 +415,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         rail.animate().alpha(to).setDuration(PEEK_MS).start()
         statusRow.animate().alpha(to).setDuration(PEEK_MS).start()
         // the page that is faded is the one the row is on, whatever tab is showing by the time it comes back
-        val body = (if (row != null) pageBodies[tab] else peekBody) ?: pageBodies[tab]
+        val body = (if (row != null) pageBodies[tab.ordinal] else peekBody) ?: pageBodies[tab.ordinal]
         peekBody = if (row != null) body else null
         for (i in 0 until body.childCount) {
             val c = body.getChildAt(i)
@@ -465,9 +490,9 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         return p
     }
 
-    private fun bandIndex() = Channels.bands.indexOfFirst { it.first == s.band }.coerceAtLeast(0)
+    private fun bandIndex() = Channels.indexOf(s.band)
 
-    /** The picker follows [Settings.band] / [Settings.channelMhz] (after a tap here, or when a scan chose a channel). */
+    /** The pickers follow [Settings.band] / [Settings.channelMhz] (after a tap here, or when a scan chose a channel). */
     fun syncChannel() {
         bandPicker.select(bandIndex())
         bandName.text = Channels.bands[bandIndex()].second
@@ -477,6 +502,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
             tile.chosen = list[i].mhz == s.channelMhz
             tile.bars = barsOn(list[i])
         }
+        spectrumPage.sync()
     }
 
     private fun barsOn(ch: Channel): Int {
@@ -689,8 +715,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
                 val ch = Channels.nearest(f.mhz, s.band, Channels.SAME_CHANNEL_MHZ)
                 val chip = FoundChip(context, ch?.name ?: "${f.mhz.roundToInt()}", barsFor(f.snrDb).coerceAtLeast(1))
                 chip.setOnClickListener {
-                    s.channelMhz = ch?.mhz ?: f.mhz.roundToInt()
-                    if (ch != null) s.band = ch.band
+                    s.choose(ch, f.mhz)
                     syncChannel()
                     on.onTune()
                 }
@@ -699,5 +724,6 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
             for ((i, tile) in tiles.withIndex()) tile.bars = barsOn(Channels.of(s.band)[i])
         }
         if (stats.text.toString() != st.stats) stats.text = st.stats
+        spectrumPage.render(st)
     }
 }

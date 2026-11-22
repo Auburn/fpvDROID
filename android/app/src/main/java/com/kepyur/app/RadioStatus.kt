@@ -11,7 +11,7 @@ import org.json.JSONObject
  */
 class RadioStatus private constructor(s: JSONObject) {
     /** What the radio is doing. */
-    enum class Mode { IDLE, SCAN, WATCH, TEST }
+    enum class Mode { IDLE, SCAN, WATCH, TEST, SWEEP }
 
     /** The decoder's view of the picture. */
     class Video(o: JSONObject) {
@@ -57,6 +57,7 @@ class RadioStatus private constructor(s: JSONObject) {
         "scan" -> Mode.SCAN
         "watch" -> Mode.WATCH
         "test" -> Mode.TEST
+        "sweep" -> Mode.SWEEP
         else -> null
     }
 

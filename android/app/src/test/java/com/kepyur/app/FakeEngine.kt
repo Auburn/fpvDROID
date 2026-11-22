@@ -16,7 +16,8 @@ import kotlin.math.abs
  * Mimics the real radio where the app depends on it: [watch] and [scan] take effect at once (the JNI calls set the
  * mode under the lock before returning) and only while open; [open] resets the bank counter and the dead flag and
  * leaves the mode idle; [close] marks it closed and idle; a scan ends (when the test says [finishScan]) on the
- * preferred channel if it was found, else on the strongest found, else on the preferred one, else idle.
+ * preferred channel if it was found, else on the strongest found, else on the preferred one, else idle. A [sweep]
+ * goes on until the next mode call; [spectrum] draws [carriers].
  *
  * Called from the main thread (status, settings, tuning) and from UsbLink's worker (usb3Switch, open, close): every
  * method is synchronized, except that a held [open] waits outside the lock.
@@ -97,8 +98,8 @@ class FakeEngine : Engine {
     fun calls(name: String) = calls.filter { it.name == name }
     fun count(name: String) = calls(name).size
     fun last(name: String) = calls(name).lastOrNull()
-    /** The calls that matter for the radio's state, without the status polls and log lines. */
-    fun radioCalls(): List<Call> = calls.filter { it.name !in setOf("status", "log") }
+    /** The calls that matter for the radio's state, without the status and spectrum polls and log lines. */
+    fun radioCalls(): List<Call> = calls.filter { it.name !in setOf("status", "log", "spectrum") }
     fun clearCalls() = synchronized(this) { log.clear() }
 
     /** The scan in progress ends: the radio watches what the real one would choose, or goes idle. */
@@ -186,6 +187,48 @@ class FakeEngine : Engine {
     @Synchronized override fun idle() {
         rec("idle")
         if (isOpen) mode = "idle"
+    }
+
+    // ------------------------------------------------------------------------------------- the spectrum page
+    /** What the band picture shows on the air (dB over the floor at their peak), for [spectrum]. */
+    val carriers = ArrayList<Carrier>()
+    /** Passes the sweep has finished ("sweeps" in the spectrum). */
+    var sweeps = 0
+
+    @Synchronized override fun sweep(loHz: Double, hiHz: Double) {
+        rec("sweep", loHz, hiHz)
+        if (!isOpen) return
+        sweeps = 0
+        mode = "sweep"
+    }
+
+    /**
+     * As Radio::spectrum_json: half-MHz bins over the span, the floor at 0 dB and each of [carriers] a hump as wide
+     * as it says; "at_mhz" the middle of the span while sweeping. Nothing seen (every bin null) until open.
+     */
+    @Synchronized override fun spectrum(loHz: Double, hiHz: Double): String {
+        rec("spectrum", loHz, hiHz)
+        val lo = loHz / 1e6
+        val n = ((hiHz - loHz) / 0.5e6).toInt() + 1
+        return JSONObject().apply {
+            put("first_mhz", lo); put("bin_mhz", 0.5); put("at_mhz", if (mode == "sweep") (loHz + hiHz) / 2e6 else 0.0)
+            put("at_width_mhz", 33.0); put("sweeps", if (mode == "sweep") sweeps else 0)
+            put("db", JSONArray().apply {
+                for (i in 0 until n) {
+                    if (!isOpen) { put(JSONObject.NULL); continue }
+                    val f = lo + i * 0.5
+                    var v = 0.0
+                    for (c in carriers) {
+                        val off = abs(f - c.mhz) / (c.widthMhz / 2)
+                        if (off < 1.4) v = maxOf(v, c.snrDb * (1 - off * off / 2))
+                    }
+                    put(v)
+                }
+            })
+            put("carriers", JSONArray().apply {
+                if (isOpen) for (c in carriers) put(JSONObject().put("mhz", c.mhz).put("width", c.widthMhz).put("snr", c.snrDb.toDouble()))
+            })
+        }.toString()
     }
 
     @Synchronized override fun streamTest(rateSel: Int, seconds: Double) {

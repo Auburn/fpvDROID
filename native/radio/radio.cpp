@@ -27,8 +27,6 @@ constexpr double kEdge = 16.5e6;     // usable +- span at 40 MS/s (BW40 DFIR is 
 constexpr double kStep = 20e6;       // a hump up to ~13 MHz wide is fully inside some step's span
 constexpr double kCapture = 0.09;    // s of IQ per scan step (60 ms acquisition + ~300 lines)
 constexpr double kPsdSpan = 0.012;   // s of it for the spectrum
-constexpr int kSettleBanks = 40;     // ~8 ms after a retune (chip AGC)
-constexpr int kCapRestarts = 8;      // times a scan step's capture starts over after a gap; then gaps stay in
 constexpr int64_t kSnrEveryMs = 500;  // live SNR while watching (~2 % of a core at 20 MS/s)
 constexpr double kSnrSpan = 8e6;      // +- span the BW20 RX filter passes flat (-3 dB at ~9.2 MHz)
 // Off-centre tuning at 40 MS/s: how far beside the pilot the hardware centre goes (Radio::offset_centre). The
@@ -42,9 +40,16 @@ std::vector<double> scan_plan() {
   for (double c = 5370e6; c <= 5630e6; c += kStep) p.push_back(c);
   return p;
 }
+
+// A step's samples as a spectrum (Psd::db(): fftshifted, kFs wide, dB).
+std::vector<float> spectrum_db(const std::vector<cf> &x) {
+  Psd psd(1024);
+  psd.add(x.data(), x.size());
+  return psd.db();
+}
 }  // namespace
 
-Radio::Radio(FrameSink frames) : _gate(std::move(frames)) {}
+Radio::Radio(FrameSink frames) : _band(Sweep::kBandLo, Sweep::kBandHi, Sweep::kBandBin), _gate(std::move(frames)) {}
 
 Radio::~Radio() { close(); }
 
@@ -256,6 +261,14 @@ void Radio::stream_test(int rate_sel, double seconds) {
   _test_end_ms = static_cast<int64_t>(seconds * 1000);
 }
 
+void Radio::sweep(double lo_hz, double hi_hz) {
+  std::lock_guard<std::mutex> l(_m);
+  if (!_open) return;
+  _sweep.start(lo_hz, hi_hz);
+  _mode = Mode::Sweep;
+  _mode_epoch++;
+}
+
 void Radio::idle() {
   std::lock_guard<std::mutex> l(_m);
   if (!_open) return;
@@ -378,6 +391,7 @@ void Radio::dsp_loop() {
       switch (mode) {
       case Mode::Watch: begin_watch(); break;
       case Mode::Scan: begin_scan(); break;
+      case Mode::Sweep: begin_sweep(); break;
       case Mode::Test: begin_test(); break;
       case Mode::Idle: break;
       }
@@ -385,6 +399,7 @@ void Radio::dsp_loop() {
     switch (mode) {
     case Mode::Watch: handle_watch(b); break;
     case Mode::Scan: handle_scan(b); break;
+    case Mode::Sweep: handle_sweep(b); break;
     case Mode::Test: handle_test(b); break;
     case Mode::Idle: break;
     }
@@ -414,7 +429,7 @@ void Radio::dsp_loop() {
   }
 }
 
-// The three ways into a mode, on the DSP thread, with the first bank after the mode call.
+// The four ways into a mode, on the DSP thread, with the first bank after the mode call.
 
 void Radio::begin_watch() {
   double hz;
@@ -435,14 +450,25 @@ void Radio::begin_watch() {
 }
 
 void Radio::begin_scan() {
-  _plan = scan_plan();
-  _plan_n = _plan.size();
-  _at = 0;
+  auto plan = scan_plan();
+  _plan_n = plan.size();
   _step = 0;
-  _cap.clear();
-  _settle = -1;
-  KP_LOGI("radio: scan, %zu steps", _plan.size());
-  tune(_plan[0], 1);
+  KP_LOGI("radio: scan, %zu steps", plan.size());
+  start_steps(std::move(plan));
+}
+
+void Radio::begin_sweep() {
+  double lo, hi;
+  std::vector<double> plan;
+  {
+    std::lock_guard<std::mutex> l(_m);
+    lo = _sweep.lo();
+    hi = _sweep.hi();
+    plan = _sweep.pass();
+    _band.forget(lo, hi, now_ms() - Sweep::kStaleMs);
+  }
+  KP_LOGI("radio: sweep %.0f..%.0f MHz, %zu steps a pass", lo / 1e6, hi / 1e6, plan.size());
+  start_steps(std::move(plan));
 }
 
 void Radio::begin_test() {
@@ -702,64 +728,66 @@ void Radio::decode_loop() {
   }
 }
 
+// The steps of a scan or of a sweep's pass, from the first, each capture first just enough for the spectrum.
+void Radio::start_steps(std::vector<double> plan) {
+  _steps.start(std::move(plan), static_cast<size_t>(kPsdSpan * kFs));
+  tune(_steps.hz(), 1);
+}
+
+// The step after this one, retuned to now (the chip settles while this one is analysed). False: the plan is done.
+bool Radio::next_step() {
+  if (!_steps.next()) return false;
+  tune(_steps.hz(), 1);
+  return true;
+}
+
+// A bank for the step under way: only those of its own retune, at 40 MS/s. True once its capture is whole.
+bool Radio::capture_step(const Bank &b) {
+  if (std::fabs(b.centre_hz + b.shift_hz - _steps.hz()) > 1e3 || b.fs != kFs) return false;
+  unpack(b, kPathA, _iq);
+  return _steps.take(_iq, b.seq, b.gen, b.centre_hz);
+}
+
 void Radio::handle_scan(Bank &b) {
-  if (_at >= _plan.size()) return;
-  const double req = _plan[_at];
-  if (std::fabs(b.centre_hz + b.shift_hz - req) > 1e3 || b.fs != kFs) return;
-  if (_settle < 0) {
-    _settle = kSettleBanks;
-    _cap_restarts = 0;
-    _cap.clear();
-    _cap_need = static_cast<size_t>(kPsdSpan * kFs);  // first just enough for the spectrum
-    _humps.clear();
-  }
-  if (_settle > 0) {
-    _settle--;
-    _cap_last_seq = b.seq;
-    _cap_gen = b.gen;
-    return;
-  }
-  // A gap (banks dropped on the way, or the stream restarted): start the capture over. Not for ever: on a link
-  // that loses a bank every few ms no capture would ever be whole and the scan would stay on this step, so after
-  // kCapRestarts tries it is taken with its gaps (the sync check loses a few lines at each).
-  const bool gap = b.seq != _cap_last_seq + 1 || b.gen != _cap_gen;
-  if (!_cap.empty() && gap && _cap_restarts++ < kCapRestarts) _cap.clear();
-  _cap_last_seq = b.seq;
-  _cap_gen = b.gen;
-  _cap_centre = b.centre_hz;
-  const size_t ns = b.data.size() / 8;
-  const uint8_t *p = b.data.data();
-  for (size_t i = 0; i < ns && _cap.size() < _cap_need; i++) {
-    uint64_t w;
-    std::memcpy(&w, p + 8 * i, 8);
-    _cap.emplace_back(static_cast<int16_t>(wsdr::la_i(w)), static_cast<int16_t>(wsdr::la_q(w)));
-  }
-  if (_cap.size() < _cap_need) return;
-  if (_cap_need < static_cast<size_t>(kCapture * kFs)) {
+  if (_steps.done() || !capture_step(b)) return;
+  if (_steps.need() < static_cast<size_t>(kCapture * kFs)) {
     // spectrum first: a step with no candidate is done now; otherwise keep capturing for the sync check
-    std::vector<cf> x(_cap.size());
-    for (size_t i = 0; i < _cap.size(); i++) x[i] = cf(_cap[i].real(), _cap[i].imag());
-    Psd psd(1024);
-    psd.add(x.data(), x.size());
-    _humps = find_humps(psd.db(), kFs, kEdge);
+    const std::vector<float> db = spectrum_db(_steps.iq());
+    add_spectrum(db, _steps.centre_hz());
+    _humps = find_humps(db, kFs, kEdge);
     if (!_humps.empty()) {
-      _cap_need = static_cast<size_t>(kCapture * kFs);
+      _steps.want(static_cast<size_t>(kCapture * kFs));
       return;
     }
   }
   scan_step_done();
 }
 
-void Radio::scan_step_done() {
-  const double centre = _cap_centre;  // the samples are centred on the hardware centre, not the request
-  // start the next retune now; the chip settles while this step is analysed
-  _at++;
-  if (_at < _plan.size()) {
-    tune(_plan[_at], 1);
-    _settle = -1;
+void Radio::handle_sweep(Bank &b) {
+  if (!capture_step(b)) return;
+  if (!next_step()) {
+    // a pass done: the next one, on the other grid. Unless a mode call came meanwhile: the next bank takes it up,
+    // and a new sweep starts from its own first pass.
+    std::vector<double> plan;
+    {
+      std::lock_guard<std::mutex> l(_m);
+      if (_mode_epoch == _epoch_seen) _sweep.pass_done();
+      plan = _sweep.pass();
+    }
+    start_steps(std::move(plan));
   }
-  std::vector<cf> x(_humps.empty() ? 0 : _cap.size());
-  for (size_t i = 0; i < x.size(); i++) x[i] = cf(_cap[i].real(), _cap[i].imag());
+  add_spectrum(spectrum_db(_steps.iq()), _steps.centre_hz());  // the step just taken, while the chip retunes
+}
+
+void Radio::add_spectrum(const std::vector<float> &db, double centre_hz) {
+  std::lock_guard<std::mutex> l(_m);
+  _band.add(db, kFs, centre_hz, kEdge, now_ms());
+}
+
+void Radio::scan_step_done() {
+  const double centre = _steps.centre_hz();  // the samples are centred on the hardware centre, not the request
+  next_step();
+  const std::vector<cf> x = _humps.empty() ? std::vector<cf>() : _steps.iq();
   const auto humps = _humps;
   std::vector<Pilot> found;
   for (const auto &h : humps) {
@@ -778,7 +806,7 @@ void Radio::scan_step_done() {
     pl.seen_ms = now_ms();
     found.push_back(pl);
   }
-  const bool done = _at >= _plan.size();
+  const bool done = _steps.done();
   double next_watch = 0;
   {
     std::lock_guard<std::mutex> l(_m);
@@ -786,7 +814,7 @@ void Radio::scan_step_done() {
     // has the last word: the status shows its progress (a scan called again starts at 0), and the end of
     // this scan does not put a watch of its own choosing over it. The next bank takes that call up.
     const bool current = _mode_epoch == _epoch_seen;
-    if (current) _step = _at;
+    if (current) _step = _steps.at();
     for (const auto &f : found) {
       auto it = std::find_if(_pilots.begin(), _pilots.end(), [&](const Pilot &p) { return std::fabs(p.mhz - f.mhz) < 4; });
       if (it == _pilots.end()) _pilots.push_back(f);
@@ -816,7 +844,6 @@ void Radio::scan_step_done() {
       _mode_epoch++;
     }
   }
-  _cap.clear();
 }
 
 void Radio::handle_test(Bank &b) {
@@ -876,7 +903,7 @@ std::string Radio::status_json() {
   // A JSON number or nothing: a nan or inf printed as it comes is not JSON, and a reader may choke on it or,
   // worse, take it for a string (Android's does).
   const auto num = [](double v) { return std::isfinite(v) ? v : 0.0; };
-  static const char *modes[] = {"idle", "scan", "watch", "test"};
+  static const char *modes[] = {"idle", "scan", "watch", "test", "sweep"};
   const int64_t t = now_ms();
   // late_recent: of stream_dropped (every block the adapter's stream gave up on since open()), those of the
   // watch now running and of its last FallbackPolicy::kWindowMs: the host is not keeping up when they add up
@@ -916,6 +943,20 @@ std::string Radio::status_json() {
   }
   o << "]}";
   return o.str();
+}
+
+std::string Radio::spectrum_json(double lo_hz, double hi_hz) {
+  double first = 0, at = 0;
+  std::vector<float> db;
+  uint64_t sweeps;
+  {
+    std::lock_guard<std::mutex> l(_m);
+    db = _band.get(lo_hz, hi_hz, &first);
+    if (_mode == Mode::Sweep || _mode == Mode::Scan) at = _req_hz;
+    sweeps = _mode == Mode::Sweep ? _sweep.passes() : 0;
+  }
+  // the bin size is fixed: no lock needed
+  return band_json(db, first, _band.bin_hz(), at, 2 * kEdge, sweeps);
 }
 
 }  // namespace kp

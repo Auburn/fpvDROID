@@ -2,6 +2,7 @@
 #pragma once
 #include <complex>
 #include <cstddef>
+#include <cstdint>
 #include <vector>
 
 #include "video.h"
@@ -44,6 +45,42 @@ std::vector<Hump> find_humps(const std::vector<float> &db, double fs, double edg
 // band the RX filter passes (an offset carrier's span would reach past it otherwise). Comparable with
 // Hump::snr_db for a signal that leaves part of the span free; a very wide, close signal reads lower.
 float carrier_snr(const std::vector<float> &db, double fs, double span_hz, double carrier_hz = 0, double pass_hz = 0);
+
+// The bands as one picture, for the spectrum page: the spectrum of every retune (a scan step, a sweep step) laid on
+// one grid, each in dB over its own noise floor. Only the floor makes two steps comparable: the chip's AGC picks a
+// gain of its own at every retune. Not thread-safe.
+class BandMap {
+public:
+  // What get() gives for a bin nothing has been seen in. (Not NaN: this library is built with -ffast-math, under
+  // which a test for NaN may be compiled away.)
+  static constexpr float kNone = -1000.f;
+
+  BandMap(double lo_hz, double hi_hz, double bin_hz);
+  // One retune's spectrum (Psd::db(): fftshifted, fs wide, centred on the hardware centre centre_hz). Its bins
+  // within +-use_hz of the centre go in, all but the DC point's (the chip's DC filter digs a notch there). A bin
+  // already seen in the last few seconds is averaged with the new value, so a burst of Wi-Fi does not flicker.
+  void add(const std::vector<float> &db, double fs, double centre_hz, double use_hz, int64_t now_ms);
+  // Bins in lo..hi last seen before older_than_ms are forgotten.
+  void forget(double lo_hz, double hi_hz, int64_t older_than_ms);
+  // lo..hi on the grid (first bin at *first_hz): dB over the floor, kNone where nothing has been seen. A gap of up
+  // to 3 MHz between seen bins (the DC points of a scan, which steps 20 MHz) is bridged.
+  std::vector<float> get(double lo_hz, double hi_hz, double *first_hz) const;
+  double bin_hz() const { return _bin; }
+
+private:
+  double _lo, _bin;
+  std::vector<float> _db;
+  std::vector<int64_t> _t;  // when each bin was last written
+};
+
+// Something on the air in a BandMap picture: a run at least 2 MHz wide standing 6 dB over the floor (dips under
+// that of up to 2 MHz inside it do not split it: weak FM video has them).
+struct Carrier {
+  double mhz;        // power-weighted centre
+  double width_mhz;
+  float snr_db;      // its peak over the floor
+};
+std::vector<Carrier> find_carriers(const std::vector<float> &db, double first_hz, double bin_hz);
 
 // Sync check: is there analog video at this offset? Runs a FrontEnd over the samples.
 struct VideoCheck {
