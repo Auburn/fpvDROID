@@ -103,6 +103,11 @@ if(NOT ANDROID)
   target_link_libraries(kp_decoder_tests PRIVATE kepyur_dsp)
   target_compile_options(kp_decoder_tests PRIVATE -O2 -Wall -Wextra)
   add_test(NAME decoder COMMAND kp_decoder_tests)
+  # the Spectrum tab's band picture, from sweep steps the test makes itself
+  add_executable(kp_spectrum_tests tests/spectrum_tests.cpp)
+  target_link_libraries(kp_spectrum_tests PRIVATE kepyur_dsp)
+  target_compile_options(kp_spectrum_tests PRIVATE -O2 -Wall -Wextra)
+  add_test(NAME spectrum COMMAND kp_spectrum_tests)
 endif()
 
 # ---- Android JNI ----

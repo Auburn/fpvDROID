@@ -2,6 +2,7 @@
 //   scan   - sweep the analog FPV bands at 40 MS/s, list pilots (humps that pass a sync check)
 //   watch  - tune to one pilot and decode its video (frames to the FrameSink)
 //   test   - stream at a given rate and only count banks (USB/controller soak, no DSP)
+//   sweep  - the spectrum page: step across a span over and over for its spectrum alone (no sync check, no picture)
 // The Receiver's sink only copies banks into a queue (wifi-sdr rule); everything else runs on the DSP thread.
 // Two-antenna combining, off-centre tuning and the sparkle repair plumbing come from Play RX
 // (github.com/scerstt/PlayRX, GPL-2.0), a Windows receiver built on kepyur.
@@ -62,6 +63,9 @@ public:
   void scan(double prefer_hz = 0);
   void watch(double hz);
   void stream_test(int rate_sel, double seconds);
+  // Sweep lo..hi at 40 MS/s until the next mode call: a retune every 30 MHz, each step's spectrum into the band
+  // picture (spectrum_json). One pass over 300 MHz is 11 or 12 retunes. Scans add their steps to the picture too.
+  void sweep(double lo_hz, double hi_hz);
   void idle();
   // The three setters below only take effect at the next watch() (the next tune). Each returns true when it
   // changed something, so that a watch already running has to be started again (watch()) to have it.
@@ -103,9 +107,14 @@ public:
 
   std::string status_json();   // for the UI (polled)
   std::vector<Pilot> pilots();
+  // The band picture over lo..hi, for the spectrum page (polled while it is shown):
+  //   {"first_mhz", "bin_mhz", "db": [dB over the noise floor, null where nothing has been seen],
+  //    "carriers": [{"mhz", "width", "snr"}], "at_mhz": the step being taken now (0: not sweeping or scanning),
+  //    "at_width_mhz", "sweeps": passes finished since sweep() (0 while the first is under way)}
+  std::string spectrum_json(double lo_hz, double hi_hz);
 
 private:
-  enum class Mode { Idle, Scan, Watch, Test };
+  enum class Mode { Idle, Scan, Watch, Test, Sweep };
   struct Bank {
     std::vector<uint8_t> data;
     uint64_t seq;
@@ -120,6 +129,7 @@ private:
   void tune(double hz, int rate_sel, bool watching = false);
   void begin_watch();
   void begin_scan();
+  void begin_sweep();
   void begin_test();
   // a watched bank, step by step (handle_watch)
   void handle_watch(Bank &b);
@@ -134,9 +144,12 @@ private:
   void end_recording();
   void combine_antennas(const Bank &b, bool gap, int64_t t_ms);
   void demod_for_decoder(bool gap);
+  bool capture_step(const Bank &b, double req);
   void handle_scan(Bank &b);
+  void handle_sweep(Bank &b);
   void handle_test(Bank &b);
   void scan_step_done();
+  void add_spectrum(const std::vector<float> &db, double centre_hz);
   static void unpack(const Bank &b, Path path, std::vector<cf> &out);
   void note_faults(const wsdr::RxStatus &st);  // log each stream restart the receiver has made since the last call
 
@@ -164,6 +177,9 @@ private:
   uint64_t _rec_left = 0, _rec_samples = 0;
   double _rec_fs = 0, _rec_centre = 0, _rec_shift = 0;
   std::vector<Pilot> _pilots;
+  BandMap _band;                      // what scans and sweeps have seen, 5300..6000 MHz
+  double _sweep_lo = 0, _sweep_hi = 0;
+  uint64_t _sweeps = 0;               // passes of the current sweep finished
   bool _superspeed = false, _open = false;
   std::string _chip;
 
@@ -223,6 +239,8 @@ private:
   double _cap_centre = 0;    // hardware centre of the capture (humps are measured from it)
   std::vector<Hump> _humps;  // this step's candidates (from the first kPsdSpan of the capture)
   double _resume_hz = 0;
+  // sweep (the plan, the step and the capture are the scan's)
+  int _sweep_grid = 0;  // which of the two grids, half a step apart, this pass is on
   // test
   uint64_t _test_banks = 0, _test_gaps = 0, _test_last_seq = 0, _test_runs = 0;
   uint32_t _test_gen = 0;

@@ -130,6 +130,131 @@ float carrier_snr(const std::vector<float> &db, double fs, double span_hz, doubl
   return pk - in[in.size() / 10];
 }
 
+namespace {
+constexpr double kDcHz = 0.75e6;      // the DC notch, left out of a retune's spectrum
+constexpr int64_t kAverageMs = 5000;  // a bin seen this recently is averaged with the new value
+constexpr double kBridgeHz = 3e6;     // the widest gap get() fills in
+constexpr size_t kAnchorBins = 4;     // overlap with fresh bins needed to carry their floor over (2 MHz)
+constexpr float kAnchorDb = 3.f;      // ... and how far under this step's own quartile it has to be
+}  // namespace
+
+BandMap::BandMap(double lo_hz, double hi_hz, double bin_hz)
+    : _lo(lo_hz), _bin(bin_hz),
+      _db(static_cast<size_t>(std::max(1L, std::lround((hi_hz - lo_hz) / bin_hz) + 1)), kNone), _t(_db.size(), 0) {}
+
+void BandMap::add(const std::vector<float> &db, double fs, double centre_hz, double use_hz, int64_t now_ms) {
+  const int n = static_cast<int>(db.size());
+  if (n < 16 || fs <= 0) return;
+  const double bin = fs / n;
+  const std::vector<float> sm = smooth_db(db, bin);
+  // the floor: the lower quartile of the part that is used (the RX filter's roll-off beyond it would pull it down)
+  std::vector<float> in;
+  for (int i = 0; i < n; i++)
+    if (std::fabs((i - n / 2) * bin) <= use_hz) in.push_back(sm[i]);
+  if (in.size() < 8) return;
+  std::nth_element(in.begin(), in.begin() + in.size() / 4, in.end());
+  float floor = in[in.size() / 4];
+  const int m = static_cast<int>(_db.size());
+  const int j0 = std::max(0, static_cast<int>(std::ceil((centre_hz - use_hz - _lo) / _bin)));
+  const int j1 = std::min(m - 1, static_cast<int>(std::floor((centre_hz + use_hz - _lo) / _bin)));
+  if (j1 < j0) return;
+  const int64_t t = std::max<int64_t>(now_ms, 1);  // 0 marks a bin never seen
+  // each bin's level in this step's own terms: the mean of the input bins inside it (or the nearest, should none be)
+  std::vector<float> level(static_cast<size_t>(j1 - j0 + 1), kNone);
+  for (int j = j0; j <= j1; j++) {
+    const double off = _lo + j * _bin - centre_hz;
+    if (std::fabs(off) < kDcHz) continue;
+    int i0 = static_cast<int>(std::ceil((off - _bin / 2) / bin)) + n / 2;
+    int i1 = static_cast<int>(std::floor((off + _bin / 2) / bin)) + n / 2;
+    if (i1 < i0) i0 = i1 = static_cast<int>(std::lround(off / bin)) + n / 2;
+    i0 = std::max(i0, 0);
+    i1 = std::min(i1, n - 1);
+    if (i1 < i0) continue;
+    double s = 0;
+    for (int i = i0; i <= i1; i++) s += sm[i];
+    level[j - j0] = static_cast<float>(s / (i1 - i0 + 1));
+  }
+  // A signal wider than most of the span (DJI at 40 MHz, O4 at 60) leaves too little noise for the quartile, which
+  // then sits on the signal and takes its middle out of the picture. Where this step overlaps bins that steps of
+  // the last few seconds put in, those say where its floor is: the median of its level less theirs (the same
+  // signal at another gain). Taken only when well under the quartile: a quartile of noise agrees with it to a dB
+  // or so, and taking the lower of the two every time would walk the floor down, step after step.
+  std::vector<float> d;
+  for (int j = j0; j <= j1; j++)
+    if (level[j - j0] != kNone && _t[j] > 0 && t - _t[j] < kAverageMs) d.push_back(level[j - j0] - _db[j]);
+  if (d.size() >= kAnchorBins) {
+    std::nth_element(d.begin(), d.begin() + d.size() / 2, d.end());
+    if (d[d.size() / 2] < floor - kAnchorDb) floor = d[d.size() / 2];
+  }
+  for (int j = j0; j <= j1; j++) {
+    if (level[j - j0] == kNone) continue;
+    const float v = level[j - j0] - floor;
+    _db[j] = _t[j] > 0 && t - _t[j] < kAverageMs ? 0.5f * (_db[j] + v) : v;
+    _t[j] = t;
+  }
+}
+
+void BandMap::forget(double lo_hz, double hi_hz, int64_t older_than_ms) {
+  const int m = static_cast<int>(_db.size());
+  const int j0 = std::max(0, static_cast<int>(std::floor((lo_hz - _lo) / _bin)));
+  const int j1 = std::min(m - 1, static_cast<int>(std::ceil((hi_hz - _lo) / _bin)));
+  for (int j = j0; j <= j1; j++)
+    if (_t[j] > 0 && _t[j] < older_than_ms) {
+      _t[j] = 0;
+      _db[j] = kNone;
+    }
+}
+
+std::vector<float> BandMap::get(double lo_hz, double hi_hz, double *first_hz) const {
+  const long m = static_cast<long>(_db.size());
+  const long j0 = std::clamp(std::lround((lo_hz - _lo) / _bin), 0L, m - 1);
+  const long j1 = std::clamp(std::lround((hi_hz - _lo) / _bin), j0, m - 1);
+  std::vector<float> out(static_cast<size_t>(j1 - j0 + 1));
+  for (long j = j0; j <= j1; j++) out[j - j0] = _t[j] > 0 ? _db[j] : kNone;
+  const int maxgap = static_cast<int>(kBridgeHz / _bin);
+  int last = -1;
+  for (int k = 0; k < static_cast<int>(out.size()); k++) {
+    if (out[k] == kNone) continue;
+    if (last >= 0 && k - last > 1 && k - last - 1 <= maxgap)
+      for (int q = last + 1; q < k; q++) out[q] = out[last] + (out[k] - out[last]) * (q - last) / (k - last);
+    last = k;
+  }
+  if (first_hz) *first_hz = _lo + j0 * _bin;
+  return out;
+}
+
+std::vector<Carrier> find_carriers(const std::vector<float> &db, double first_hz, double bin_hz) {
+  constexpr float kOver = 6.f;           // dB over the floor, as find_humps
+  constexpr double kMinWidth = 2e6;
+  const int n = static_cast<int>(db.size());
+  const int maxdip = std::max(1, static_cast<int>(2e6 / bin_hz));
+  std::vector<Carrier> out;
+  int i = 0;
+  while (i < n) {
+    if (db[i] <= kOver) {  // kNone too
+      i++;
+      continue;
+    }
+    int end = i + 1;  // one past the last bin over the threshold, dips of up to maxdip bins taken in
+    for (int k = end; k < n && k - end < maxdip; k++)
+      if (db[k] > kOver) end = k + 1;
+    if ((end - i) * bin_hz >= kMinWidth) {
+      double sw = 0, sk = 0;
+      float pk = kOver;
+      for (int k = i; k < end; k++) {
+        if (db[k] <= kOver) continue;  // a dip does not pull the centre
+        const double p = std::pow(10.0, db[k] / 10.0);
+        sw += p;
+        sk += p * k;
+        pk = std::max(pk, db[k]);
+      }
+      out.push_back(Carrier{(first_hz + sk / sw * bin_hz) / 1e6, (end - i) * bin_hz / 1e6, pk});
+    }
+    i = end;
+  }
+  return out;
+}
+
 VideoCheck check_video(const cf *x, size_t n, double fs, double offset_hz) {
   DecoderOpts o;
   FrontEnd fe(fs, offset_hz, nullptr, o);

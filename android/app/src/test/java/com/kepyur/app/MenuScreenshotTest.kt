@@ -137,10 +137,10 @@ class MenuScreenshotTest {
         2400, 1080, tuned)
 
     @Test @Config(qualifiers = PHONE)
-    fun view() = shoot("view", 1, live, 2400, 1080, tuned)
+    fun view() = shoot("view", 2, live, 2400, 1080, tuned)
 
     @Test @Config(qualifiers = PHONE)
-    fun viewPeek() = shoot("view_peek", 1, live, 2400, 1080, { tuned(); scale = 0.8f }) { it.peekSizeRow(true) }
+    fun viewPeek() = shoot("view_peek", 2, live, 2400, 1080, { tuned(); scale = 0.8f }) { it.peekSizeRow(true) }
 
     /** The one thing on screen when the picture is tapped. */
     @Test @Config(qualifiers = PHONE)
@@ -156,33 +156,109 @@ class MenuScreenshotTest {
     }
 
     @Test @Config(qualifiers = PHONE)
-    fun viewGoggles() = shoot("view_goggles", 1, live, 2400, 1080, {
+    fun viewGoggles() = shoot("view_goggles", 2, live, 2400, 1080, {
         tuned(); goggles = true; wide = true; fit = Settings.CROP; scale = 0.85f; eyeSpacing = 0.3f
     })
 
     @Test @Config(qualifiers = PHONE)
-    fun picture() = shoot("picture", 2, live, 2400, 1080, tuned)
+    fun picture() = shoot("picture", 3, live, 2400, 1080, tuned)
 
     @Test @Config(qualifiers = PHONE)
-    fun pictureNoComb() = shoot("picture_nocomb", 2, live, 2400, 1080, { tuned(); lumaComb = false })
+    fun pictureNoComb() = shoot("picture_nocomb", 3, live, 2400, 1080, { tuned(); lumaComb = false })
 
     @Test @Config(qualifiers = PHONE)
-    fun signal() = shoot("signal", 3, live, 2400, 1080, tuned)
+    fun signal() = shoot("signal", 4, live, 2400, 1080, tuned)
 
     @Test @Config(qualifiers = PHONE)
-    fun signalDiversity() = shoot("signal_diversity", 3, live.copy(
+    fun signalDiversity() = shoot("signal_diversity", 4, live.copy(
         stats = "USB 3 · 40 MS/s · processing 58% · 0 dropped · 0 restarts\nAntenna A 24 dB · B 19 dB · together 26 dB"),
         2400, 1080, { tuned(); diversity = true })
 
     @Test @Config(qualifiers = PHONE)
-    fun signalManualGain() = shoot("signal_gain", 3, live, 2400, 1080, { tuned(); gainAuto = false; gainDb = 24f })
+    fun signalManualGain() = shoot("signal_gain", 4, live, 2400, 1080, { tuned(); gainAuto = false; gainDb = 24f })
+
+    /** A band picture as the radio draws it: the floor at 0 dB with a little noise, a hump for each carrier. */
+    private fun spectrumOf(vararg carriers: Carrier, at: Double = 0.0, sweeps: Int = 2, lo: Int = 5635, hi: Int = 5955): Spectrum {
+        val rnd = java.util.Random(7)
+        val db = FloatArray((hi - lo) * 2 + 1) { i ->
+            val f = lo + i * 0.5
+            var v = (rnd.nextGaussian() * 0.7).toFloat()
+            for (c in carriers) {
+                val off = (f - c.mhz) / (c.widthMhz / 2)
+                // digital (18 MHz and wider): a flat top with steep sides; FM video: a broad hump with the sync tip's
+                // shoulder on one side
+                val hump = if (c.widthMhz >= 18) c.snrDb * Math.exp(-Math.pow(Math.abs(off), 8.0) * 1.2)
+                else c.snrDb * Math.exp(-off * off * 1.6) + 0.25 * c.snrDb * Math.exp(-(off + 0.7) * (off + 0.7) * 6)
+                v = maxOf(v, (hump + rnd.nextGaussian() * 0.6).toFloat())
+            }
+            v
+        }
+        return Spectrum(lo.toDouble(), 0.5, db, carriers.toList(), at, 33.0, sweeps)
+    }
+
+    private val onAir = arrayOf(Carrier(5658.4, 11.0, 18f), Carrier(5712.0, 9.0, 9f), Carrier(5769.2, 13.0, 31f), Carrier(5880.6, 12.0, 24f))
+
+    private val sweeping = MenuState(tone = Tone.BUSY, headline = "Spectrum", detail = "Picture paused while sweeping.",
+        radioReady = true, sweeping = true, spectrum = spectrumOf(*onAir, at = 5805.0))
+
+    @Test @Config(qualifiers = PHONE)
+    fun spectrumSweeping() = shoot("spectrum_sweeping", MenuView.SPECTRUM_TAB, sweeping, 2400, 1080, tuned)
+
+    /** A channel picked on it: the sweep is over, the last one stays, the picked channel is marked. */
+    @Test @Config(qualifiers = PHONE)
+    fun spectrumPicked() = shoot("spectrum_picked", MenuView.SPECTRUM_TAB, live.copy(spectrum = spectrumOf(*onAir)), 2400, 1080, tuned)
+
+    @Test @Config(qualifiers = PHONE)
+    fun spectrumFirstPass() = shoot("spectrum_first_pass", MenuView.SPECTRUM_TAB, sweeping.copy(spectrum = Spectrum(5635.0, 0.5,
+        spectrumOf(*onAir).db.mapIndexed { i, v -> if (i < 260) v else Float.NaN }.toFloatArray(), emptyList(), 5770.0, 33.0, 0)),
+        2400, 1080, tuned)
+
+    @Test @Config(qualifiers = PHONE)
+    fun spectrumNothing() = shoot("spectrum_nothing", MenuView.SPECTRUM_TAB, sweeping.copy(spectrum = spectrumOf(at = 5700.0)), 2400, 1080, tuned)
+
+    @Test @Config(qualifiers = PHONE)
+    fun spectrumLowBand() = shoot("spectrum_lowband", MenuView.SPECTRUM_TAB, sweeping.copy(spectrum = spectrumOf(
+        Carrier(5473.3, 12.0, 22f), at = 5500.0, lo = 5340, hi = 5640)), 2400, 1080, { band = 'L'; channelMhz = 5436 })
+
+    /** A field with everything flying: analog on R1, DJI V1/V2 on CH3 and CH8, HDZero on F4 (and R7), O4 on its CH1. */
+    private val mixed = arrayOf(Carrier(5658.4, 11.0, 18f), Carrier(5735.1, 19.0, 26f), Carrier(5768.6, 19.0, 22f),
+        Carrier(5800.3, 17.0, 29f), Carrier(5839.2, 19.0, 15f), Carrier(5880.4, 17.0, 24f))
+
+    @Test @Config(qualifiers = PHONE)
+    fun spectrumDji() = shoot("spectrum_dji", MenuView.SPECTRUM_TAB, sweeping.copy(spectrum = spectrumOf(*mixed, at = 5700.0)),
+        2400, 1080, { tuned(); spectrumSystem = Plans.DJI })
+
+    /** DJI V1/V2 pilots, one of them at 50 Mbps (40 MHz wide, its CH2 on the 25 Mbps CH4's frequency). */
+    @Test @Config(qualifiers = PHONE)
+    fun spectrumDji50() = shoot("spectrum_dji_50", MenuView.SPECTRUM_TAB, sweeping.copy(spectrum = spectrumOf(
+        Carrier(5658.4, 11.0, 18f), Carrier(5735.1, 19.0, 26f), Carrier(5770.2, 39.0, 21f), Carrier(5878.3, 19.5, 24f), at = 5850.0)),
+        2400, 1080, { tuned(); spectrumSystem = Plans.DJI })
+
+    @Test @Config(qualifiers = PHONE)
+    fun spectrumDjiO4() = shoot("spectrum_dji_o4", MenuView.SPECTRUM_TAB, sweeping.copy(spectrum = spectrumOf(*mixed, at = 5700.0)),
+        2400, 1080, { tuned(); spectrumSystem = Plans.DJI; djiModel = 2 })
+
+    @Test @Config(qualifiers = PHONE)
+    fun spectrumHdzero() = shoot("spectrum_hdzero", MenuView.SPECTRUM_TAB, sweeping.copy(spectrum = spectrumOf(*mixed, at = 5700.0)),
+        2400, 1080, { tuned(); spectrumSystem = Plans.HDZERO })
+
+    @Test @Config(qualifiers = SMALL)
+    fun smallSpectrumHdzero() = shoot("small_spectrum_hdzero", MenuView.SPECTRUM_TAB, sweeping.copy(spectrum = spectrumOf(*mixed)),
+        1600, 720, { tuned(); spectrumSystem = Plans.HDZERO })
+
+    @Test @Config(qualifiers = PHONE)
+    fun spectrumNoAdapter() = shoot("spectrum_noadapter", MenuView.SPECTRUM_TAB, MenuState(
+        tone = Tone.IDLE, headline = "No adapter", detail = "Plug the Wi-Fi adapter into the phone's USB port."), 2400, 1080)
 
     // ---------------------------------------------------------------- small phone, 1600 x 720 at 320 dpi
+    @Test @Config(qualifiers = SMALL)
+    fun smallSpectrum() = shoot("small_spectrum", MenuView.SPECTRUM_TAB, sweeping, 1600, 720, { band = 'B'; channelMhz = 5771 })
+
     @Test @Config(qualifiers = SMALL)
     fun smallChannel() = shoot("small_channel", 0, live, 1600, 720, tuned)
 
     @Test @Config(qualifiers = SMALL)
-    fun smallPicture() = shoot("small_picture", 2, live, 1600, 720, tuned)
+    fun smallPicture() = shoot("small_picture", 3, live, 1600, 720, tuned)
 
     /** A short screen and a long status: the line of the status along the top, the tabs and the preview all fit. */
     @Test @Config(qualifiers = SMALL)
@@ -190,14 +266,14 @@ class MenuScreenshotTest {
         tone = Tone.IDLE, headline = "No adapter", detail = "Plug the Wi-Fi adapter into the phone's USB port."), 1600, 720)
 
     @Test @Config(qualifiers = SMALL)
-    fun smallError() = shoot("small_error", 1, MenuState(
+    fun smallError() = shoot("small_error", 2, MenuState(
         tone = Tone.WARN, headline = "Trying again",
         detail = "The radio stopped: no samples for 4 seconds. If this goes on, unplug the adapter and plug it in again.",
         action = "Try now"), 1600, 720)
 
     /** Narrower still: the same screen with a camera cutout taking 68 dp of its width. */
     @Test @Config(qualifiers = "w732dp-h360dp-land-xhdpi")
-    fun narrowView() = shoot("narrow_view", 1, MenuState(
+    fun narrowView() = shoot("narrow_view", 2, MenuState(
         tone = Tone.IDLE, headline = "No adapter", detail = "Plug the Wi-Fi adapter into the phone's USB port."), 1464, 720,
         { goggles = true })
 

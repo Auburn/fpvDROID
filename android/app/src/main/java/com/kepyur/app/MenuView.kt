@@ -7,6 +7,7 @@ import android.graphics.Color
 import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.InsetDrawable
+import android.os.SystemClock
 import android.text.TextUtils
 import android.view.Gravity
 import android.view.MotionEvent
@@ -48,10 +49,14 @@ data class MenuState(
     val scanFoundNothing: Boolean = false,
     /** A line of numbers for the Signal tab (USB speed, sample rate, CPU, drops). */
     val stats: String = "",
+    /** The radio is sweeping for the Spectrum tab (the picture is paused meanwhile). */
+    val sweeping: Boolean = false,
+    /** What the Spectrum tab draws; null: nothing (it is not on screen, or there is no radio). */
+    val spectrum: Spectrum? = null,
 )
 
 /**
- * The menu: everything the app has to offer, over a black screen. A rail on the left (the four tabs, and at its
+ * The menu: everything the app has to offer, over a black screen. A rail on the left (the five tabs, and at its
  * foot the picture, small, with the status dot and headline over its top left: tapping it closes the menu), the
  * chosen tab's settings on the right, and a line of the status's words along the top, the whole width. It changes
  * [Settings] itself and tells the [Listener] which kind of thing changed; it knows nothing of the radio. The
@@ -74,6 +79,11 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
          * slider) so the picture can be seen changing, and the picture should be shown full size.
          */
         fun onPeek(on: Boolean)
+        /**
+         * The Spectrum tab wants the radio sweeping ([on]: the tab was opened, or Sweep pressed), or no longer
+         * does (another tab was opened). Picking a channel on it comes as [onTune], and ends the sweep too.
+         */
+        fun onSpectrum(on: Boolean) {}
         /** A finger has come down somewhere on the menu. */
         fun onTouched() {}
         fun onStatusAction()
@@ -124,7 +134,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     }
 
     // rail
-    private val tabNames = listOf("Channel", "View", "Picture", "Signal")
+    private val tabNames = listOf("Channel", "Spectrum", "View", "Picture", "Signal")
     private val tabViews = ArrayList<TextView>()
     private val pages = ArrayList<View>()
 
@@ -137,6 +147,17 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     private val scanText = label(ctx, "", 12.5f, Skin.TEXT_2)
     private val foundRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
     private var foundShown: List<Found>? = null
+
+    // spectrum page
+    private lateinit var spectrumSystem: Segmented
+    private lateinit var spectrumBand: Segmented
+    private lateinit var djiModel: Segmented
+    private var analogOnlyAt = -ANALOG_ONLY_MS   // when a digital channel was last picked (uptimeMillis)
+    private lateinit var spectrumView: SpectrumView
+    private lateinit var sweepButton: PillButton
+    private val sweepText = label(ctx, "", 12.5f, Skin.TEXT_2)
+    private val usedRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+    private var usedShown: List<Pair<String, Int>>? = null   // the chips on show: name, bars
 
     // view page
     private lateinit var fitRow: SettingRow
@@ -174,6 +195,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
             clipToOutline = true
         }
         pages += scrolling(buildChannelPage())
+        pages += scrolling(buildSpectrumPage())
         pages += scrolling(buildViewPage())
         pages += scrolling(buildPicturePage())
         pages += scrolling(buildSignalPage())
@@ -312,9 +334,14 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         if (previewBox.layoutParams.height != tile) previewBox.layoutParams.height = tile
     }
 
+    /** The Spectrum tab is the one chosen (whether or not the menu is open). */
+    val spectrumShown: Boolean get() = tab == SPECTRUM_TAB
+
     fun showTab(index: Int, animate: Boolean = true) {
         endPeek()
+        val spectrumWas = tab == SPECTRUM_TAB
         tab = index
+        if (spectrumWas != (index == SPECTRUM_TAB)) on.onSpectrum(index == SPECTRUM_TAB)
         for ((i, t) in tabViews.withIndex()) {
             val sel = i == index
             t.isSelected = sel
@@ -477,11 +504,128 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
             tile.chosen = list[i].mhz == s.channelMhz
             tile.bars = barsOn(list[i])
         }
+        val plan = Plans.of(s)
+        spectrumSystem.select(s.spectrumSystem)
+        spectrumBand.select(bandIndex())
+        djiModel.select(s.djiModel)
+        spectrumBand.visibility = if (s.spectrumSystem == Plans.ANALOG) View.VISIBLE else View.GONE
+        djiModel.visibility = if (s.spectrumSystem == Plans.DJI) View.VISIBLE else View.GONE
+        spectrumView.plan = plan
+        spectrumView.band = s.band
+        spectrumView.chosenMhz = if (plan.analog) s.channelMhz.toDouble() else 0.0
+        showUsed()
     }
 
     private fun barsOn(ch: Channel): Int {
         val f = state.found.filter { abs(it.mhz - ch.mhz) < Channels.SAME_CHANNEL_MHZ }.maxByOrNull { it.snrDb } ?: return 0
         return barsFor(f.snrDb).coerceAtLeast(1)
+    }
+
+    // ------------------------------------------------------------------------------------------ spectrum
+    private fun buildSpectrumPage(): View {
+        val p = page()
+        val head = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        // whose channels are marked: analog (a band), DJI (a model) or HDZero
+        spectrumSystem = Segmented(context, Plans.systems, s.spectrumSystem) { i ->
+            s.spectrumSystem = i
+            changedPlan()
+        }.apply { label = "Channels" }
+        head.addView(spectrumSystem, LinearLayout.LayoutParams(dpi(216f), dpi(34f)))
+        head.addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
+        // the same band as the Channel tab's: which channels are marked, and (the low band or not) which span is swept
+        spectrumBand = Segmented(context, Channels.bands.map { it.first.toString() }, bandIndex()) { i ->
+            s.band = Channels.bands[i].first
+            changedPlan()
+        }.apply { label = "Band" }
+        head.addView(spectrumBand, LinearLayout.LayoutParams(dpi(228f), dpi(34f)))
+        djiModel = Segmented(context, Plans.djiModels, s.djiModel) { i ->
+            s.djiModel = i
+            changedPlan()
+        }.apply { label = "DJI" }
+        head.addView(djiModel, LinearLayout.LayoutParams(dpi(186f), dpi(34f)))
+        p.addView(head)
+        spectrumView = SpectrumView(context).apply { onPick = { mhz -> pick(mhz) } }
+        // the graph takes whatever height the card has left (the page fills the card: see scrolling())
+        p.addView(spectrumView, LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = dpi(10f) })
+        val bottom = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        sweepButton = PillButton(context, "Sweep").apply { setOnClickListener { on.onSpectrum(true) } }
+        bottom.addView(sweepButton, LinearLayout.LayoutParams(-2, dpi(40f)))
+        bottom.addView(sweepText, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dpi(14f) })
+        val chips = HorizontalScrollView(context).apply {
+            isHorizontalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+            addView(usedRow)
+        }
+        bottom.addView(chips, LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dpi(12f) })
+        p.addView(bottom, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dpi(12f) })
+        return p
+    }
+
+    /** Another band, system or DJI model on the Spectrum tab (already kept in [Settings]). */
+    private fun changedPlan() {
+        syncChannel()
+        if (state.sweeping) on.onSpectrum(true)   // the sweep moves to the new span, if it has one
+    }
+
+    /**
+     * A frequency picked on the Spectrum tab (a carrier, a channel's name, a chip): tuned as the Channel tab tunes,
+     * unless it is on a digital system's channel, which there is no picture to be had from.
+     */
+    private fun pick(mhz: Double) {
+        val plan = Plans.of(s)
+        if (!plan.analog && plan.has(mhz)) {
+            analogOnlyAt = SystemClock.uptimeMillis()
+            renderSpectrum(state)
+            return
+        }
+        // the band's own channel first, as the chips name it; a signal further than that from any channel is saved
+        // and tuned by its own frequency
+        val ch = Channels.of(s.band).filter { abs(it.mhz - mhz) < Channels.SAME_CHANNEL_MHZ }.minByOrNull { abs(it.mhz - mhz) }
+            ?: Channels.nearest(mhz, s.band, Channels.SAME_CHANNEL_MHZ)
+        s.channelMhz = ch?.mhz ?: mhz.roundToInt()
+        if (ch != null) s.band = ch.band
+        syncChannel()
+        on.onTune()
+    }
+
+    /** The chips under the graph: what is on the air, left to right as in the graph, each named by its channel. */
+    private fun showUsed() {
+        val plan = Plans.of(s)
+        val carriers = state.spectrum?.carriers.orEmpty().sortedBy { it.mhz }
+        val named = carriers.map { c -> Plans.name(c.mhz, c.widthMhz, plan, s.band) to barsFor(c.snrDb).coerceAtLeast(1) }
+        if (named == usedShown) return
+        usedShown = named
+        usedRow.removeAllViews()
+        for ((i, c) in carriers.withIndex()) {
+            val chip = FoundChip(context, named[i].first, named[i].second)
+            chip.setOnClickListener { pick(c.mhz) }
+            usedRow.addView(chip, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dpi(8f) })
+        }
+    }
+
+    private fun renderSpectrum(st: MenuState) {
+        val sp = st.spectrum
+        spectrumView.spectrum = sp
+        spectrumView.emptyText = when {
+            !st.radioReady -> "The spectrum shows once the radio is running"
+            st.sweeping || st.scanning -> "Sweeping…"
+            else -> "Press Sweep to look at the band"
+        }
+        sweepButton.isEnabled = st.radioReady && !st.sweeping && !st.scanning
+        sweepButton.text = if (st.sweeping) "Sweeping" else "Sweep"
+        val (lo, hi) = Plans.of(s).span
+        val words = when {
+            SystemClock.uptimeMillis() - analogOnlyAt < ANALOG_ONLY_MS -> "Only analog video can be shown"
+            !st.radioReady -> ""
+            !sp?.carriers.isNullOrEmpty() -> "In use"
+            st.scanning -> "Waiting for the scan"
+            st.sweeping && (sp == null || sp.sweeps == 0) -> "$lo–$hi MHz"
+            sp != null && !sp.empty -> "No signals"
+            else -> ""
+        }
+        if (sweepText.text.toString() != words) sweepText.text = words
+        sweepText.visibility = if (words.isEmpty()) View.GONE else View.VISIBLE
+        showUsed()
     }
 
     // ------------------------------------------------------------------------------------------ view
@@ -632,6 +776,9 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     private fun <T : View> T.sized(width: Int): T = apply { layoutParams = LinearLayout.LayoutParams(width, dpi(38f)) }
 
     companion object {
+        const val SPECTRUM_TAB = 1
+        /** How long the Spectrum tab says that a digital channel cannot be watched. */
+        const val ANALOG_ONLY_MS = 3000L
         const val RAIL_DP = 204f
         /** A screen lower than this is short: most phones held sideways are, by a little. */
         const val SHORT_DP = 400f
@@ -699,5 +846,6 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
             for ((i, tile) in tiles.withIndex()) tile.bars = barsOn(Channels.of(s.band)[i])
         }
         if (stats.text.toString() != st.stats) stats.text = st.stats
+        renderSpectrum(st)
     }
 }

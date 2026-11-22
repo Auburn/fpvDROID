@@ -1,0 +1,357 @@
+package com.kepyur.app
+
+import android.annotation.SuppressLint
+import android.content.Context
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.LinearGradient
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.RectF
+import android.graphics.Shader
+import android.view.MotionEvent
+import android.view.View
+import android.view.ViewConfiguration
+import org.json.JSONException
+import org.json.JSONObject
+import kotlin.math.abs
+import kotlin.math.ceil
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.roundToInt
+
+/** Something on the air: a hump in the spectrum (any kind of transmitter, not only analog video). */
+data class Carrier(val mhz: Double, val widthMhz: Double, val snrDb: Float)
+
+/**
+ * What the radio has seen of the bands (native/radio/radio.h, Radio::spectrum_json): [db] is dB over the noise floor
+ * from [firstMhz] in steps of [binMhz], NaN where nothing has been seen yet. [atMhz]: the middle of the stretch being
+ * swept right now ([atWidthMhz] wide), 0 when the radio is not sweeping. [sweeps]: passes done since the sweep began.
+ */
+class Spectrum(
+    val firstMhz: Double, val binMhz: Double, val db: FloatArray, val carriers: List<Carrier>,
+    val atMhz: Double = 0.0, val atWidthMhz: Double = 33.0, val sweeps: Int = 0,
+) {
+    val empty: Boolean get() = db.none { !it.isNaN() }
+
+    companion object {
+        /** Null for anything that is not the radio's spectrum (an empty object while it has no radio, a broken string). */
+        fun parse(json: String): Spectrum? = try {
+            val o = JSONObject(json)
+            val arr = o.optJSONArray("db")
+            val bin = o.optDouble("bin_mhz", 0.0)
+            if (arr == null || !(bin > 0)) null else Spectrum(
+                firstMhz = o.optDouble("first_mhz", 0.0),
+                binMhz = bin,
+                db = FloatArray(arr.length()) { i -> if (arr.isNull(i)) Float.NaN else arr.optDouble(i, Double.NaN).toFloat() },
+                carriers = buildList {
+                    val cs = o.optJSONArray("carriers") ?: return@buildList
+                    for (i in 0 until cs.length()) {
+                        val c = cs.optJSONObject(i) ?: continue
+                        val mhz = c.optDouble("mhz", Double.NaN)
+                        if (mhz.isFinite() && mhz > 0) add(Carrier(mhz, c.optDouble("width", 0.0), c.optDouble("snr", 0.0).toFloat()))
+                    }
+                },
+                atMhz = o.optDouble("at_mhz", 0.0).let { if (it.isFinite()) it else 0.0 },
+                atWidthMhz = o.optDouble("at_width_mhz", 33.0),
+                sweeps = o.optInt("sweeps"),
+            )
+        } catch (e: JSONException) {
+            null
+        }
+    }
+}
+
+/**
+ * The spectrum page's graph: the spectrum over [plan]'s span, its channels marked under it (in use: lit; the chosen
+ * one: white), the stretch being swept now shaded. A tap picks a frequency for [onPick]: the carrier nearest the
+ * finger, or else the channel nearest it. [band]: the analog band a signal off [plan]'s channels is named by.
+ */
+class SpectrumView(ctx: Context) : View(ctx) {
+    var spectrum: Spectrum? = null
+        set(v) { field = v; names = null; describe(); invalidate() }
+    var plan: Plan = Plans.analog('R')
+        set(v) { if (field.title != v.title) { field = v; names = null; describe(); invalidate() } }
+    var band = 'R'
+        set(v) { if (field != v) { field = v; describe() } }
+    /** The channel being watched, if it is one of [plan]'s (MHz; 0: none). */
+    var chosenMhz = 0.0
+        set(v) { if (field != v) { field = v; names = null; invalidate() } }
+    private val span get() = plan.span
+    /** Said in the middle of the graph while there is nothing to draw. */
+    var emptyText = ""
+        set(v) { if (field != v) { field = v; invalidate() } }
+    var onPick: ((Double) -> Unit)? = null
+
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val line = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = dp(1.6f)
+        strokeJoin = Paint.Join.ROUND
+        color = Skin.ACCENT
+    }
+    private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val small = Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = Skin.REGULAR; textSize = sp(10.5f); color = Skin.TEXT_3 }
+    private val name = Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = Skin.MEDIUM; textSize = sp(12.5f); textAlign = Paint.Align.CENTER }
+    private val middle = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        typeface = Skin.REGULAR; textSize = sp(13f); color = Skin.TEXT_2; textAlign = Paint.Align.CENTER
+    }
+    private val box = RectF()
+    private val trace = Path()
+    private val area = Path()
+    private val clip = Path()
+    private var shaderTop = Float.NaN
+    private var shaderBottom = Float.NaN
+    private var topDb = 30f
+    /** The plan's channels in the span, each with the row of names it is in (see [names]); null: to be worked out. */
+    private var names: List<Pair<Marker, Int>>? = null
+
+    init {
+        isClickable = true
+        isFocusable = true
+        describe()
+    }
+
+    override fun onMeasure(w: Int, h: Int) = setMeasuredDimension(resolveSize(dpi(400f), w), resolveSize(dpi(150f), h))
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        names = null
+    }
+
+    // ------------------------------------------------------------------------------------------ geometry
+    /** Something on the air is named by [m] (Plans.name): the channel is in use. */
+    private fun lit(m: Marker): Boolean = spectrum?.carriers?.any { plan.near(it.mhz, it.widthMhz) == m } == true
+
+    /**
+     * The channels shown: all of the plan's in the span, but where a wide mode's channel has a narrow one's
+     * frequency (DJI V1/V2's 50 Mbps channels are on its 25 Mbps CH2, CH4, CH6, CH8) only one of the two, the
+     * wide one while it is in use.
+     */
+    private fun shown(): List<Marker> {
+        val all = plan.markers.filter { it.mhz >= span.first && it.mhz <= span.second }
+        return all.filter { m ->
+            val twin = all.firstOrNull { it.wide != m.wide && abs(it.mhz - m.mhz) < 1.0 }
+            when {
+                twin == null -> true
+                m.wide -> lit(m)
+                else -> !lit(twin) || lit(m)
+            }
+        }
+    }
+
+    /** The names under the plot, for a test. */
+    internal fun shownNames(): List<String> = names().map { it.first.name }
+
+    /**
+     * Where each channel's name goes under the plot: the first row, unless it would run into a name already there
+     * (channels 5 to 10 MHz apart: HDZero's, DJI O4's), then the second.
+     */
+    private fun names(): List<Pair<Marker, Int>> = names ?: run {
+        val gap = dp(6f)
+        val ends = floatArrayOf(-1e9f, -1e9f)   // where the last name in each row ends
+        shown().sortedBy { it.mhz }.map { m ->
+            val half = name.measureText(m.name) / 2 + if (m.mhz == chosenMhz) dp(7f) else 0f
+            val x = xOf(m.mhz)
+            val row = when {
+                x - half >= ends[0] + gap -> 0
+                x - half >= ends[1] + gap -> 1
+                ends[0] <= ends[1] -> 0
+                else -> 1
+            }
+            ends[row] = x + half
+            m to row
+        }.also { names = it }
+    }
+
+    /** Room under the plot for the channel names (one or two rows) and the frequencies. */
+    private val under get() = dp(if (names().any { it.second == 1 }) 56f else 40f)
+    private val plotBottom get() = height - under
+    private val plotTop get() = dp(1f)
+
+    private fun xOf(mhz: Double): Float {
+        val (lo, hi) = span
+        return ((mhz - lo) / (hi - lo) * width).toFloat()
+    }
+
+    private fun mhzAt(x: Float): Double {
+        val (lo, hi) = span
+        return lo + x / width.coerceAtLeast(1) * (hi - lo).toDouble()
+    }
+
+    private fun yOf(db: Float): Float {
+        val top = plotTop + dp(10f)
+        val t = ((db - BOTTOM_DB) / (topDb - BOTTOM_DB)).coerceIn(0f, 1.04f)
+        return plotBottom - t * (plotBottom - top)
+    }
+
+    // ------------------------------------------------------------------------------------------ drawing
+    override fun onDraw(c: Canvas) {
+        val w = width.toFloat()
+        val bottom = plotBottom
+        val r = dp(14f)
+        val sp = spectrum
+        // the scale: at least 30 dB, else the strongest carrier and a little room, in steps of 10
+        val peak = sp?.carriers?.maxOfOrNull { it.snrDb } ?: 0f
+        topDb = (ceil((peak + 4f) / 10f) * 10f).coerceIn(30f, 60f)
+
+        box.set(dp(0.75f), plotTop, w - dp(0.75f), bottom)
+        paint.style = Paint.Style.FILL
+        paint.color = Skin.FILL
+        c.drawRoundRect(box, r, r, paint)
+        c.save()
+        clip.reset()
+        clip.addRoundRect(box, r, r, Path.Direction.CW)
+        c.clipPath(clip)
+
+        // the stretch being swept now
+        if (sp != null && sp.atMhz > 0) {
+            val x0 = xOf(sp.atMhz - sp.atWidthMhz / 2)
+            val x1 = xOf(sp.atMhz + sp.atWidthMhz / 2)
+            if (x1 > 0 && x0 < w) {
+                paint.color = Color.argb(16, 255, 255, 255)
+                c.drawRect(max(0f, x0), plotTop, min(w, x1), bottom, paint)
+            }
+        }
+        // dB lines, labelled at the right
+        paint.color = Color.argb(14, 255, 255, 255)
+        small.textAlign = Paint.Align.RIGHT
+        var db = 10f
+        while (db < topDb) {
+            val y = yOf(db)
+            c.drawRect(0f, y, w, y + max(1f, dp(0.5f)), paint)
+            c.drawText("${db.roundToInt()} dB", w - dp(10f), y - dp(4f), small)
+            db += 10f
+        }
+        // the channels: a faint line each, brighter when in use or chosen
+        for ((m, _) in names()) {
+            val x = xOf(m.mhz)
+            paint.color = when {
+                m.mhz == chosenMhz -> Color.argb(110, 255, 255, 255)
+                lit(m) -> Color.argb(90, Color.red(Skin.ACCENT), Color.green(Skin.ACCENT), Color.blue(Skin.ACCENT))
+                else -> Color.argb(20, 255, 255, 255)
+            }
+            c.drawRect(x - dp(0.5f), plotTop, x + dp(0.5f), bottom, paint)
+        }
+        // the spectrum: a filled line, broken where nothing has been seen
+        if (sp != null && !sp.empty) drawTrace(c, sp, bottom)
+        else if (emptyText.isNotEmpty()) c.drawText(emptyText, w / 2, (plotTop + bottom) / 2 - (middle.descent() + middle.ascent()) / 2, middle)
+        c.restore()
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = dp(1f)
+        paint.color = Skin.STROKE
+        c.drawRoundRect(box, r, r, paint)
+        paint.style = Paint.Style.FILL
+
+        drawChannelNames(c, bottom)
+        // frequencies every 50 MHz, under the names
+        small.textAlign = Paint.Align.CENTER
+        var f = ((span.first + 49) / 50) * 50
+        while (f <= span.second) {
+            val x = xOf(f.toDouble())
+            val half = small.measureText("$f") / 2
+            if (x - half >= 0 && x + half <= w) c.drawText("$f", x, height - dp(3f), small)
+            f += 50
+        }
+    }
+
+    private fun drawTrace(c: Canvas, sp: Spectrum, bottom: Float) {
+        trace.reset()
+        area.reset()
+        var open = false
+        var startX = 0f
+        var lastX = 0f
+        for (i in sp.db.indices) {
+            val v = sp.db[i]
+            val x = xOf(sp.firstMhz + i * sp.binMhz)
+            if (v.isNaN()) {
+                if (open) { area.lineTo(lastX, bottom); area.lineTo(startX, bottom); area.close() }
+                open = false
+                continue
+            }
+            val y = yOf(v)
+            if (!open) {
+                trace.moveTo(x, y)
+                area.moveTo(x, y)
+                startX = x
+                open = true
+            } else {
+                trace.lineTo(x, y)
+                area.lineTo(x, y)
+            }
+            lastX = x
+        }
+        if (open) { area.lineTo(lastX, bottom); area.lineTo(startX, bottom); area.close() }
+        val top = yOf(topDb)
+        if (top != shaderTop || bottom != shaderBottom) {
+            shaderTop = top
+            shaderBottom = bottom
+            val a = Skin.ACCENT
+            fill.shader = LinearGradient(0f, top, 0f, bottom,
+                Color.argb(120, Color.red(a), Color.green(a), Color.blue(a)), Color.argb(10, Color.red(a), Color.green(a), Color.blue(a)),
+                Shader.TileMode.CLAMP)
+        }
+        c.drawPath(area, fill)
+        c.drawPath(trace, line)
+    }
+
+    private fun drawChannelNames(c: Canvas, bottom: Float) {
+        for ((m, row) in names()) {
+            val base = bottom + dp(17f) + row * dp(16f)
+            val x = xOf(m.mhz)
+            val used = lit(m)
+            val chosen = m.mhz == chosenMhz
+            if (chosen) {
+                val half = name.measureText(m.name) / 2 + dp(7f)
+                box.set(x - half, base - dp(13f), x + half, base + dp(4.5f))
+                paint.color = Color.argb(235, 255, 255, 255)
+                c.drawRoundRect(box, box.height() / 2, box.height() / 2, paint)
+            }
+            name.color = if (chosen) Skin.ON_LIGHT else if (used) Skin.ACCENT else Skin.TEXT_3
+            name.typeface = if (used || chosen) Skin.MEDIUM else Skin.REGULAR
+            val half = name.measureText(m.name) / 2
+            c.drawText(m.name, x.coerceIn(half + dp(2f), width - half - dp(2f)), base, name)
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------ touch
+    private var downX = 0f
+    private var downY = 0f
+
+    @SuppressLint("ClickableViewAccessibility")   // performClick is called, after the pick
+    override fun onTouchEvent(e: MotionEvent): Boolean {
+        if (!isEnabled) return false
+        val slop = ViewConfiguration.get(context).scaledTouchSlop
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> { downX = e.x; downY = e.y }
+            MotionEvent.ACTION_UP ->
+                if (abs(e.x - downX) <= slop && abs(e.y - downY) <= slop) {
+                    pick(e.x, e.y)
+                    performClick()
+                }
+        }
+        return true
+    }
+
+    /** What a tap at ([x], [y]) means: on the names, the channel under the finger; on the plot, the nearest carrier first. */
+    internal fun pick(x: Float, y: Float) {
+        val mhz = mhzAt(x)
+        val carrier = if (y >= plotBottom) null
+        else spectrum?.carriers?.filter { abs(it.mhz - mhz) <= PICK_CARRIER_MHZ }?.minByOrNull { abs(it.mhz - mhz) }
+        val to = carrier?.mhz ?: names().minByOrNull { abs(it.first.mhz - mhz) }?.first?.mhz ?: return
+        onPick?.invoke(to)
+    }
+
+    /** The graph in words, for a screen reader: the span, whose channels, and what is in use. */
+    private fun describe() {
+        val sp = spectrum
+        val used = sp?.carriers.orEmpty().map { Plans.name(it.mhz, it.widthMhz, plan, band) }
+        contentDescription = "Spectrum, ${span.first} to ${span.second} megahertz, ${plan.title} channels. " +
+            if (sp == null || sp.empty) "Nothing measured yet" else if (used.isEmpty()) "No signals" else "In use: ${used.joinToString()}"
+    }
+
+    companion object {
+        const val BOTTOM_DB = -5f
+        /** A tap this close to a carrier picks it. */
+        const val PICK_CARRIER_MHZ = 10.0
+    }
+}
