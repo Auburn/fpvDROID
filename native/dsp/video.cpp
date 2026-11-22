@@ -751,7 +751,14 @@ private:
     if (stray_run >= 6 && miss_run >= 4) {
       rephases++;
       comb_epoch++;
-      KP_LOGD("video: re-phased the line grid by %.1f us", (edge - line_start) / fs * 1e6);
+      // In the log every time, with how far the grid moved (the shorter way round), because that says why. A
+      // block of samples lost on the way here (the decode queue drops 4096 at a time, the stream a bank, which
+      // is as many) moves it by that many samples less whole lines: -14.1 us for each at 20 MS/s NTSC, -12.8 us
+      // PAL. A stream restart moves it by anything. A small move the late way (+) with nothing lost is hsyncs
+      // that came later than their line.
+      KP_LOGI("video: re-phased the line grid by %+.2f us at line %lld of the field, after %d lines without an hsync",
+              std::remainder(edge - line_start, T) / fs * 1e6,
+              cur_field < 0 ? -1LL : static_cast<long long>(line_idx) - static_cast<long long>(field_line0), miss_run);
       line_start = edge;
       line_low = 0;
       line_has_longrun = false;
