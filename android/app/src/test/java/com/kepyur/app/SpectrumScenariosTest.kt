@@ -83,7 +83,7 @@ class SpectrumScenariosTest : AppHarness() {
 
         fake.clearCalls()
         openTheMenu()
-        assertTrue(menu.spectrumShown)   // back where it was
+        assertEquals(Tab.SPECTRUM, menu.tab)   // back where it was
         advance(1000)
         assertEquals(0, fake.count("sweep"))
         assertEquals("watch", fake.mode)
@@ -184,7 +184,7 @@ class SpectrumScenariosTest : AppHarness() {
     // ------------------------------------------------------------------------------------------ digital systems
     private fun segmented(label: String) = views(menu).filterIsInstance<Segmented>().first { it.isShown && it.label == label }
 
-    private fun pickSystem(system: Int) = pick(segmented("Channels"), system, Plans.systems.size)
+    private fun pickSystem(system: ChannelSystem) = pick(segmented("Channels"), system.ordinal, ChannelSystem.entries.size)
 
     @Test
     fun djiChannelsAreMarkedAndNamedButNotTuned() {
@@ -195,9 +195,9 @@ class SpectrumScenariosTest : AppHarness() {
         advance(300)
         assertEquals(listOf("B1", "B4"), used())   // as analog channels first
 
-        pickSystem(Plans.DJI)
+        pickSystem(ChannelSystem.DJI)
         advance(300)
-        assertEquals(Plans.DJI, savedSettings().spectrumSystem)
+        assertEquals(ChannelSystem.DJI, savedSettings().spectrumSystem)
         assertEquals("DJI V1/V2", graph.plan.title)
         assertEquals(listOf("CH3", "B4"), used())   // off the V1/V2 channels: named as analog
         assertEquals(sweep(main), fake.last("sweep"))   // the same span: the sweep goes on as it was
@@ -218,7 +218,7 @@ class SpectrumScenariosTest : AppHarness() {
 
         click(usedChip("B1"))   // off the O4's channels: the analog channel it is on
         assertEquals(call("watch", 5733e6, true), fake.last("watch"))
-        assertEquals(Plans.DJI, savedSettings().spectrumSystem)   // the tab still marks DJI's channels
+        assertEquals(ChannelSystem.DJI, savedSettings().spectrumSystem)   // the tab still marks DJI's channels
     }
 
     @Test
@@ -227,7 +227,7 @@ class SpectrumScenariosTest : AppHarness() {
         fake.carriers += Carrier(5695.4, 39.0, 22f)   // V1/V2 at 50 Mbps: its CH1, on the 25 Mbps CH2's frequency
         fake.carriers += Carrier(5735.2, 19.5, 28f)   // V1/V2 at 25 Mbps: CH3
         showTab("Spectrum")
-        pickSystem(Plans.DJI)
+        pickSystem(ChannelSystem.DJI)
         advance(300)
         assertEquals(listOf("CH1 50M", "CH3"), used())
         val names = graph.shownNames()
@@ -251,13 +251,31 @@ class SpectrumScenariosTest : AppHarness() {
         assertEquals(listOf("CH2"), used())
     }
 
+    /** Off the plan's channels a chip is named by the nearest analog channel, and tapping it tunes that one. */
+    @Test
+    fun aChipTunesTheChannelItIsNamedBy() {
+        running(5658, 'R')
+        fake.carriers += Carrier(5802.5, 12.0, 25f)   // 2.5 MHz from F4, 3.5 from R5, on none of the O4's
+        showTab("Spectrum")
+        pickSystem(ChannelSystem.DJI)
+        pick(segmented("DJI"), Plans.djiModels.indexOf("O4"), Plans.djiModels.size)
+        advance(300)
+        assertEquals(listOf("F4"), used())
+
+        fake.clearCalls()
+        click(usedChip("F4"))
+        assertEquals(call("watch", 5800e6, true), fake.last("watch"))
+        assertEquals('F', savedSettings().band)
+        assertEquals(5800, savedSettings().channelMhz)
+    }
+
     @Test
     fun hdzeroChannelsAreMarkedAndChoosingThemMovesTheSweepOffTheLowBand() {
         running(5436, 'L')
         fake.carriers += Carrier(5800.2, 17.0, 24f)   // HDZero F4
         showTab("Spectrum")
         assertEquals(sweep(low), fake.last("sweep"))
-        pickSystem(Plans.HDZERO)
+        pickSystem(ChannelSystem.HDZERO)
         assertEquals(sweep(main), fake.last("sweep"))
         advance(300)
         assertEquals("HDZero", graph.plan.title)

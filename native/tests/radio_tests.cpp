@@ -8,6 +8,7 @@
 #include "decode_queue.h"
 #include "fallback_policy.h"
 #include "frame_gate.h"
+#include "steps.h"
 
 using namespace kp;
 
@@ -349,7 +350,70 @@ static void queue_pop_gives_up_when_told_to_stop() {
   CHECK(!q.pop(b, 10000, stop));  // at once, not after the 10 s
 }
 
+// --------------------------------------------------------------------------------------------- Steps
+// A bank of n samples, each valued seq: what a capture holds says which banks went into it.
+static std::vector<cf> bank_of(uint64_t seq, size_t n = 100) {
+  return std::vector<cf>(n, cf(static_cast<float>(seq), 0));
+}
+
+// A step lets kSettleBanks go by, then takes the samples it needs in a row, across banks; the next step starts over
+// at its first bank, and until then the last capture stays.
+static void steps_settle_then_capture() {
+  Steps s;
+  s.start({5650e6, 5680e6}, 250);
+  CHECK(!s.done() && s.hz() == 5650e6);
+  uint64_t seq = 0;
+  bool early = false;
+  for (; seq < Steps::kSettleBanks; seq++) early = early || s.take(bank_of(seq), seq, 1, 5650e6);
+  CHECK(!early && s.iq().empty());
+  CHECK(!s.take(bank_of(seq), seq, 1, 5650e6));
+  seq++;
+  CHECK(!s.take(bank_of(seq), seq, 1, 5650e6));
+  seq++;
+  CHECK(s.take(bank_of(seq), seq, 1, 5650e6));
+  const auto x = s.iq();
+  CHECK(x.size() == 250 && x.front().real() == Steps::kSettleBanks && x.back().real() == Steps::kSettleBanks + 2);
+  CHECK(s.centre_hz() == 5650e6);
+  CHECK(s.next() && s.hz() == 5680e6 && s.at() == 1);
+  CHECK(s.iq().size() == 250);
+  seq++;
+  CHECK(!s.take(bank_of(seq), seq, 1, 5680e6) && s.iq().empty());  // settling again
+  CHECK(!s.next() && s.done() && s.at() == 2);
+}
+
+// A gap starts the capture over, kRestarts times; after that it is taken with its gaps. want() takes more of the
+// same step.
+static void steps_start_over_after_a_gap_but_not_for_ever() {
+  Steps s;
+  s.start({5650e6}, 300);
+  uint64_t seq = 0;
+  for (; seq < Steps::kSettleBanks; seq++) s.take(bank_of(seq), seq, 1, 5650e6);
+  s.take(bank_of(seq), seq, 1, 5650e6);
+  for (int r = 0; r < Steps::kRestarts; r++) {
+    seq += 2;  // one lost on the way
+    s.take(bank_of(seq), seq, 1, 5650e6);
+  }
+  CHECK(s.iq().size() == 100 && s.iq().front().real() == seq);
+  seq += 2;
+  CHECK(!s.take(bank_of(seq), seq, 1, 5650e6) && s.iq().size() == 200);  // this gap stays in
+  seq++;
+  CHECK(s.take(bank_of(seq), seq, 1, 5650e6));
+  s.want(450);
+  seq++;
+  CHECK(!s.take(bank_of(seq), seq, 1, 5650e6));
+  seq++;
+  CHECK(s.take(bank_of(seq), seq, 1, 5650e6) && s.iq().size() == 450);
+  // a stream restart (a new generation, its count from 0) is a gap too
+  Steps t;
+  t.start({5650e6}, 150);
+  for (seq = 0; seq < Steps::kSettleBanks; seq++) t.take(bank_of(seq), seq, 1, 5650e6);
+  t.take(bank_of(seq), seq, 1, 5650e6);
+  CHECK(!t.take(bank_of(0), 0, 2, 5650e6) && t.iq().size() == 100 && t.iq().front().real() == 0);
+}
+
 int main() {
+  steps_settle_then_capture();
+  steps_start_over_after_a_gap_but_not_for_ever();
   fallback_restarts();
   fallback_restarts_spread_out();
   fallback_only_from_40();

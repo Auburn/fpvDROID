@@ -12,68 +12,27 @@ import android.graphics.Shader
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
-import org.json.JSONException
-import org.json.JSONObject
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
-/** Something on the air: a hump in the spectrum (any kind of transmitter, not only analog video). */
-data class Carrier(val mhz: Double, val widthMhz: Double, val snrDb: Float)
-
-/**
- * What the radio has seen of the bands (native/radio/radio.h, Radio::spectrum_json): [db] is dB over the noise floor
- * from [firstMhz] in steps of [binMhz], NaN where nothing has been seen yet. [atMhz]: the middle of the stretch being
- * swept right now ([atWidthMhz] wide), 0 when the radio is not sweeping. [sweeps]: passes done since the sweep began.
- */
-class Spectrum(
-    val firstMhz: Double, val binMhz: Double, val db: FloatArray, val carriers: List<Carrier>,
-    val atMhz: Double = 0.0, val atWidthMhz: Double = 33.0, val sweeps: Int = 0,
-) {
-    val empty: Boolean get() = db.none { !it.isNaN() }
-
-    companion object {
-        /** Null for anything that is not the radio's spectrum (an empty object while it has no radio, a broken string). */
-        fun parse(json: String): Spectrum? = try {
-            val o = JSONObject(json)
-            val arr = o.optJSONArray("db")
-            val bin = o.optDouble("bin_mhz", 0.0)
-            if (arr == null || !(bin > 0)) null else Spectrum(
-                firstMhz = o.optDouble("first_mhz", 0.0),
-                binMhz = bin,
-                db = FloatArray(arr.length()) { i -> if (arr.isNull(i)) Float.NaN else arr.optDouble(i, Double.NaN).toFloat() },
-                carriers = buildList {
-                    val cs = o.optJSONArray("carriers") ?: return@buildList
-                    for (i in 0 until cs.length()) {
-                        val c = cs.optJSONObject(i) ?: continue
-                        val mhz = c.optDouble("mhz", Double.NaN)
-                        if (mhz.isFinite() && mhz > 0) add(Carrier(mhz, c.optDouble("width", 0.0), c.optDouble("snr", 0.0).toFloat()))
-                    }
-                },
-                atMhz = o.optDouble("at_mhz", 0.0).let { if (it.isFinite()) it else 0.0 },
-                atWidthMhz = o.optDouble("at_width_mhz", 33.0),
-                sweeps = o.optInt("sweeps"),
-            )
-        } catch (e: JSONException) {
-            null
-        }
-    }
-}
-
 /**
  * The spectrum page's graph: the spectrum over [plan]'s span, its channels marked under it (in use: lit; the chosen
- * one: white), the stretch being swept now shaded. A tap picks a frequency for [onPick]: the carrier nearest the
- * finger, or else the channel nearest it. [band]: the analog band a signal off [plan]'s channels is named by.
+ * one: white), the stretch being swept now shaded. A tap picks for [onPick]: the carrier nearest the finger, or else
+ * the channel nearest it. [band]: the analog band a signal off [plan]'s channels is put on.
  */
 class SpectrumView(ctx: Context) : View(ctx) {
     var spectrum: Spectrum? = null
-        set(v) { field = v; names = null; describe(); invalidate() }
+        set(v) { field = v; place() }
     var plan: Plan = Plans.analog('R')
-        set(v) { if (field.title != v.title) { field = v; names = null; describe(); invalidate() } }
+        set(v) { if (field != v) { field = v; place() } }
     var band = 'R'
-        set(v) { if (field != v) { field = v; describe() } }
+        set(v) { if (field != v) { field = v; place() } }
+    /** What is on the air, left to right, each where [plan] puts it: what the graph lights, and the tab lists. */
+    var onAir: List<OnAir> = emptyList()
+        private set
     /** The channel being watched, if it is one of [plan]'s (MHz; 0: none). */
     var chosenMhz = 0.0
         set(v) { if (field != v) { field = v; names = null; invalidate() } }
@@ -81,7 +40,7 @@ class SpectrumView(ctx: Context) : View(ctx) {
     /** Said in the middle of the graph while there is nothing to draw. */
     var emptyText = ""
         set(v) { if (field != v) { field = v; invalidate() } }
-    var onPick: ((Double) -> Unit)? = null
+    var onPick: ((Spot) -> Unit)? = null
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val line = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -112,6 +71,14 @@ class SpectrumView(ctx: Context) : View(ctx) {
         describe()
     }
 
+    /** The spectrum, the plan or the band changed: what is on the air is put on the plan's channels again. */
+    private fun place() {
+        onAir = spectrum?.carriers.orEmpty().sortedBy { it.mhz }.map { OnAir(it, plan.spot(it.mhz, it.widthMhz, band)) }
+        names = null
+        describe()
+        invalidate()
+    }
+
     override fun onMeasure(w: Int, h: Int) = setMeasuredDimension(resolveSize(dpi(400f), w), resolveSize(dpi(150f), h))
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
@@ -119,8 +86,8 @@ class SpectrumView(ctx: Context) : View(ctx) {
     }
 
     // ------------------------------------------------------------------------------------------ geometry
-    /** Something on the air is named by [m] (Plans.name): the channel is in use. */
-    private fun lit(m: Marker): Boolean = spectrum?.carriers?.any { plan.near(it.mhz, it.widthMhz) == m } == true
+    /** Something on the air is on [m]: the channel is in use. */
+    private fun lit(m: Marker): Boolean = onAir.any { it.spot.marker == m }
 
     /**
      * The channels shown: all of the plan's in the span, but where a wide mode's channel has a narrow one's
@@ -336,15 +303,15 @@ class SpectrumView(ctx: Context) : View(ctx) {
     internal fun pick(x: Float, y: Float) {
         val mhz = mhzAt(x)
         val carrier = if (y >= plotBottom) null
-        else spectrum?.carriers?.filter { abs(it.mhz - mhz) <= PICK_CARRIER_MHZ }?.minByOrNull { abs(it.mhz - mhz) }
-        val to = carrier?.mhz ?: names().minByOrNull { abs(it.first.mhz - mhz) }?.first?.mhz ?: return
+        else onAir.filter { abs(it.carrier.mhz - mhz) <= PICK_CARRIER_MHZ }.minByOrNull { abs(it.carrier.mhz - mhz) }
+        val to = carrier?.spot ?: names().minByOrNull { abs(it.first.mhz - mhz) }?.let { plan.spot(it.first) } ?: return
         onPick?.invoke(to)
     }
 
     /** The graph in words, for a screen reader: the span, whose channels, and what is in use. */
     private fun describe() {
         val sp = spectrum
-        val used = sp?.carriers.orEmpty().map { Plans.name(it.mhz, it.widthMhz, plan, band) }
+        val used = onAir.map { it.spot.name }
         contentDescription = "Spectrum, ${span.first} to ${span.second} megahertz, ${plan.title} channels. " +
             if (sp == null || sp.empty) "Nothing measured yet" else if (used.isEmpty()) "No signals" else "In use: ${used.joinToString()}"
     }

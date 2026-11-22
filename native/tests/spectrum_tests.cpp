@@ -1,5 +1,5 @@
-// kp_spectrum_tests: the Spectrum tab's band picture (BandMap, find_carriers) from sweep steps made here (ctest:
-// "spectrum"). Plain checks, as in radio_tests.cpp.
+// kp_spectrum_tests: the Spectrum tab's sweep plan (Sweep) and band picture (BandMap, find_carriers) from sweep steps
+// made here (ctest: "spectrum"). Plain checks, as in radio_tests.cpp.
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "spectrum.h"
+#include "sweep.h"
 
 using namespace kp;
 
@@ -27,20 +28,21 @@ struct Signal {
   bool flat;  // digital (a flat top, steep sides); else an FM video hump
 };
 
-// What the radio's sweep does (radio.cpp: sweep_plan, handle_sweep): retunes 30 MHz apart over lo..hi, every
-// other pass moved by half a step, each step a 40 MS/s spectrum of 1024 bins (fftshifted, dB) with a gain of its
-// own (the chip's AGC), the RX filter rolling off past 17 MHz, and noise. Its +-16.5 MHz go into the map.
+// What the radio's sweep does (radio.cpp: handle_sweep), pass after pass of the radio's own plan (Sweep), each step
+// a 40 MS/s spectrum of 1024 bins (fftshifted, dB) with a gain of its own (the chip's AGC), the RX filter rolling
+// off past 17 MHz, and noise. Its +-16.5 MHz (radio.cpp's kEdge) go into the map.
 static BandMap swept(const std::vector<Signal> &air, int passes, unsigned seed = 3) {
-  constexpr double kFs = 40e6, kStep = 30e6, kUse = 16.5e6, kLo = 5635e6, kHi = 5955e6;
+  constexpr double kFs = 40e6, kUse = 16.5e6;
   constexpr int kN = 1024;
   std::mt19937 rng(seed);
   std::normal_distribution<float> noise(0, 1);
   std::uniform_real_distribution<float> gain(-6, 6);
-  BandMap map(5300e6, 6000e6, 0.5e6);
+  BandMap map(Sweep::kBandLo, Sweep::kBandHi, Sweep::kBandBin);
+  Sweep sweep;
+  sweep.start(5635e6, 5955e6);
   int64_t t = 1000;
-  for (int pass = 0; pass < passes; pass++) {
-    const double first = std::round((kLo + (pass % 2 ? 0 : kStep / 2)) / 5e6) * 5e6;
-    for (double c = first; c - kStep / 2 < kHi; c += kStep) {
+  for (int pass = 0; pass < passes; pass++, sweep.pass_done()) {
+    for (double c : sweep.pass()) {
       std::vector<float> db(kN);
       const float g = gain(rng);
       for (int i = 0; i < kN; i++) {
@@ -132,7 +134,37 @@ static void forget_and_bridge() {
   CHECK(none);
 }
 
+// The sweep's plan: steps 30 MHz apart on the 5 MHz grid across the whole span, every other pass on a grid half a
+// step over, a new sweep from the first grid; the span kept inside the band picture, and a span of nothing still a
+// step (the DSP thread retunes to the first at once).
+static void the_sweep_covers_its_span_on_two_grids() {
+  Sweep s;
+  s.start(5955e6, 5635e6);  // either order
+  CHECK(s.lo() == 5635e6 && s.hi() == 5955e6);
+  const auto a = s.pass();
+  s.pass_done();
+  const auto b = s.pass();
+  CHECK(s.passes() == 1);
+  for (const auto *p : {&a, &b}) {
+    CHECK(!p->empty());
+    // each end within a half step of a centre (the 5 MHz grid may move a centre 2.5 MHz)
+    CHECK(p->front() - Sweep::kStep / 2 <= s.lo() + 2.5e6 && p->back() + Sweep::kStep / 2 >= s.hi());
+    for (size_t i = 0; i < p->size(); i++) {
+      CHECK(std::fmod((*p)[i], 5e6) == 0);
+      if (i) CHECK((*p)[i] - (*p)[i - 1] == Sweep::kStep);
+    }
+  }
+  CHECK(std::fabs(std::fabs(a.front() - b.front()) - Sweep::kStep / 2) <= 2.5e6);
+  s.pass_done();
+  CHECK(s.pass() == a);
+  s.start(5800e6, 5800e6);
+  CHECK(s.passes() == 0 && s.pass().size() == 1);
+  s.start(5000e6, 7000e6);
+  CHECK(s.lo() == Sweep::kBandLo && s.hi() == Sweep::kBandHi);
+}
+
 int main() {
+  the_sweep_covers_its_span_on_two_grids();
   the_floor_is_flat_and_empty();
   signals_are_found_where_and_as_wide_as_they_are();
   a_signal_wider_than_a_step_is_found_whole();

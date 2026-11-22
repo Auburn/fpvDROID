@@ -76,7 +76,7 @@ class MenuScreenshotTest {
         stats = "USB 3 · 40 MS/s · processing 46% · 0 dropped · 0 restarts",
     )
 
-    private fun shoot(name: String, tab: Int, state: MenuState, w: Int, h: Int, setup: Settings.() -> Unit = {},
+    private fun shoot(name: String, tab: Tab, state: MenuState, w: Int, h: Int, setup: Settings.() -> Unit = {},
                       then: (MenuView) -> Unit = {}) {
         val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
         val prefs = activity.getSharedPreferences("t-$name", Context.MODE_PRIVATE)
@@ -115,32 +115,32 @@ class MenuScreenshotTest {
 
     // ---------------------------------------------------------------- phone, 2400 x 1080 at 420 dpi
     @Test @Config(qualifiers = PHONE)
-    fun channelLive() = shoot("channel_live", 0, live, 2400, 1080, tuned)
+    fun channelLive() = shoot("channel_live", Tab.CHANNEL, live, 2400, 1080, tuned)
 
     @Test @Config(qualifiers = PHONE)
-    fun channelScanning() = shoot("channel_scanning", 0, MenuState(
+    fun channelScanning() = shoot("channel_scanning", Tab.CHANNEL, MenuState(
         tone = Tone.BUSY, headline = "Scanning", detail = "Looking for video on every channel.", radioReady = true,
         scanning = true, scanStep = 7, scanSteps = 29), 2400, 1080, tuned)
 
     @Test @Config(qualifiers = PHONE)
-    fun channelNoAdapter() = shoot("channel_noadapter", 0, MenuState(
+    fun channelNoAdapter() = shoot("channel_noadapter", Tab.CHANNEL, MenuState(
         tone = Tone.IDLE, headline = "No adapter", detail = "Plug the Wi-Fi adapter into the phone's USB port."), 2400, 1080)
 
     @Test @Config(qualifiers = PHONE)
-    fun channelError() = shoot("channel_error", 0, MenuState(
+    fun channelError() = shoot("channel_error", Tab.CHANNEL, MenuState(
         tone = Tone.WARN, headline = "Trying again",
         detail = "The radio did not start: bulk transfer timed out while loading firmware", action = "Try now"), 2400, 1080)
 
     /** Nothing to say along the top: the name of the app there instead. */
     @Test @Config(qualifiers = PHONE)
-    fun channelQuiet() = shoot("channel_quiet", 0, MenuState(tone = Tone.BUSY, headline = "Working", radioReady = true),
+    fun channelQuiet() = shoot("channel_quiet", Tab.CHANNEL, MenuState(tone = Tone.BUSY, headline = "Working", radioReady = true),
         2400, 1080, tuned)
 
     @Test @Config(qualifiers = PHONE)
-    fun view() = shoot("view", 2, live, 2400, 1080, tuned)
+    fun view() = shoot("view", Tab.VIEW, live, 2400, 1080, tuned)
 
     @Test @Config(qualifiers = PHONE)
-    fun viewPeek() = shoot("view_peek", 2, live, 2400, 1080, { tuned(); scale = 0.8f }) { it.peekSizeRow(true) }
+    fun viewPeek() = shoot("view_peek", Tab.VIEW, live, 2400, 1080, { tuned(); scale = 0.8f }) { it.peekSizeRow(true) }
 
     /** The one thing on screen when the picture is tapped. */
     @Test @Config(qualifiers = PHONE)
@@ -156,26 +156,26 @@ class MenuScreenshotTest {
     }
 
     @Test @Config(qualifiers = PHONE)
-    fun viewGoggles() = shoot("view_goggles", 2, live, 2400, 1080, {
+    fun viewGoggles() = shoot("view_goggles", Tab.VIEW, live, 2400, 1080, {
         tuned(); goggles = true; wide = true; fit = Settings.CROP; scale = 0.85f; eyeSpacing = 0.3f
     })
 
     @Test @Config(qualifiers = PHONE)
-    fun picture() = shoot("picture", 3, live, 2400, 1080, tuned)
+    fun picture() = shoot("picture", Tab.PICTURE, live, 2400, 1080, tuned)
 
     @Test @Config(qualifiers = PHONE)
-    fun pictureNoComb() = shoot("picture_nocomb", 3, live, 2400, 1080, { tuned(); lumaComb = false })
+    fun pictureNoComb() = shoot("picture_nocomb", Tab.PICTURE, live, 2400, 1080, { tuned(); lumaComb = false })
 
     @Test @Config(qualifiers = PHONE)
-    fun signal() = shoot("signal", 4, live, 2400, 1080, tuned)
+    fun signal() = shoot("signal", Tab.SIGNAL, live, 2400, 1080, tuned)
 
     @Test @Config(qualifiers = PHONE)
-    fun signalDiversity() = shoot("signal_diversity", 4, live.copy(
+    fun signalDiversity() = shoot("signal_diversity", Tab.SIGNAL, live.copy(
         stats = "USB 3 · 40 MS/s · processing 58% · 0 dropped · 0 restarts\nAntenna A 24 dB · B 19 dB · together 26 dB"),
         2400, 1080, { tuned(); diversity = true })
 
     @Test @Config(qualifiers = PHONE)
-    fun signalManualGain() = shoot("signal_gain", 4, live, 2400, 1080, { tuned(); gainAuto = false; gainDb = 24f })
+    fun signalManualGain() = shoot("signal_gain", Tab.SIGNAL, live, 2400, 1080, { tuned(); gainAuto = false; gainDb = 24f })
 
     /** A band picture as the radio draws it: the floor at 0 dB with a little noise, a hump for each carrier. */
     private fun spectrumOf(vararg carriers: Carrier, at: Double = 0.0, sweeps: Int = 2, lo: Int = 5635, hi: Int = 5955): Spectrum {
@@ -202,22 +202,22 @@ class MenuScreenshotTest {
         radioReady = true, sweeping = true, spectrum = spectrumOf(*onAir, at = 5805.0))
 
     @Test @Config(qualifiers = PHONE)
-    fun spectrumSweeping() = shoot("spectrum_sweeping", MenuView.SPECTRUM_TAB, sweeping, 2400, 1080, tuned)
+    fun spectrumSweeping() = shoot("spectrum_sweeping", Tab.SPECTRUM, sweeping, 2400, 1080, tuned)
 
     /** A channel picked on it: the sweep is over, the last one stays, the picked channel is marked. */
     @Test @Config(qualifiers = PHONE)
-    fun spectrumPicked() = shoot("spectrum_picked", MenuView.SPECTRUM_TAB, live.copy(spectrum = spectrumOf(*onAir)), 2400, 1080, tuned)
+    fun spectrumPicked() = shoot("spectrum_picked", Tab.SPECTRUM, live.copy(spectrum = spectrumOf(*onAir)), 2400, 1080, tuned)
 
     @Test @Config(qualifiers = PHONE)
-    fun spectrumFirstPass() = shoot("spectrum_first_pass", MenuView.SPECTRUM_TAB, sweeping.copy(spectrum = Spectrum(5635.0, 0.5,
+    fun spectrumFirstPass() = shoot("spectrum_first_pass", Tab.SPECTRUM, sweeping.copy(spectrum = Spectrum(5635.0, 0.5,
         spectrumOf(*onAir).db.mapIndexed { i, v -> if (i < 260) v else Float.NaN }.toFloatArray(), emptyList(), 5770.0, 33.0, 0)),
         2400, 1080, tuned)
 
     @Test @Config(qualifiers = PHONE)
-    fun spectrumNothing() = shoot("spectrum_nothing", MenuView.SPECTRUM_TAB, sweeping.copy(spectrum = spectrumOf(at = 5700.0)), 2400, 1080, tuned)
+    fun spectrumNothing() = shoot("spectrum_nothing", Tab.SPECTRUM, sweeping.copy(spectrum = spectrumOf(at = 5700.0)), 2400, 1080, tuned)
 
     @Test @Config(qualifiers = PHONE)
-    fun spectrumLowBand() = shoot("spectrum_lowband", MenuView.SPECTRUM_TAB, sweeping.copy(spectrum = spectrumOf(
+    fun spectrumLowBand() = shoot("spectrum_lowband", Tab.SPECTRUM, sweeping.copy(spectrum = spectrumOf(
         Carrier(5473.3, 12.0, 22f), at = 5500.0, lo = 5340, hi = 5640)), 2400, 1080, { band = 'L'; channelMhz = 5436 })
 
     /** A field with everything flying: analog on R1, DJI V1/V2 on CH3 and CH8, HDZero on F4 (and R7), O4 on its CH1. */
@@ -225,61 +225,61 @@ class MenuScreenshotTest {
         Carrier(5800.3, 17.0, 29f), Carrier(5839.2, 19.0, 15f), Carrier(5880.4, 17.0, 24f))
 
     @Test @Config(qualifiers = PHONE)
-    fun spectrumDji() = shoot("spectrum_dji", MenuView.SPECTRUM_TAB, sweeping.copy(spectrum = spectrumOf(*mixed, at = 5700.0)),
-        2400, 1080, { tuned(); spectrumSystem = Plans.DJI })
+    fun spectrumDji() = shoot("spectrum_dji", Tab.SPECTRUM, sweeping.copy(spectrum = spectrumOf(*mixed, at = 5700.0)),
+        2400, 1080, { tuned(); spectrumSystem = ChannelSystem.DJI })
 
     /** DJI V1/V2 pilots, one of them at 50 Mbps (40 MHz wide, its CH2 on the 25 Mbps CH4's frequency). */
     @Test @Config(qualifiers = PHONE)
-    fun spectrumDji50() = shoot("spectrum_dji_50", MenuView.SPECTRUM_TAB, sweeping.copy(spectrum = spectrumOf(
+    fun spectrumDji50() = shoot("spectrum_dji_50", Tab.SPECTRUM, sweeping.copy(spectrum = spectrumOf(
         Carrier(5658.4, 11.0, 18f), Carrier(5735.1, 19.0, 26f), Carrier(5770.2, 39.0, 21f), Carrier(5878.3, 19.5, 24f), at = 5850.0)),
-        2400, 1080, { tuned(); spectrumSystem = Plans.DJI })
+        2400, 1080, { tuned(); spectrumSystem = ChannelSystem.DJI })
 
     @Test @Config(qualifiers = PHONE)
-    fun spectrumDjiO4() = shoot("spectrum_dji_o4", MenuView.SPECTRUM_TAB, sweeping.copy(spectrum = spectrumOf(*mixed, at = 5700.0)),
-        2400, 1080, { tuned(); spectrumSystem = Plans.DJI; djiModel = 2 })
+    fun spectrumDjiO4() = shoot("spectrum_dji_o4", Tab.SPECTRUM, sweeping.copy(spectrum = spectrumOf(*mixed, at = 5700.0)),
+        2400, 1080, { tuned(); spectrumSystem = ChannelSystem.DJI; djiModel = 2 })
 
     @Test @Config(qualifiers = PHONE)
-    fun spectrumHdzero() = shoot("spectrum_hdzero", MenuView.SPECTRUM_TAB, sweeping.copy(spectrum = spectrumOf(*mixed, at = 5700.0)),
-        2400, 1080, { tuned(); spectrumSystem = Plans.HDZERO })
+    fun spectrumHdzero() = shoot("spectrum_hdzero", Tab.SPECTRUM, sweeping.copy(spectrum = spectrumOf(*mixed, at = 5700.0)),
+        2400, 1080, { tuned(); spectrumSystem = ChannelSystem.HDZERO })
 
     @Test @Config(qualifiers = SMALL)
-    fun smallSpectrumHdzero() = shoot("small_spectrum_hdzero", MenuView.SPECTRUM_TAB, sweeping.copy(spectrum = spectrumOf(*mixed)),
-        1600, 720, { tuned(); spectrumSystem = Plans.HDZERO })
+    fun smallSpectrumHdzero() = shoot("small_spectrum_hdzero", Tab.SPECTRUM, sweeping.copy(spectrum = spectrumOf(*mixed)),
+        1600, 720, { tuned(); spectrumSystem = ChannelSystem.HDZERO })
 
     @Test @Config(qualifiers = PHONE)
-    fun spectrumNoAdapter() = shoot("spectrum_noadapter", MenuView.SPECTRUM_TAB, MenuState(
+    fun spectrumNoAdapter() = shoot("spectrum_noadapter", Tab.SPECTRUM, MenuState(
         tone = Tone.IDLE, headline = "No adapter", detail = "Plug the Wi-Fi adapter into the phone's USB port."), 2400, 1080)
 
     // ---------------------------------------------------------------- small phone, 1600 x 720 at 320 dpi
     @Test @Config(qualifiers = SMALL)
-    fun smallSpectrum() = shoot("small_spectrum", MenuView.SPECTRUM_TAB, sweeping, 1600, 720, { band = 'B'; channelMhz = 5771 })
+    fun smallSpectrum() = shoot("small_spectrum", Tab.SPECTRUM, sweeping, 1600, 720, { band = 'B'; channelMhz = 5771 })
 
     @Test @Config(qualifiers = SMALL)
-    fun smallChannel() = shoot("small_channel", 0, live, 1600, 720, tuned)
+    fun smallChannel() = shoot("small_channel", Tab.CHANNEL, live, 1600, 720, tuned)
 
     @Test @Config(qualifiers = SMALL)
-    fun smallPicture() = shoot("small_picture", 3, live, 1600, 720, tuned)
+    fun smallPicture() = shoot("small_picture", Tab.PICTURE, live, 1600, 720, tuned)
 
     /** A short screen and a long status: the line of the status along the top, the tabs and the preview all fit. */
     @Test @Config(qualifiers = SMALL)
-    fun smallNoAdapter() = shoot("small_noadapter", 0, MenuState(
+    fun smallNoAdapter() = shoot("small_noadapter", Tab.CHANNEL, MenuState(
         tone = Tone.IDLE, headline = "No adapter", detail = "Plug the Wi-Fi adapter into the phone's USB port."), 1600, 720)
 
     @Test @Config(qualifiers = SMALL)
-    fun smallError() = shoot("small_error", 2, MenuState(
+    fun smallError() = shoot("small_error", Tab.VIEW, MenuState(
         tone = Tone.WARN, headline = "Trying again",
         detail = "The radio stopped: no samples for 4 seconds. If this goes on, unplug the adapter and plug it in again.",
         action = "Try now"), 1600, 720)
 
     /** Narrower still: the same screen with a camera cutout taking 68 dp of its width. */
     @Test @Config(qualifiers = "w732dp-h360dp-land-xhdpi")
-    fun narrowView() = shoot("narrow_view", 2, MenuState(
+    fun narrowView() = shoot("narrow_view", Tab.VIEW, MenuState(
         tone = Tone.IDLE, headline = "No adapter", detail = "Plug the Wi-Fi adapter into the phone's USB port."), 1464, 720,
         { goggles = true })
 
     // ---------------------------------------------------------------- tablet, 2560 x 1600 at 320 dpi
     @Test @Config(qualifiers = TABLET)
-    fun tabletChannel() = shoot("tablet_channel", 0, live, 2560, 1600, tuned)
+    fun tabletChannel() = shoot("tablet_channel", Tab.CHANNEL, live, 2560, 1600, tuned)
 
     companion object {
         const val PHONE = "w914dp-h411dp-land-420dpi"

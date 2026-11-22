@@ -97,7 +97,7 @@ abstract class MenuScenarioSteps : AppHarness() {
     protected fun pointer1(action: Int) = action or (1 shl MotionEvent.ACTION_POINTER_INDEX_SHIFT)
 
     protected fun viewTab() {
-        menu.showTab(2, animate = false)   // View
+        menu.showTab(Tab.VIEW, animate = false)
         looper.idle()
         layOut()
     }

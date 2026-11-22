@@ -99,7 +99,8 @@ On screen: the OSD pill (channel, frequency, SNR, decode → screen latency) can
   (`BandMap`). No hardware.
 - `native/radio/` — the adapter (wifi-sdr `Receiver`) + a DSP thread: scan, watch, sweep, stream test; antenna
   combining (`combine.cpp`); when 40 MS/s gives way to 20 (`fallback_policy.cpp`); torn frames kept off the
-  screen (`frame_gate.cpp`).
+  screen (`frame_gate.cpp`); the retunes of a scan or sweep and each one's capture (`steps.cpp`); the sweep's
+  passes and the band picture as the app reads it (`sweep.cpp`).
 - `native/tests/` — unit tests of the radio's rules, the decoder's sync and the Spectrum tab's band picture, no
   hardware (`ctest`; `scripts/build-desktop.sh` runs them).
 - `native/render/` — the picture on screen (OpenGL ES 3): layout, side-by-side view, the menu's preview,

@@ -23,6 +23,8 @@
 #include "fallback_policy.h"
 #include "frame_gate.h"
 #include "spectrum.h"
+#include "steps.h"
+#include "sweep.h"
 #include "video.h"
 
 namespace wsdr {
@@ -63,8 +65,8 @@ public:
   void scan(double prefer_hz = 0);
   void watch(double hz);
   void stream_test(int rate_sel, double seconds);
-  // Sweep lo..hi at 40 MS/s until the next mode call: a retune every 30 MHz, each step's spectrum into the band
-  // picture (spectrum_json). One pass over 300 MHz is 11 or 12 retunes. Scans add their steps to the picture too.
+  // Sweep lo..hi at 40 MS/s until the next mode call (sweep.h: a retune every 30 MHz), each step's spectrum into the
+  // band picture (spectrum_json). One pass over 300 MHz is 11 or 12 retunes. Scans add their steps to it too.
   void sweep(double lo_hz, double hi_hz);
   void idle();
   // The three setters below only take effect at the next watch() (the next tune). Each returns true when it
@@ -144,7 +146,10 @@ private:
   void end_recording();
   void combine_antennas(const Bank &b, bool gap, int64_t t_ms);
   void demod_for_decoder(bool gap);
-  bool capture_step(const Bank &b, double req);
+  // the steps of a scan or a sweep (_steps), each a retune
+  void start_steps(std::vector<double> plan);
+  bool next_step();
+  bool capture_step(const Bank &b);
   void handle_scan(Bank &b);
   void handle_sweep(Bank &b);
   void handle_test(Bank &b);
@@ -177,9 +182,8 @@ private:
   uint64_t _rec_left = 0, _rec_samples = 0;
   double _rec_fs = 0, _rec_centre = 0, _rec_shift = 0;
   std::vector<Pilot> _pilots;
-  BandMap _band;                      // what scans and sweeps have seen, 5300..6000 MHz
-  double _sweep_lo = 0, _sweep_hi = 0;
-  uint64_t _sweeps = 0;               // passes of the current sweep finished
+  BandMap _band;  // what scans and sweeps have seen (Sweep::kBandLo..kBandHi)
+  Sweep _sweep;   // the span and the passes of the sweep asked for last
   bool _superspeed = false, _open = false;
   std::string _chip;
 
@@ -223,24 +227,14 @@ private:
   Combiner _combiner;
   int64_t _comb_t0_ms = 0;
   ComboStatus _comb_status;  // under _m
-  // scan
-  std::vector<double> _plan;
-  size_t _at = 0;  // the step the scan is on
-  // The scan's progress as status_json() shows it (_step: _at, _plan_n: _plan.size()). Atomic: read there while
-  // the DSP thread moves it on, and set back to the start by scan() for the status to show until that thread
-  // takes the new scan up.
+  // scan, and sweep
+  Steps _steps;  // the retunes of the scan or of the sweep's pass, and the capture of the one under way
+  // The scan's progress as status_json() shows it (steps done, of how many). Atomic: read there while the DSP
+  // thread moves it on, and set back to the start by scan() for the status to show until that thread takes the
+  // new scan up.
   std::atomic<size_t> _step{0}, _plan_n{0};
-  int _settle = 0;
-  uint64_t _cap_last_seq = 0;
-  uint32_t _cap_gen = 0;
-  int _cap_restarts = 0;  // of this step's capture, after a gap
-  std::vector<std::complex<int16_t>> _cap;
-  size_t _cap_need = 0;
-  double _cap_centre = 0;    // hardware centre of the capture (humps are measured from it)
   std::vector<Hump> _humps;  // this step's candidates (from the first kPsdSpan of the capture)
   double _resume_hz = 0;
-  // sweep (the plan, the step and the capture are the scan's)
-  int _sweep_grid = 0;  // which of the two grids, half a step apart, this pass is on
   // test
   uint64_t _test_banks = 0, _test_gaps = 0, _test_last_seq = 0, _test_runs = 0;
   uint32_t _test_gen = 0;
