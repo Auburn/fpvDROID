@@ -4,8 +4,9 @@
 // RxSettings::centre is honoured like the chip does (the hardware centre moves beside the pilot, shift_hz = freq -
 // centre, and the recording moves with the centre). Path B is a second antenna for the combiner as the 8812BU
 // delivers one: the same signal turned by 90 degrees at half amplitude, with noise of its own, and ahead of
-// path A by the adapter's 146 ns (6 samples at 40 MS/s, 3 at 20 MS/s: wifi-sdr FINDINGS.md, "8822B dual-path
-// tap"). A combiner that adds the two as they come loses the colour on it.
+// path A by wifi-sdr's 146 ns (6 samples at 40 MS/s, 3 at 20 MS/s: FINDINGS.md, "8822B dual-path tap"; a
+// 0bda:b812 on video measured 0 and -1 instead, combine.h), so the combiner has an offset to find. A combiner
+// that adds the two as they come loses the colour on it.
 // KP_SIM_DROP_EVERY=N loses every Nth bank the way the adapter's stream drops one it collected too late: not
 // delivered, counted in RxStatus::mid_drops, and BankMeta::seq steps over it.
 // KP_SIM_RESTART_EVERY_MS=N ends each run of the stream after N ms the way a fault does: counted in

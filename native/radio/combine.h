@@ -5,13 +5,16 @@
 // Two-antenna video: path A and path B of the 8812BU combined into one stream before FM demodulation
 // (maximal-ratio combining).
 //
-// One chip and one clock, but the two paths do not come out of it in step: path B leads path A by a fixed time
-// (~146 ns on the 8812BU, 6 samples at 40 MS/s: wifi-sdr FINDINGS.md, "8822B dual-path tap"). A time offset is a
-// phase that grows with frequency, which the one phase per block below cannot undo: added as they come, the paths
-// cancel 3.4 MHz either side of the carrier, where the colour is. So the leading path is delayed by a whole
-// number of samples first. That number is measured from the paths' own correlation at each lag (once at the
-// start, then again every half second), and used when one lag stands out clearly; until then, and whenever the
-// second antenna has no signal to measure on, it is the documented figure for the sample rate.
+// One chip and one clock, but the two paths need not come out of it in step: wifi-sdr FINDINGS.md ("8822B
+// dual-path tap") has path B leading path A by ~146 ns (6 samples at 40 MS/s), from Wi-Fi frames. A time offset
+// is a phase that grows with frequency, which the one phase per block below cannot undo: added as they come, the
+// paths would cancel 3.4 MHz either side of the carrier, where the colour is. So the leading path is delayed by a
+// whole number of samples first. That number is measured from the paths' own correlation at each lag (once at
+// the start, then again every half second), and used when one lag stands out clearly. Until then, and whenever
+// nothing stands out, the paths are taken as they come (no delay): on a Realtek 0bda:b812 adapter on video (in
+// Play RX) the measurement found 0 samples at 40 MS/s and -1 at 20 MS/s, not 6 and 3, so the figure above is no
+// safe guess. Starting from it there, the coherence of the paths fell from 0.97 to 0.75 at 40 MS/s, and a picture
+// with little in it (a flat grey screen with an OSD) may never let a lag stand out.
 //
 // Then, every block of kBlock samples: each path's signal and noise power (the M2M4 estimator: the FM carrier has
 // a constant envelope, so  S = sqrt(2 M2^2 - M4),  N = M2 - S), and the phase of B relative to A (from their
@@ -32,8 +35,7 @@ public:
   static constexpr size_t kBlock = 1024;
   static constexpr int kMaxLag = 12;  // the largest time offset between the paths looked for, in samples
 
-  // fs: the stream's sample rate (the time offset between the paths is the documented one for it until it has
-  // been measured).
+  // fs: the stream's sample rate (the paths are combined without a time offset until one has been measured).
   explicit Combiner(double fs = 40e6);
   // Start afresh: a new carrier, another sample rate, or combining switched on.
   void reset(double fs) { *this = Combiner(fs); }
@@ -52,7 +54,7 @@ public:
     float rescued = 0;      // ... of which the combined stream was back above it
     float coherence = 0;    // |correlation| of A and B (1 = the same signal, 0 = no relation)
     int lag = 0;            // samples path B leads path A by, as now compensated (B delayed; negative: A is)
-    bool lag_measured = false;  // true: measured on this signal; false: the documented figure for the rate
+    bool lag_measured = false;  // true: measured on this signal; false: none measured yet (lag is 0)
   };
   // averages since the last call (call ~1/s)
   Stats take_stats();

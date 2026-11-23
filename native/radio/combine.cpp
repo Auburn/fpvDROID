@@ -11,9 +11,7 @@
 namespace kp {
 
 namespace {
-// Path B of the 8812BU leads path A by this (wifi-sdr FINDINGS.md, "8822B dual-path tap": 146 ns, from Wi-Fi
-// frames received on both paths at 40 MS/s). At 20 MS/s the same time is assumed; nobody has measured it there.
-constexpr double kLeadB = 146e-9;
+// The time offset between the paths starts at none: see combine.h for why not wifi-sdr's 146 ns.
 // Measuring the offset: kSlices stretches of kSlice samples, one from the start of each process() (a bank from
 // the radio: 13 ms in all at 40 MS/s, 26 ms at 20 MS/s, so most of a video field or more and every part of the
 // picture gets a say), again every kLagEvery s.
@@ -39,8 +37,7 @@ float sum(const float *s) {
 }
 }  // namespace
 
-Combiner::Combiner(double fs)
-    : _fs(fs), _lag(std::clamp(static_cast<int>(std::lround(kLeadB * fs)), 1 - kMaxLag, kMaxLag - 1)) {}
+Combiner::Combiner(double fs) : _fs(fs), _lag(0) {}
 
 void Combiner::cut() { _cut = true; }
 
@@ -81,7 +78,7 @@ void Combiner::process(cf *a, const cf *b, size_t n) {
     for (size_t at = m0; at < n; at += kBlock) block(a + at, b + at - lag, std::min(n - at, kBlock));
   } else {
     if (_lag < 0) {
-      // A is early (not what the 8812BU does, but what a measurement may say): delay A itself, in place
+      // A is early (measured at 20 MS/s on a 0bda:b812 adapter: -1): delay A itself, in place
       const size_t lag = -_lag, old = std::min(lag, n);
       std::memmove(static_cast<void *>(a + old), a, (n - old) * sizeof(cf));
       std::copy(_tail_a + kMaxLag - lag, _tail_a + kMaxLag - lag + old, a);
