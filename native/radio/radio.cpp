@@ -607,7 +607,7 @@ void Radio::combine_antennas(const Bank &b, bool gap, int64_t t_ms) {
   }
   if (news)
     KP_LOGI("radio: antenna B taken as %d samples (%.0f ns) ahead of A, %s", cs.s.lag, cs.s.lag / b.fs * 1e9,
-            cs.s.lag_measured ? "measured" : "the adapter's usual figure");
+            cs.s.lag_measured ? "measured" : "none until measured");
 }
 
 // _iq through the discriminator (this thread's half of the work), then on to the decode thread. gap: the frames

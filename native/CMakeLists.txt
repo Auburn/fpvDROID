@@ -92,8 +92,8 @@ endif()
 if(NOT ANDROID)
   enable_testing()
   # the radio's rules that need no adapter: the sources themselves, so this builds with KEPYUR_RADIO off too
-  add_executable(kp_radio_tests tests/radio_tests.cpp radio/decode_queue.cpp radio/fallback_policy.cpp
-                 radio/frame_gate.cpp radio/steps.cpp)
+  add_executable(kp_radio_tests tests/radio_tests.cpp radio/combine.cpp radio/decode_queue.cpp
+                 radio/fallback_policy.cpp radio/frame_gate.cpp radio/steps.cpp)
   target_include_directories(kp_radio_tests PRIVATE radio tests)
   target_link_libraries(kp_radio_tests PRIVATE kepyur_dsp Threads::Threads)
   target_compile_options(kp_radio_tests PRIVATE -O2 -Wall -Wextra)
