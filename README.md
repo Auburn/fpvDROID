@@ -79,10 +79,10 @@ change can be judged as it is made.
 
 ## Web version
 
-**https://auburn.github.io/fpvDROID/** — the same receiver in Chrome or Edge on a computer (Windows, macOS,
-Linux): plug the adapter in, click Connect, fly with the monitor as the video receiver. It is the app's own decoder
-compiled to WebAssembly, talking to the adapter over WebUSB, and it watches at 20 MS/s (what WebUSB can carry).
-Rebuilt by CI (`.github/workflows/pages.yml`) on every push to `main`. Firefox and Safari have no WebUSB.
+The same receiver in Chrome or Edge on a computer (Windows, macOS, Linux): plug the adapter in, click Connect,
+fly with the monitor as the video receiver. It is the app's own decoder compiled to WebAssembly, talking to the
+adapter over WebUSB, and it watches at 20 MS/s (what WebUSB can carry). It is not hosted anywhere: build it with
+`scripts/build-web.sh` and serve it with `node web/serve.mjs` ([Build](#build)). Firefox and Safari have no WebUSB.
 
 - **Windows:** swap the adapter's driver for WinUSB once with [Zadig](https://zadig.akeo.ie/) (Options → List All
   Devices → the adapter, e.g. "802.11ac NIC" with USB ID 2357 0115 → WinUSB → Replace Driver). The page has the same steps under
