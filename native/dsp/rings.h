@@ -1,4 +1,4 @@
-// kepyur decoder: what the picture filters make of the discriminator output, kept for the last kSize samples.
+// fpvDROID decoder: what the picture filters make of the discriminator output, kept for the last kSize samples.
 // The decoder draws each line about a line after it arrives (and combs it with the lines either side), so
 // everything that reads a line reads it from here, by absolute sample index: ring[i & mask].
 #pragma once

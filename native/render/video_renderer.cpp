@@ -1,4 +1,4 @@
-// kepyur video renderer. See video_renderer.h.
+// fpvDROID video renderer. See video_renderer.h.
 #include "video_renderer.h"
 
 #include <GLES3/gl3.h>

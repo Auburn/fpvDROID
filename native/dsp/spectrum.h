@@ -1,4 +1,4 @@
-// kepyur: power spectrum and analog-video signal finding (the scanner's DSP half).
+// fpvDROID: power spectrum and analog-video signal finding (the scanner's DSP half).
 #pragma once
 #include <complex>
 #include <cstddef>

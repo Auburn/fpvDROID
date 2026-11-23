@@ -1,4 +1,4 @@
-// kepyur radio: demodulated blocks on their way from the DSP thread to the decode thread.
+// fpvDROID radio: demodulated blocks on their way from the DSP thread to the decode thread.
 #pragma once
 #include <atomic>
 #include <condition_variable>

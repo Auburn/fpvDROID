@@ -1,4 +1,4 @@
-// kepyur radio: torn frames are not shown.
+// fpvDROID radio: torn frames are not shown.
 #pragma once
 #include <atomic>
 #include <cstdint>

@@ -1,4 +1,4 @@
-package com.kepyur.app
+package com.fpvdroid.app
 
 import android.animation.ValueAnimator
 import android.annotation.SuppressLint

@@ -1,4 +1,4 @@
-// kepyur decoder: one line of video into a row of pixels. See line_draw.h.
+// fpvDROID decoder: one line of video into a row of pixels. See line_draw.h.
 #include "line_draw.h"
 
 #include <algorithm>

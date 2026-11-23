@@ -1,4 +1,4 @@
-package com.kepyur.app
+package com.fpvdroid.app
 
 import android.view.Surface
 
@@ -76,9 +76,9 @@ interface Engine {
     }
 }
 
-/** The native radio and screen (native/jni/kepyur_jni.cpp). */
+/** The native radio and screen (native/jni/fpvdroid_jni.cpp). */
 object Native : Engine {
-    init { System.loadLibrary("kepyur") }
+    init { System.loadLibrary("fpvdroid") }
 
     external override fun init(logPath: String)
     external override fun usb3Switch(fd: Int): String

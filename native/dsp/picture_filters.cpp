@@ -1,4 +1,4 @@
-// kepyur decoder: the luma and colour paths. See picture_filters.h.
+// fpvDROID decoder: the luma and colour paths. See picture_filters.h.
 #include "picture_filters.h"
 
 #include <algorithm>

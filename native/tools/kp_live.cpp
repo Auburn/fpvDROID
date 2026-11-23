@@ -1,4 +1,4 @@
-// kp_live: kepyur's radio (scan / watch / stream test) on the desktop with the adapter plugged in.
+// kp_live: fpvDROID's radio (scan / watch / stream test) on the desktop with the adapter plugged in.
 //   kp_live --scan [--frames]               scan, then watch the strongest pilot
 //   kp_live --watch 5769 [--frames]         watch one frequency (MHz)
 //   kp_live --test 1 60                     stream test: rate_sel (1 = 40 MS/s, 2 = 20 MS/s), seconds

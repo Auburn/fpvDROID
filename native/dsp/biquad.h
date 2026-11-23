@@ -1,4 +1,4 @@
-// kepyur decoder: second-order filter sections (RBJ designs), one at a time (Biquad) and several side by side in
+// fpvDROID decoder: second-order filter sections (RBJ designs), one at a time (Biquad) and several side by side in
 // the lanes of a vector (BiquadN).
 #pragma once
 #include <cmath>

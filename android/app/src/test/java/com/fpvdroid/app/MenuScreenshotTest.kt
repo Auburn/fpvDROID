@@ -1,4 +1,4 @@
-package com.kepyur.app
+package com.fpvdroid.app
 
 import android.app.Activity
 import android.content.Context
@@ -25,7 +25,7 @@ import java.io.File
  * The menu is laid over black, as the screen behind it is, with a stand-in for the picture where the preview is
  * (on the phone the native screen draws the real one there, through the hole the preview clears in the window).
  *
- *   gradle testDebugUnitTest --tests com.kepyur.app.MenuScreenshotTest -Pshots=/some/dir
+ *   gradle testDebugUnitTest --tests com.fpvdroid.app.MenuScreenshotTest -Pshots=/some/dir
  *
  * Without -Pshots the PNGs go to app/build/menu-shots.
  */
@@ -34,7 +34,7 @@ import java.io.File
 @Config(sdk = [35])
 class MenuScreenshotTest {
     private val outDir: File by lazy {
-        File(System.getProperty("kepyur.shots") ?: "build/menu-shots").also { it.mkdirs() }
+        File(System.getProperty("fpvdroid.shots") ?: "build/menu-shots").also { it.mkdirs() }
     }
 
     /** Hears where the preview is, and whether a slider has the picture full size, and nothing else. */

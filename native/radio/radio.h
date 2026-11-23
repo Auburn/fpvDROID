@@ -1,4 +1,4 @@
-// kepyur radio: one RTL8812BU (wifi-sdr Receiver) + a DSP thread. Modes:
+// fpvDROID radio: one RTL8812BU (wifi-sdr Receiver) + a DSP thread. Modes:
 //   scan   - sweep the analog FPV bands at 40 MS/s, list pilots (humps that pass a sync check)
 //   watch  - tune to one pilot and decode its video (frames to the FrameSink)
 //   test   - stream at a given rate and only count banks (USB/controller soak, no DSP)

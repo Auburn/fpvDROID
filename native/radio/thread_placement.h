@@ -1,4 +1,4 @@
-// kepyur radio: how keenly, and on which cores, the OS runs the radio's own threads.
+// fpvDROID radio: how keenly, and on which cores, the OS runs the radio's own threads.
 #pragma once
 
 namespace kp {

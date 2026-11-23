@@ -1,4 +1,4 @@
-// kepyur decoder: sparkle repair (PictureOpts::repair). The white / black sparkles of a weak signal are FM "clicks": the
+// fpvDROID decoder: sparkle repair (PictureOpts::repair). The white / black sparkles of a weak signal are FM "clicks": the
 // carrier's envelope collapses for a moment and its phase slips a turn. The front end marks those instants
 // (ClickDetector); the decoder, which draws each line about a line after it arrives, patches the picture over
 // each mark and redraws a badly hit row from the rows above and below it (SparkleRepair). From Play RX.

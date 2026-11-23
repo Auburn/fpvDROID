@@ -1,4 +1,4 @@
-package com.kepyur.app
+package com.fpvdroid.app
 
 import android.annotation.SuppressLint
 import android.app.Activity
@@ -21,21 +21,21 @@ import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
-import com.kepyur.app.RadioStatus.Mode
+import com.fpvdroid.app.RadioStatus.Mode
 import java.io.File
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /**
- * kepyur: one screen. The picture fills it; the menu ([MenuView]) lies over a black screen with the picture moved
+ * fpvDROID: one screen. The picture fills it; the menu ([MenuView]) lies over a black screen with the picture moved
  * into its preview (tapping that closes the menu), and is open when the app starts. With the menu closed there is
  * nothing on screen but the picture: a tap brings up a MENU button for three seconds. Where there is no picture,
  * full size or small, the screen shows colour bars naming the chosen channel (NO SIGNAL before there is one).
  *
- * USB stream test (for the first hardware check):  adb shell am start -n com.kepyur.app/.MainActivity --es mode usbtest
+ * USB stream test (for the first hardware check):  adb shell am start -n com.fpvdroid.app/.MainActivity --es mode usbtest
  */
 /**
- * Where the log and the recordings go: the app's folder on shared storage (Android/data/com.kepyur.app/files,
+ * Where the log and the recordings go: the app's folder on shared storage (Android/data/com.fpvdroid.app/files,
  * readable over USB without root), or its private folder when shared storage is not there. Android answers null
  * then, which happens: for the first seconds after a boot, and whenever the volume is not mounted.
  */
@@ -92,7 +92,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         settings = Settings(this)
-        engine.init(dataDir().absolutePath + "/kepyur.log")
+        engine.init(dataDir().absolutePath + "/fpvdroid.log")
         engine.log("start, ${Build.MANUFACTURER} ${Build.MODEL} Android ${Build.VERSION.RELEASE}")
         applyPicture()
         applySignal()
@@ -112,7 +112,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     }
 
     /**
-     * adb shell am start -n com.kepyur.app/.MainActivity [--es mode usbtest] [--ef gain 30] [--ef record 3] [--ez testcard true]
+     * adb shell am start -n com.fpvdroid.app/.MainActivity [--es mode usbtest] [--ef gain 30] [--ef record 3] [--ez testcard true]
      * USB debugging: [--es env WSDR_URB_DEPTH=64,OTHER=1] (wifi-sdr / devourer switches, in place from the next
      * open; KEY= removes one), [--ez soak true] (a 40 MS/s stream test after every open instead of watching: how long
      * the link holds up, open after open).
@@ -450,8 +450,8 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
 
     private fun linkHeadline(): MenuState = when (link.state) {
         UsbLink.State.NO_ADAPTER -> MenuState(Tone.IDLE, "No adapter", "Plug the Wi-Fi adapter into the phone's USB port.")
-        UsbLink.State.PERMISSION -> MenuState(Tone.BUSY, "Allow USB access", "Android is asking whether Kepyur may use the adapter.")
-        UsbLink.State.DENIED -> MenuState(Tone.WARN, "Permission needed", "Kepyur cannot use the adapter without it.", "Ask again")
+        UsbLink.State.PERMISSION -> MenuState(Tone.BUSY, "Allow USB access", "Android is asking whether fpvDROID may use the adapter.")
+        UsbLink.State.DENIED -> MenuState(Tone.WARN, "Permission needed", "fpvDROID cannot use the adapter without it.", "Ask again")
         UsbLink.State.SWITCHING -> MenuState(Tone.BUSY, "Switching to USB 3", "The adapter restarts itself. This takes a few seconds.")
         UsbLink.State.OPENING, UsbLink.State.REOPENING ->
             MenuState(Tone.BUSY, "Starting the radio", link.message.ifEmpty { "About five seconds." })

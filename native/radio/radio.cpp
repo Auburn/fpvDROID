@@ -683,7 +683,7 @@ void Radio::end_recording() {
   const std::string base = _rec_prefix.substr(_rec_prefix.find_last_of("/\\") + 1);
   if (FILE *j = std::fopen((_rec_prefix + ".json").c_str(), "w")) {
     std::fprintf(j, "{\"format\":\"cs16\",\"sample_rate\":%.0f,\"centre_hz\":%.0f,\"shift_hz\":%.0f,\"samples\":%llu,"
-                 "\"source\":\"kepyur watch\"", _rec_fs, _rec_centre, _rec_shift, (unsigned long long)_rec_samples);
+                 "\"source\":\"fpvDROID watch\"", _rec_fs, _rec_centre, _rec_shift, (unsigned long long)_rec_samples);
     if (with_b) std::fprintf(j, ",\"path_b\":\"%s_b.cs16\"", base.c_str());  // beside it, as Play RX writes it
     std::fprintf(j, "}\n");
     std::fclose(j);

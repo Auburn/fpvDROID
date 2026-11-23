@@ -12,5 +12,5 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "kepyur"
+rootProject.name = "fpvdroid"
 include(":app")

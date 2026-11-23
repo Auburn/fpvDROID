@@ -1,4 +1,4 @@
-// kepyur: the app's screen on Android (the Kotlin app's Surface; kepyur_jni.cpp hands it frames and settings).
+// fpvDROID: the app's screen on Android (the Kotlin app's Surface; fpvdroid_jni.cpp hands it frames and settings).
 // Frames go straight to the video Surface: a render thread owns an EGL context on it and draws each frame as
 // it arrives (latest frame wins; the decode thread never waits for the display).
 #pragma once

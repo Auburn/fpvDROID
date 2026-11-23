@@ -1,4 +1,4 @@
-// kepyur: what the screen shows where there is no picture (no adapter, a scan, a channel with nothing on it, a
+// fpvDROID: what the screen shows where there is no picture (no adapter, a scan, a channel with nothing on it, a
 // picture that has stopped): colour bars, with the chosen channel ("R8") in a black box in the middle, or NO
 // SIGNAL when no channel has been chosen.
 #pragma once

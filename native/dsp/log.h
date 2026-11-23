@@ -1,4 +1,4 @@
-// kepyur: tiny logging shim. Android: logcat (tag "kepyur") + the app's log file sink; desktop: stderr.
+// fpvDROID: tiny logging shim. Android: logcat (tag "fpvdroid") + the app's log file sink; desktop: stderr.
 #pragma once
 #include <cstdarg>
 

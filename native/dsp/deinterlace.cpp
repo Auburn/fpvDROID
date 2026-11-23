@@ -1,4 +1,4 @@
-// kepyur decoder: fields into frames. See deinterlace.h.
+// fpvDROID decoder: fields into frames. See deinterlace.h.
 #include "deinterlace.h"
 
 #include <algorithm>

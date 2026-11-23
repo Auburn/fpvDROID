@@ -4,20 +4,20 @@ plugins {
 }
 
 // shell.nix provides the NDK and the mipsel binutils wifi-sdr needs to assemble the chip's streamer
-val ndkVer: String = System.getenv("KEPYUR_NDK_VERSION") ?: "28.2.13676358"
-val mipsPrefix: String = System.getenv("KEPYUR_MIPS_PREFIX") ?: "mipsel-linux-gnu-"
+val ndkVer: String = System.getenv("FPVDROID_NDK_VERSION") ?: "28.2.13676358"
+val mipsPrefix: String = System.getenv("FPVDROID_MIPS_PREFIX") ?: "mipsel-linux-gnu-"
 
 // the Android framework jar MenuScreenshotTest runs on (see testOptions)
 val robolectricSdk: Configuration by configurations.creating
 
 android {
-    namespace = "com.kepyur.app"
+    namespace = "com.fpvdroid.app"
     compileSdk = 35
     buildToolsVersion = "35.0.1"
     ndkVersion = ndkVer
 
     defaultConfig {
-        applicationId = "com.kepyur.app"
+        applicationId = "com.fpvdroid.app"
         minSdk = 29
         targetSdk = 35
         versionCode = 1
@@ -34,7 +34,7 @@ android {
                     "-DMIPS_OBJCOPY=${mipsPrefix}objcopy",
                     "-DDEVOURER_LOG_MAX_LEVEL=INFO",
                 )
-                targets += listOf("kepyur")
+                targets += listOf("fpvdroid")
             }
         }
     }
@@ -66,7 +66,7 @@ android {
                 // MenuScreenshotTest writes its PNGs here (gradle testDebugUnitTest -Pshots=/some/dir). Gradle does
                 // not know of them as an output, so with -Pshots the tests run even when nothing has changed.
                 (findProperty("shots") as String?)?.let {
-                    test.systemProperty("kepyur.shots", it)
+                    test.systemProperty("fpvdroid.shots", it)
                     test.outputs.upToDateWhen { false }
                 }
                 // Robolectric's own downloader gets HTTP 429 from Maven Central's mirror here: let Gradle fetch the

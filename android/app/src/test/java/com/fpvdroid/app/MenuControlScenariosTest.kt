@@ -1,4 +1,4 @@
-package com.kepyur.app
+package com.fpvdroid.app
 
 import android.os.SystemClock
 import android.view.MotionEvent
