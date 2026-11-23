@@ -139,7 +139,7 @@ index f107565..e5344db 100644
  
  class Receiver {
 diff --git a/src/session.cpp b/src/session.cpp
-index c876980..e3ec784 100644
+index c876980..4734690 100644
 --- a/src/session.cpp
 +++ b/src/session.cpp
 @@ -2,6 +2,8 @@
@@ -195,9 +195,9 @@ index c876980..e3ec784 100644
 +  // per write, which costs ~1-2 ms apiece under WinUSB. Measured on an 8812BU (Windows 11, USB 3): bring-up
 +  // 47 s -> 11 s, same IQK result, same noise floor, same video lock (60 fps, 0.96). 1 = BB + AGC tables,
 +  // 3 = also the RF tables; devourer re-applies the tables directly if the offload fails. On by default on
-+  // Windows only (Linux / macOS bring up in ~3-5 s and are untested with it). WSDR_FW_TABLE_OFLD overrides
-+  // (0 = off).
-+#ifdef _WIN32
++  // Windows, and on Android on kepyur's fw-offload-android-test branch to measure it there (Linux / macOS bring
++  // up in ~3-5 s and are untested with it). WSDR_FW_TABLE_OFLD overrides (0 = off).
++#if defined(_WIN32) || defined(__ANDROID__)
 +  cfg.tuning.fw_table_offload = 3;
 +#endif
 +  if (const char *e = std::getenv("WSDR_FW_TABLE_OFLD")) cfg.tuning.fw_table_offload = std::atoi(e);

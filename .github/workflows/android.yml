@@ -1,17 +1,18 @@
-# Build the debug APK on every push to main and publish it as the rolling "main" pre-release
-# (tag main-latest, replaced each time). No versioned releases yet.
+# TEST BRANCH ONLY (claude/fw-offload-android-test, not for merging): build the debug APK on every push to this
+# branch and publish it as its own pre-release (tag fw-offload-test, replaced each time), so main's rolling
+# "main-latest" release is left alone.
 name: android
 
 on:
   push:
-    branches: [main]
+    branches: [claude/fw-offload-android-test]
   workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: main-apk
+  group: fw-offload-test-apk
   cancel-in-progress: true
 
 jobs:
@@ -44,19 +45,23 @@ jobs:
       - name: Build
         run: nix-shell --run scripts/build-android.sh
 
-      - name: Publish the main release
+      - name: Publish the test release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cp android/app/build/outputs/apk/debug/app-debug.apk kepyur-main.apk
+          cp android/app/build/outputs/apk/debug/app-debug.apk kepyur-fw-offload-test.apk
           short=$(git rev-parse --short HEAD)
           {
-            echo "Debug APK built from \`main\` at ${short}:"
+            echo "TEST build, not a release: firmware table offload on by default on Android."
+            echo "Debug APK built from \`claude/fw-offload-android-test\` at ${short}:"
             echo
             git log -1 --format='%s'
             echo
-            echo "Rolling build, replaced on every push to main. Install: \`adb install -r kepyur-main.apk\`."
+            echo "Install: \`adb install -r kepyur-fw-offload-test.apk\` (uninstall first if the signatures differ)."
+            echo "The log line \"radio: RTL8822B, USB 3, ... up in N s\" gives each bring-up; devourer says"
+            echo "\"PHY tables applied via fw offload\" (or that it failed and re-applied them directly)."
+            echo "Off again without reinstalling: \`adb shell am start -n com.kepyur.app/.MainActivity --es env WSDR_FW_TABLE_OFLD=0\`, then replug."
           } > notes.md
-          gh release delete main-latest --yes --cleanup-tag || true
-          gh release create main-latest kepyur-main.apk --prerelease --target "$GITHUB_SHA" \
-            --title "main (${short})" --notes-file notes.md
+          gh release delete fw-offload-test --yes --cleanup-tag || true
+          gh release create fw-offload-test kepyur-fw-offload-test.apk --prerelease --target "$GITHUB_SHA" \
+            --title "fw offload test (${short})" --notes-file notes.md

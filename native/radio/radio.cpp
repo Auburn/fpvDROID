@@ -78,10 +78,12 @@ void Radio::open(int fd) {
   s.wide = true;
   s.agc = true;
   KP_LOGI("radio: opening adapter (%s)", fd >= 0 ? "Android fd" : "bus scan");
+  const auto t_open = std::chrono::steady_clock::now();
   rx->open(wsdr::kPid8812bu, s, -1, {}, fd);
+  const double up_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_open).count();
   const auto caps = rx->caps();
-  KP_LOGI("radio: %s, USB %s, fastest continuous rate %.1f MS/s", caps.chip.c_str(), caps.superspeed ? "3" : "2",
-          wsdr::Receiver::rate_of(caps.min_rate_sel) / 1e6);
+  KP_LOGI("radio: %s, USB %s, fastest continuous rate %.1f MS/s, up in %.2f s", caps.chip.c_str(),
+          caps.superspeed ? "3" : "2", wsdr::Receiver::rate_of(caps.min_rate_sel) / 1e6, up_s);
   if (!caps.superspeed) {
     // 40 MS/s does not stream on USB 2; open at a rate it can, so the stream still comes up for diagnostics
     s.rate_sel = caps.min_rate_sel;
