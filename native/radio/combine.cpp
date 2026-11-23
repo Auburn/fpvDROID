@@ -11,7 +11,8 @@
 namespace kp {
 
 namespace {
-// The time offset between the paths starts at none: see combine.h for why not wifi-sdr's 146 ns.
+// The time offset between the paths starts at the one last measured at the same sample rate, else at none: see
+// combine.h for why not wifi-sdr's 146 ns.
 // Measuring the offset: kSlices stretches of kSlice samples, one from the start of each process() (a bank from
 // the radio: 13 ms in all at 40 MS/s, 26 ms at 20 MS/s, so most of a video field or more and every part of the
 // picture gets a say), again every kLagEvery s.
@@ -38,6 +39,31 @@ float sum(const float *s) {
 }  // namespace
 
 Combiner::Combiner(double fs) : _fs(fs), _lag(0) {}
+
+void Combiner::reset(double fs) {
+  KnownLag known[kKnownRates];
+  std::copy(std::begin(_known), std::end(_known), known);
+  *this = Combiner(fs);
+  std::copy(std::begin(known), std::end(known), _known);
+  for (const KnownLag &k : _known)
+    if (k.fs > 0 && std::abs(k.fs - fs) < 1) {
+      _lag = k.lag;
+      _lag_measured = true;
+    }
+}
+
+// The lag in use, as the one measured at this sample rate: in that rate's entry, else in a free one, else in
+// the first (more rates than entries: only if the radio ever streams at more than four).
+void Combiner::remember_lag() {
+  KnownLag *slot = nullptr;
+  for (KnownLag &k : _known)
+    if (k.fs > 0 && std::abs(k.fs - _fs) < 1) slot = &k;
+  for (KnownLag &k : _known)
+    if (!slot && k.fs <= 0) slot = &k;
+  if (!slot) slot = &_known[0];
+  slot->fs = _fs;
+  slot->lag = _lag;
+}
 
 void Combiner::cut() { _cut = true; }
 
@@ -78,7 +104,7 @@ void Combiner::process(cf *a, const cf *b, size_t n) {
     for (size_t at = m0; at < n; at += kBlock) block(a + at, b + at - lag, std::min(n - at, kBlock));
   } else {
     if (_lag < 0) {
-      // A is early (measured at 20 MS/s on a 0bda:b812 adapter: -1): delay A itself, in place
+      // A is early (Play RX once measured -1 at 20 MS/s on a 0bda:b812): delay A itself, in place
       const size_t lag = -_lag, old = std::min(lag, n);
       std::memmove(static_cast<void *>(a + old), a, (n - old) * sizeof(cf));
       std::copy(_tail_a + kMaxLag - lag, _tail_a + kMaxLag - lag + old, a);
@@ -142,10 +168,11 @@ void Combiner::pick_lag() {
   if (!clear) return;  // nothing to go by this time: the offset stays what it was
   int lag = best - kMaxLag;
   // A true offset half way between two samples would have the two take turns: stay with the one in use while it
-  // is next to the best and about as good.
-  if (std::abs(lag - _lag) == 1 && _q[_lag + kMaxLag] > 0.95 * _q[best]) lag = _lag;
+  // is next to the best and about as good. Only with one measured: the 0 a stream starts from is nobody's verdict.
+  if (_lag_measured && std::abs(lag - _lag) == 1 && _q[_lag + kMaxLag] > 0.95 * _q[best]) lag = _lag;
   _lag = lag;
   _lag_measured = true;
+  remember_lag();
 }
 
 void Combiner::block(cf *a, const cf *b, size_t n) {

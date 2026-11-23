@@ -5,16 +5,20 @@
 // Two-antenna video: path A and path B of the 8812BU combined into one stream before FM demodulation
 // (maximal-ratio combining).
 //
-// One chip and one clock, but the two paths need not come out of it in step: wifi-sdr FINDINGS.md ("8822B
-// dual-path tap") has path B leading path A by ~146 ns (6 samples at 40 MS/s), from Wi-Fi frames. A time offset
-// is a phase that grows with frequency, which the one phase per block below cannot undo: added as they come, the
-// paths would cancel 3.4 MHz either side of the carrier, where the colour is. So the leading path is delayed by a
-// whole number of samples first. That number is measured from the paths' own correlation at each lag (once at
-// the start, then again every half second), and used when one lag stands out clearly. Until then, and whenever
-// nothing stands out, the paths are taken as they come (no delay): on a Realtek 0bda:b812 adapter on video (in
-// Play RX) the measurement found 0 samples at 40 MS/s and -1 at 20 MS/s, not 6 and 3, so the figure above is no
-// safe guess. Starting from it there, the coherence of the paths fell from 0.97 to 0.75 at 40 MS/s, and a picture
-// with little in it (a flat grey screen with an OSD) may never let a lag stand out.
+// One chip and one clock, but the two paths need not come out of it in step, and not by the same time on every
+// board. wifi-sdr FINDINGS.md ("8822B dual-path tap") has path B leading path A by ~146 ns (6 samples at 40 MS/s),
+// from Wi-Fi frames on one 8812BU. On Realtek 0bda:b812 adapters receiving video it comes out near none: Play RX
+// measured 0 samples at 40 MS/s and -1 at 20; kepyur on a Pixel 8 Pro, 0 (now and then +1) at 40 MS/s and 0 at
+// 20. A time offset is a phase that grows with frequency, which the one phase per block below cannot undo: added
+// as they come, the paths would cancel 3.4 MHz either side of the carrier, where the colour is. So the leading
+// path is delayed by a whole number of samples first. That number is measured from the paths' own correlation at
+// each lag (once at the start, then again every half second) and taken when one lag stands out clearly; a
+// measurement where none does keeps the lag in use. Before the first measurement at a sample rate the paths are
+// taken as they come (no delay). No figure suits every board, and a wrong one costs: starting from 146 ns on a
+// 0bda:b812, the coherence of the paths fell from 0.97 to 0.75 at 40 MS/s, and a picture with little in it (a flat
+// grey screen with an OSD) may never let a lag stand out. The offset belongs to the adapter, not to the signal, so
+// it is measured once per sample rate and kept: reset() (a new carrier, a fallback to 20 MS/s, combining switched
+// on again) starts from the one last measured at the new rate.
 //
 // Then, every block of kBlock samples: each path's signal and noise power (the M2M4 estimator: the FM carrier has
 // a constant envelope, so  S = sqrt(2 M2^2 - M4),  N = M2 - S), and the phase of B relative to A (from their
@@ -37,8 +41,12 @@ public:
 
   // fs: the stream's sample rate (the paths are combined without a time offset until one has been measured).
   explicit Combiner(double fs = 40e6);
-  // Start afresh: a new carrier, another sample rate, or combining switched on.
-  void reset(double fs) { *this = Combiner(fs); }
+  // Start afresh: a new carrier, another sample rate, or combining switched on. The time offset last measured at
+  // each sample rate is kept, and the stream at fs starts from the one measured at fs (none yet: 0). An adapter's
+  // offset does not change with the carrier, and a picture with little in it may not let it be measured again.
+  // The Radio keeps one Combiner for the process, so this lasts through a reopen of the adapter; another adapter
+  // with another offset has it replaced at its first clear measurement.
+  void reset(double fs);
   // The samples of the next process() do not follow on from the last one's (banks lost in between, or the stream
   // restarted): what was kept of the last ones for the delay is dropped. Everything else stays.
   void cut();
@@ -54,7 +62,9 @@ public:
     float rescued = 0;      // ... of which the combined stream was back above it
     float coherence = 0;    // |correlation| of A and B (1 = the same signal, 0 = no relation)
     int lag = 0;            // samples path B leads path A by, as now compensated (B delayed; negative: A is)
-    bool lag_measured = false;  // true: measured on this signal; false: none measured yet (lag is 0)
+    // true: measured, on this signal or on an earlier one at this sample rate (reset()); false: none measured at
+    // this rate yet (lag is 0)
+    bool lag_measured = false;
   };
   // averages since the last call (call ~1/s)
   Stats take_stats();
@@ -65,6 +75,7 @@ private:
   void block(cf *a, const cf *b, size_t n);
   void measure_lag(const cf *a, const cf *b, size_t n);
   void pick_lag();
+  void remember_lag();
   bool _init = false;
   float _dcar = 0, _dcai = 0, _dcbr = 0, _dcbi = 0;  // each path's DC
   double _m2a = 0, _m4a = 0, _m2b = 0, _m4b = 0;
@@ -82,6 +93,13 @@ private:
   double _qp = 0;              // and (power of A) * (power of B) likewise: the two paths' coherence is _q / _qp
   int _slices = 0;
   int64_t _lag_wait = 0;       // samples until the next measurement starts
+  // the offset last measured at each sample rate, kept across reset() (fs 0: an unused entry)
+  struct KnownLag {
+    double fs = 0;
+    int lag = 0;
+  };
+  static constexpr int kKnownRates = 4;
+  KnownLag _known[kKnownRates] = {};
   // stats
   double _sa = 0, _sb = 0, _sc = 0, _share = 0, _coh = 0;
   size_t _nb = 0, _fade = 0, _resc = 0;
