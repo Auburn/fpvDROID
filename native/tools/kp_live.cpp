@@ -87,7 +87,7 @@ int main(int argc, char **argv) {
       std::fprintf(stderr, "antennas: %s snr A %.1f B %.1f combined %.1f dB, B share %.2f, A faded %.3f "
                    "(rescued %.2f), coherence %.2f, B ahead by %d samples (%s)\n", c.on ? "A+B" : "A", c.s.snr_a_db,
                    c.s.snr_b_db, c.s.snr_c_db, c.s.b_share, c.s.a_fade, c.s.rescued, c.s.coherence, c.s.lag,
-                   c.s.lag_measured ? "measured" : "assumed");
+                   c.s.lag_measured ? "measured" : "none measured yet");
     }
     if (mode == "test" && st.find("\"done\":true") != std::string::npos) break;
     if (mode == "test" && std::chrono::steady_clock::now() - t0 > std::chrono::duration<double>(secs + 30)) break;

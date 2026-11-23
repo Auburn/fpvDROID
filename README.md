@@ -171,6 +171,7 @@ cores, where they fall behind).
 build/desktop/kp_gen rec/r4 --mhz 5769 --label R4 --cnr 12   # a synthetic transmitter: rec/r4.cs16 + .json
 build/desktop/kp_replay rec/r4.cs16 --luma-comb --adaptive --smooth --repair   # the picture switches (--comb: colour comb)
 KP_SIM_FILE=rec/r4.cs16 build/desktop/kp_sim --scan --offset-tune --diversity   # the radio's switches, no hardware
+KP_SIM_FILE=rec/r4.cs16 KP_SIM_LEAD_NS=146 build/desktop/kp_sim --watch 5769 --diversity   # path B 146 ns ahead of A: the combiner measures and undoes it
 KP_SIM_FILE=rec/r4.cs16 build/desktop/kp_sim --sweep 5635 5955   # the Spectrum tab's sweep: its band picture every second
 KP_SIM_FILE=rec/r4.cs16 KP_SIM_DROP_EVERY=700 build/desktop/kp_sim --watch 5769   # a link that loses every 700th block: falls back to 20 MS/s (after the 10 s grace)
 KP_SIM_FILE=rec/r4.cs16 KP_SIM_RESTART_EVERY_MS=1500 build/desktop/kp_sim --watch 5769   # a stream that restarts every 1.5 s: torn frames hidden, then 20 MS/s

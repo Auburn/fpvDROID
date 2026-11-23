@@ -1,10 +1,13 @@
 // kp_radio_tests: the radio's rules that need no adapter (ctest: "radio"). Plain checks, no framework: each
 // failed CHECK prints its line, and the program's exit status says whether any did.
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <random>
 #include <vector>
 
+#include "combine.h"
 #include "decode_queue.h"
 #include "fallback_policy.h"
 #include "frame_gate.h"
@@ -411,7 +414,138 @@ static void steps_start_over_after_a_gap_but_not_for_ever() {
   CHECK(!t.take(bank_of(0), 0, 2, 5650e6) && t.iq().size() == 100 && t.iq().front().real() == 0);
 }
 
+// ---------------------------------------------------------------------------------------- Combiner
+
+// Two antennas' worth of one transmitter, n samples at 40 MS/s. A carrier of constant envelope whose frequency
+// wanders like FM video (rms 0.4 rad a sample, ~2.5 MHz, with a correlation time of ~10 samples), made on a grid
+// kFine times finer than the samples so that path B can lead path A by a fraction of a sample: B = j A / 2, `lead`
+// samples ahead (in steps of 1 / kFine; negative: behind). Each path has noise of its own (~27 dB SNR on A).
+// flat: a bare carrier instead, which correlates the same at every lag (no lag can be told, as on a flat picture).
+struct TwoPaths {
+  std::vector<cf> a, b;
+};
+
+static TwoPaths two_paths(size_t n, double lead, bool flat, unsigned seed) {
+  constexpr int kFine = 10, kPad = 16;  // fine steps a sample; samples generated either side for the lead
+  const int lb = static_cast<int>(std::lround(lead * kFine));
+  std::mt19937 rng(seed);
+  std::normal_distribution<float> nd(0.f, 1.f);
+  // the frequency, a sample at a time: white noise through a one-pole low-pass (alpha 0.1: rms out = in * 0.229)
+  const size_t m = n + 2 * kPad;
+  std::vector<double> w(m + 1);
+  double u = 0;
+  for (size_t i = 0; i <= m; i++) {
+    u += (1.74 * nd(rng) - u) * 0.1;
+    w[i] = flat ? 0.3 : u;
+  }
+  // the phase on the fine grid (the frequency straight between samples), kept where either path needs it
+  std::vector<double> ph(m * kFine + 1);
+  double p = 0;
+  for (size_t i = 0; i < m; i++)
+    for (int f = 0; f < kFine; f++) {
+      ph[i * kFine + f] = p;
+      p += (w[i] + (w[i + 1] - w[i]) * f / kFine) / kFine;
+    }
+  ph[m * kFine] = p;
+  TwoPaths t;
+  t.a.resize(n);
+  t.b.resize(n);
+  for (size_t i = 0; i < n; i++) {
+    const double pa = ph[(i + kPad) * kFine], pb = ph[(i + kPad) * kFine + lb];
+    t.a[i] = cf(static_cast<float>(1000 * std::cos(pa)) + 30 * nd(rng), static_cast<float>(1000 * std::sin(pa)) + 30 * nd(rng));
+    t.b[i] = cf(static_cast<float>(-500 * std::sin(pb)) + 30 * nd(rng), static_cast<float>(500 * std::cos(pb)) + 30 * nd(rng));
+  }
+  return t;
+}
+
+// The banks of t through the combiner, as the radio hands them over (8192 samples, ~205 us at 40 MS/s). Each
+// process() gives the measurement one slice, and 64 slices make a verdict: 64 banks are one measurement.
+static constexpr size_t kBank = 8192, kVerdict = 64 * kBank;
+
+static void feed(Combiner &c, const TwoPaths &t, size_t from = 0, size_t to = SIZE_MAX) {
+  std::vector<cf> a(kBank);
+  for (size_t at = from; at + kBank <= std::min(to, t.a.size()); at += kBank) {
+    std::copy(t.a.begin() + at, t.a.begin() + at + kBank, a.begin());
+    c.process(a.data(), t.b.data() + at, kBank);
+  }
+}
+
+static void combiner_starts_with_no_offset() {
+  Combiner c(40e6);
+  const Combiner::Stats s = c.take_stats();
+  CHECK(s.lag == 0 && !s.lag_measured);
+}
+
+static void combiner_measures_the_offset() {
+  for (const int lead : {6, 3, 0, -1}) {
+    const TwoPaths t = two_paths(2 * kVerdict, lead, false, 11 + lead);
+    Combiner c(40e6);
+    feed(c, t, 0, kVerdict);
+    Combiner::Stats s = c.take_stats();
+    CHECK(s.lag == lead && s.lag_measured);
+    // and with it undone, the two paths are the one signal (but for the noise)
+    feed(c, t, kVerdict);
+    s = c.take_stats();
+    CHECK(s.coherence > 0.95f);
+  }
+}
+
+// A flat picture lets no lag stand out: the combiner keeps what it has, a measured lag or the 0 it started from.
+// (A verdict is followed by half a second without measuring; reset() starts a measurement at once.)
+static void combiner_flat_picture_keeps_what_it_has() {
+  Combiner c(40e6);
+  feed(c, two_paths(kVerdict, 6, true, 3));
+  Combiner::Stats s = c.take_stats();
+  CHECK(s.lag == 0 && !s.lag_measured);
+  c.reset(40e6);  // a new carrier with something in its picture
+  feed(c, two_paths(kVerdict, 6, false, 4));
+  CHECK(c.take_stats().lag == 6);
+  c.reset(40e6);  // and another, on which nothing can be measured
+  feed(c, two_paths(kVerdict, 6, true, 5));
+  s = c.take_stats();
+  CHECK(s.lag == 6 && s.lag_measured);
+}
+
+// The offset belongs to the adapter: a new carrier or a fallback starts from the one measured at its rate.
+static void combiner_keeps_a_measured_offset_per_rate() {
+  Combiner c(40e6);
+  feed(c, two_paths(kVerdict, 6, false, 6));
+  CHECK(c.take_stats().lag == 6);
+  c.reset(40e6);
+  Combiner::Stats s = c.take_stats();
+  CHECK(s.lag == 6 && s.lag_measured);
+  c.reset(20e6);  // nothing measured at 20 MS/s yet
+  s = c.take_stats();
+  CHECK(s.lag == 0 && !s.lag_measured);
+  feed(c, two_paths(kVerdict, 3, false, 7));
+  CHECK(c.take_stats().lag == 3);
+  c.reset(40e6);
+  CHECK(c.take_stats().lag == 6);
+  c.reset(20e6);
+  CHECK(c.take_stats().lag == 3);
+}
+
+// Half way between two samples the verdict stays with the lag in use while the other is about as good, so that it
+// does not flip between them. The 0 a stream starts from is not a lag in use in that sense: the first verdict on
+// an offset of -0.6 samples (lag -1 a little better than lag 0) is -1.
+static void combiner_first_verdict_is_not_held_to_the_start() {
+  const TwoPaths t = two_paths(kVerdict, -0.6, false, 8);
+  Combiner c(40e6);
+  feed(c, t);
+  const Combiner::Stats s = c.take_stats();
+  CHECK(s.lag == -1 && s.lag_measured);
+  // measured, it is held: the same offset on a new carrier, now with lag 0 a little better, stays at -1
+  c.reset(40e6);
+  feed(c, two_paths(kVerdict, -0.4, false, 9));
+  CHECK(c.take_stats().lag == -1);
+}
+
 int main() {
+  combiner_starts_with_no_offset();
+  combiner_measures_the_offset();
+  combiner_flat_picture_keeps_what_it_has();
+  combiner_keeps_a_measured_offset_per_rate();
+  combiner_first_verdict_is_not_held_to_the_start();
   steps_settle_then_capture();
   steps_start_over_after_a_gap_but_not_for_ever();
   fallback_restarts();

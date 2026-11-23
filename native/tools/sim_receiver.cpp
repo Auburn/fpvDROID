@@ -3,13 +3,16 @@
 // from it shows only noise. Bank pacing is real time. Env: KP_SIM_FILE (.cs16, 40 MS/s, centre 5770 MHz).
 // RxSettings::centre is honoured like the chip does (the hardware centre moves beside the pilot, shift_hz = freq -
 // centre, and the recording moves with the centre). Path B is a second antenna for the combiner as the 8812BU
-// delivers one: the same signal turned by 90 degrees at half amplitude, with noise of its own, and ahead of
-// path A by the adapter's 146 ns (6 samples at 40 MS/s, 3 at 20 MS/s: wifi-sdr FINDINGS.md, "8822B dual-path
-// tap"). A combiner that adds the two as they come loses the colour on it.
+// delivers one: the same signal turned by 90 degrees at half amplitude, with noise of its own, and as many ns ahead
+// of path A as KP_SIM_LEAD_NS says (whole samples, 0 to 16; default 0, as on the 0bda:b812 adapters measured on
+// video: combine.h). KP_SIM_LEAD_NS=146 is wifi-sdr's figure (6 samples at 40 MS/s, 3 at 20 MS/s: FINDINGS.md,
+// "8822B dual-path tap"), an offset for the combiner to find; a combiner that adds the two as they come loses the
+// colour on it.
 // KP_SIM_DROP_EVERY=N loses every Nth bank the way the adapter's stream drops one it collected too late: not
 // delivered, counted in RxStatus::mid_drops, and BankMeta::seq steps over it.
 // KP_SIM_RESTART_EVERY_MS=N ends each run of the stream after N ms the way a fault does: counted in
 // RxStatus::restarts, and the next run starts with a new BankMeta::gen and seq 0.
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <complex>
@@ -44,9 +47,9 @@ struct Sim {
   double rec_centre = 5770e6;
   unsigned drop_every = 0;        // KP_SIM_DROP_EVERY
   unsigned restart_every_ms = 0;  // KP_SIM_RESTART_EVERY_MS
+  double lead_b = 0;              // KP_SIM_LEAD_NS: path B ahead of path A, seconds
 };
 Sim *g_sim = nullptr;
-constexpr double kLeadB = 146e-9;  // path B ahead of path A
 }  // namespace
 
 Receiver::Receiver(Logger_t log) : _log(std::move(log)) {}
@@ -73,6 +76,7 @@ void Receiver::open(uint16_t pid, const RxSettings &initial, int, const std::str
   if (const char *d = std::getenv("KP_SIM_DROP_EVERY")) g_sim->drop_every = static_cast<unsigned>(std::atoi(d));
   if (const char *d = std::getenv("KP_SIM_RESTART_EVERY_MS"))
     g_sim->restart_every_ms = static_cast<unsigned>(std::atoi(d));
+  if (const char *d = std::getenv("KP_SIM_LEAD_NS")) g_sim->lead_b = std::max(0.0, std::atof(d)) * 1e-9;
   _set = initial;
   _caps = {};
   _caps.pid = pid;
@@ -197,7 +201,7 @@ void Receiver::worker() {
     for (size_t i = 0; i < N; i++) clean[i] = next(g_sim->pos, lo);
     ph = std::arg(lo);
     // path B runs ahead: its last samples of this bank are the first of the next one (looked at, not consumed)
-    const size_t lead = static_cast<size_t>(std::lround(kLeadB * m.fs));
+    const size_t lead = std::min<size_t>(static_cast<size_t>(std::lround(g_sim->lead_b * m.fs)), 16);  // clean's spare
     {
       size_t pos = g_sim->pos;
       std::complex<float> osc = lo;
