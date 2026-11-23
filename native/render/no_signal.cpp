@@ -1,4 +1,4 @@
-// kepyur: the NO SIGNAL card. See no_signal.h.
+// fpvDROID: the NO SIGNAL card. See no_signal.h.
 #include "no_signal.h"
 
 #include <algorithm>

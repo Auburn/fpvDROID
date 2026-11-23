@@ -3,7 +3,7 @@
 # unit tests (run here: no adapter needed). Run inside nix-shell.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-cmake -S "$ROOT/native" -B "$ROOT/build/desktop" -G Ninja -DKEPYUR_RADIO=ON >/dev/null
+cmake -S "$ROOT/native" -B "$ROOT/build/desktop" -G Ninja -DFPVDROID_RADIO=ON >/dev/null
 ninja -C "$ROOT/build/desktop" kp_replay kp_live kp_sim kp_gen kp_radio_tests kp_decoder_tests kp_spectrum_tests
 ctest --test-dir "$ROOT/build/desktop" --output-on-failure
 # the app's renderer off screen: only where EGL + OpenGL ES 3 development files are installed

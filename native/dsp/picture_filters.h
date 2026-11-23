@@ -1,4 +1,4 @@
-// kepyur decoder: the luma and colour paths. Every sample of discriminator output (MHz) becomes brightness and
+// fpvDROID decoder: the luma and colour paths. Every sample of discriminator output (MHz) becomes brightness and
 // baseband colour in the sample rings, through one of two chains:
 //  - the notch chain: luma through a 3 MHz low-pass (two sections) and a notch at the subcarrier (rings ~4 px
 //    after every edge);

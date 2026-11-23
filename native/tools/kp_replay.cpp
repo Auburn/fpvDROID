@@ -1,4 +1,4 @@
-// kp_replay: run kepyur's scanner DSP and video decoder over a recording (.cs16 + .json from wsdr_probe,
+// kp_replay: run fpvDROID's scanner DSP and video decoder over a recording (.cs16 + .json from wsdr_probe,
 // or .sigmf-data + .sigmf-meta) and print lock numbers. The bench for lock robustness.
 //
 //   kp_replay REC.cs16 [--offset HZ] [--start S] [--seconds S] [--cnr DB] [--fs HZ] [--mix HZ] [--as20]
@@ -72,7 +72,7 @@ int main(int argc, char **argv) {
       if (!std::isnan(r)) fs = r;
       if (ext == ".sigmf-data") centre = json_number(txt, "core:frequency");
       else if (!std::isnan(json_number(txt, "centre_hz"))) {
-        centre = json_number(txt, "centre_hz");  // kepyur's own recordings
+        centre = json_number(txt, "centre_hz");  // fpvDROID's own recordings
       } else {
         const double ch = json_number(txt, "channel") + (fs >= 40e6 ? 2 : 0);  // primary -> centre at BW40
         centre = (5000 + 5 * ch) * 1e6;

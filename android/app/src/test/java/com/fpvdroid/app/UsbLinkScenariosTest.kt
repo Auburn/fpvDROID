@@ -1,8 +1,8 @@
-package com.kepyur.app
+package com.fpvdroid.app
 
 import android.os.SystemClock
 import android.view.View
-import com.kepyur.app.UsbLink.State
+import com.fpvdroid.app.UsbLink.State
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue

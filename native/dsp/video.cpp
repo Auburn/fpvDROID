@@ -1,5 +1,5 @@
-// kepyur video decoder. See video.h. The algorithm follows vtx-spike/viewer/vtxview.cpp (measured on a
-// real R4 NTSC VTX: 93-96 % of lines locked); changes are marked "kepyur:".
+// fpvDROID video decoder. See video.h. The algorithm follows vtx-spike/viewer/vtxview.cpp (measured on a
+// real R4 NTSC VTX: 93-96 % of lines locked); changes are marked "fpvDROID:".
 #include "video.h"
 
 #include <algorithm>
@@ -128,7 +128,7 @@ private:
   uint64_t comb_epoch = 0;     // bumped where the sample stream may have jumped: lines across it don't mix
   LineInfo comb_up, comb_mid;  // the two lines before the current one
   float burst_e = 0;           // |phase error| of the last burst against the PLL's prediction
-  // kepyur: colour. A per-line PLL on the burst tracks the transmitter's subcarrier phase (and its small
+  // fpvDROID: colour. A per-line PLL on the burst tracks the transmitter's subcarrier phase (and its small
   // frequency error) against the filters' free-running oscillator. PAL: the burst's +-45 degree swing gives
   // the V switch, and adjacent lines are averaged (PAL-D).
   double c_phase = 0, c_dphi = 0;  // burst reference phase (rad) and its drift per line
@@ -166,17 +166,17 @@ private:
   double hlo = -8, hhi = 8;
   int hdec = 0;
   uint64_t hist_count = 0;
-  // kepyur: sync-gated levels: sync tip from the middle of each hsync pulse, blanking from the back porch,
+  // fpvDROID: sync-gated levels: sync tip from the middle of each hsync pulse, blanking from the back porch,
   // measured on locked active lines and smoothed over ~64 lines. Picture content cannot move them (the
   // spike's histogram peaks could, and the threshold wandered with the scene).
   uint64_t gated_lines = 0;
-  // kepyur: re-phase instead of re-acquire. After a jump in the signal (stream restart, a dropped bank)
+  // fpvDROID: re-phase instead of re-acquire. After a jump in the signal (stream restart, a dropped bank)
   // the hsyncs keep coming, one line apart, but outside the PLL's window. A run of them on a steady grid
   // while the PLL freewheels moves the line grid onto them within a few lines.
   int miss_run = 0, stray_run = 0;
   double last_stray = -1;
   uint64_t rephases = 0;
-  // kepyur: lock quality over a sliding window of lines (the spike counted since acquisition)
+  // fpvDROID: lock quality over a sliding window of lines (the spike counted since acquisition)
   static constexpr int kRecent = 1024;
   uint8_t recent[kRecent] = {};
   int recent_pos = 0, recent_n = 0, recent_locked = 0;
@@ -319,7 +319,7 @@ private:
     recent_pos = (recent_pos + 1) % kRecent;
   }
 
-  // kepyur: lost when fewer than 40 % of the last ~2 fields' lines found their hsync (a healthy picture
+  // fpvDROID: lost when fewer than 40 % of the last ~2 fields' lines found their hsync (a healthy picture
   // locks ~90 %: only the vertical interval freewheels). The spike used the ratio since acquisition.
   void check_lost() {
     const int window = std::min(kRecent, 2 * (std_ == &kPal ? 312 : 262));
@@ -769,7 +769,7 @@ private:
 };
 
 // ---- front end ----------------------------------------------------------------------------------------
-// kepyur: block-wise and branch-free so the compiler vectorises it (the spike's per-sample loop used a whole
+// fpvDROID: block-wise and branch-free so the compiler vectorises it (the spike's per-sample loop used a whole
 // phone core at 40 MS/s). Per chunk of <= kTab samples: DC removal (block mean, smoothed), mix by a
 // precomputed rotation table, halfband /2 over a work array with 22 samples of history, discriminator.
 FrontEnd::FrontEnd(double fs_in, double shift_hz, FrameSink sink, const DecoderOpts &o, const PictureOpts &p)

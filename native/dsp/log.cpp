@@ -24,10 +24,10 @@ void logf(LogLevel l, const char *fmt, ...) {
   va_end(ap);
 #ifdef __ANDROID__
   static const int prio[] = {ANDROID_LOG_DEBUG, ANDROID_LOG_INFO, ANDROID_LOG_WARN, ANDROID_LOG_ERROR};
-  __android_log_write(prio[static_cast<int>(l)], "kepyur", buf);
+  __android_log_write(prio[static_cast<int>(l)], "fpvdroid", buf);
 #else
   static const char *tag[] = {"D", "I", "W", "E"};
-  std::fprintf(stderr, "[kepyur %s] %s\n", tag[static_cast<int>(l)], buf);
+  std::fprintf(stderr, "[fpvdroid %s] %s\n", tag[static_cast<int>(l)], buf);
 #endif
   if (LogSink s = g_sink) s(l, buf);
 }

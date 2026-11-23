@@ -1,8 +1,8 @@
-# kepyur
+# fpvDROID
 
-Android analog FPV receiver for spectating. A TP-Link Archer T4U v3 (RTL8812BU) plugged into the phone
+Android analog FPV receiver for spectating, a fork of [kepyur](https://github.com/gilankpam/kepyur). A TP-Link Archer T4U v3 (RTL8812BU) plugged into the phone
 streams 40 MS/s raw IQ through [wifi-sdr](https://github.com/snokvist/wifi-sdr) (fork:
-`gilankpam/wifi-sdr`, branch `kepyur-android`) and [devourer](https://github.com/OpenIPC/devourer); kepyur
+`gilankpam/wifi-sdr`, branch `kepyur-android`) and [devourer](https://github.com/OpenIPC/devourer); fpvDROID
 decodes the channel you pick (or scans the 5.8 GHz bands for one) in colour (NTSC and PAL; grey when the colour
 burst is too weak).
 
@@ -15,7 +15,8 @@ way, but are untested so far: reports welcome.
 
 The latest APK from `main` is the rolling **main** pre-release (tag `main-latest`), rebuilt by CI
 (`.github/workflows/android.yml`) on every push to `main`. It is a debug build signed with CI's key: if a
-locally built kepyur is installed, uninstall it first (`adb uninstall com.kepyur.app`).
+locally built fpvDROID is installed, uninstall it first (`adb uninstall com.fpvdroid.app`). Builds from before
+the rename are `com.kepyur.app`, a separate app that stays installed beside it until uninstalled.
 
 ## The app
 
@@ -78,10 +79,10 @@ change can be judged as it is made.
 
 ## Web version
 
-**https://gilankpam.github.io/kepyur/** — the same receiver in Chrome or Edge on a computer (Windows, macOS,
-Linux): plug the adapter in, click Connect, fly with the monitor as the video receiver. It is the app's own decoder
-compiled to WebAssembly, talking to the adapter over WebUSB, and it watches at 20 MS/s (what WebUSB can carry).
-Rebuilt by CI (`.github/workflows/pages.yml`) on every push to `main`. Firefox and Safari have no WebUSB.
+The same receiver in Chrome or Edge on a computer (Windows, macOS, Linux): plug the adapter in, click Connect,
+fly with the monitor as the video receiver. It is the app's own decoder compiled to WebAssembly, talking to the
+adapter over WebUSB, and it watches at 20 MS/s (what WebUSB can carry). It is not hosted anywhere: build it with
+`scripts/build-web.sh` and serve it with `node web/serve.mjs` ([Build](#build)). Firefox and Safari have no WebUSB.
 
 - **Windows:** swap the adapter's driver for WinUSB once with [Zadig](https://zadig.akeo.ie/) (Options → List All
   Devices → the adapter, e.g. "802.11ac NIC" with USB ID 2357 0115 → WinUSB → Replace Driver). The page has the same steps under
@@ -113,14 +114,14 @@ On screen: the OSD pill (channel, frequency, SNR, decode → screen latency) can
   `UsbLink` (the adapter's life: permission, USB 3 switch, open, watch over, reopen), `Settings`.
 - `patches/` — Play RX's changes to wifi-sdr and devourer, applied to the submodules by the build
   (`native/cmake/patches.cmake`; by hand: `scripts/apply-patches.sh`).
-- `web/` — the web version (`kepyur_web.cpp` + `site/`). `scripts/` — build and phone helpers.
+- `web/` — the web version (`fpvdroid_web.cpp` + `site/`). `scripts/` — build and phone helpers.
 
 ## Build
 
 Everything comes from `shell.nix`:
 
 ```sh
-git clone https://github.com/gilankpam/kepyur && cd kepyur
+git clone https://github.com/Auburn/fpvDROID && cd fpvDROID
 git submodule update --init third_party/libusb third_party/wifi-sdr
 git -C third_party/wifi-sdr submodule update --init external/devourer
 nix-shell
@@ -136,7 +137,7 @@ to PNG files, with a transparent background where the picture shows through.
 
 ```sh
 cd android && gradle testDebugUnitTest                                                               # everything
-cd android && gradle testDebugUnitTest --tests com.kepyur.app.MenuScreenshotTest -Pshots=/tmp/menu   # /tmp/menu/*.png
+cd android && gradle testDebugUnitTest --tests com.fpvdroid.app.MenuScreenshotTest -Pshots=/tmp/menu   # /tmp/menu/*.png
 ```
 
 ## On the phone
@@ -149,15 +150,15 @@ scripts/phone.sh connect 192.168.1.23:41000       # the port on the Wireless deb
 scripts/phone.sh install
 scripts/phone.sh usbtest    # 60 s at 40 MS/s + 60 s at 20 MS/s, then scan/watch; logs -> logs/
 scripts/phone.sh run        # normal start
-scripts/phone.sh logs NAME  # pull kepyur.log + logcat
+scripts/phone.sh logs NAME  # pull fpvdroid.log + logcat
 ```
 
-Without an adapter, `adb shell am start -n com.kepyur.app/.MainActivity --ez testcard true` puts a moving test
+Without an adapter, `adb shell am start -n com.fpvdroid.app/.MainActivity --ez testcard true` puts a moving test
 picture where the video would be (`false` takes it away): enough to try the view settings, or to line up
 goggles before there is anything to watch.
 
 To see how long a phone's USB link holds up, `--ez soak true` streams at 40 MS/s after every open instead of
-watching; `kepyur.log` then has each stream fault as it happens (with what wifi-sdr itself reports) and the
+watching; `fpvdroid.log` then has each stream fault as it happens (with what wifi-sdr itself reports) and the
 adapter's USB 3 power management at every open. `--es env WSDR_URB_DEPTH=512` passes a switch to wifi-sdr
 (several: comma-separated), in place from the next time the adapter is opened. The app's own, under the same
 extra: `KP_CONCEAL=0` shows the frames torn by a stream restart (at once), and `KP_FAST_CPUS=0` lets Android put

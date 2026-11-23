@@ -1,4 +1,4 @@
-package com.kepyur.app
+package com.fpvdroid.app
 
 import android.annotation.SuppressLint
 import android.app.PendingIntent
@@ -54,7 +54,7 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
 
     private val ui = Handler(Looper.getMainLooper())
     private val usb = ctx.getSystemService(Context.USB_SERVICE) as UsbManager
-    private val permAction = "com.kepyur.app.USB_PERMISSION"
+    private val permAction = "com.fpvdroid.app.USB_PERMISSION"
     private var conn: UsbDeviceConnection? = null
     var started = false
         private set
@@ -434,7 +434,7 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
          * the order it was asked for, whichever activity instance asked.
          */
         private val worker: ExecutorService =
-            Executors.newSingleThreadExecutor { r -> Thread(r, "kepyur-usb").apply { isDaemon = true } }
+            Executors.newSingleThreadExecutor { r -> Thread(r, "fpvdroid-usb").apply { isDaemon = true } }
         /** The token ([me]) of the link whose radio the native side has open, if any (touched on the worker only). */
         private var holder: Any? = null
 

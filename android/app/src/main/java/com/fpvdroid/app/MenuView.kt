@@ -1,4 +1,4 @@
-package com.kepyur.app
+package com.fpvdroid.app
 
 import android.animation.ValueAnimator
 import android.annotation.SuppressLint
@@ -124,7 +124,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     // status: the dot and the headline over the preview, the detail and the action along the top (the wordmark
     // when there are none)
     private val dot = View(ctx)
-    private val wordmark = label(ctx, "KEPYUR", 11f, Skin.TEXT_3, medium = true).apply { letterSpacing = 0.32f }
+    private val wordmark = label(ctx, "fpvDROID", 11f, Skin.TEXT_3, medium = true).apply { letterSpacing = 0.32f }
     internal val statusTitle = label(ctx, "", 13.5f, Skin.TEXT, medium = true).apply {
         maxLines = 1
         ellipsize = TextUtils.TruncateAt.END

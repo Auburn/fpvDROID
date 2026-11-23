@@ -1,5 +1,5 @@
-// kepyur web: the page's side of the radio. A dedicated worker (web/site/worker.js) hosts this module;
-// kepyur's Radio (native/radio) runs on pthreads exactly as on Android and the desktop.
+// fpvDROID web: the page's side of the radio. A dedicated worker (web/site/worker.js) hosts this module;
+// fpvDROID's Radio (native/radio) runs on pthreads exactly as on Android and the desktop.
 //
 // Threads: Radio's own (USB stream, DSP, decode), a command thread and a 500 ms status tick are pthreads.
 // libusb forwards their USB calls to the module's main thread (the worker's), which must never block: the

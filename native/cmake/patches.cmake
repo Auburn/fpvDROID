@@ -4,10 +4,10 @@
 # regenerated; that stops the configure rather than building an adapter driver without the fixes.
 #
 # The one implementation: included by native/CMakeLists.txt and web/CMakeLists.txt, and run on its own
-# (cmake -P, which scripts/apply-patches.sh does) to patch the submodules for a build of wifi-sdr outside kepyur's.
+# (cmake -P, which scripts/apply-patches.sh does) to patch the submodules for a build of wifi-sdr outside fpvDROID's.
 find_package(Git REQUIRED)
-if(NOT DEFINED KEPYUR_ROOT)  # run as a script: the repository root is two directories up
-  get_filename_component(KEPYUR_ROOT ${CMAKE_CURRENT_LIST_DIR}/../.. ABSOLUTE)
+if(NOT DEFINED FPVDROID_ROOT)  # run as a script: the repository root is two directories up
+  get_filename_component(FPVDROID_ROOT ${CMAKE_CURRENT_LIST_DIR}/../.. ABSOLUTE)
 endif()
 
 # marker: a piece of text the patch adds to marker_file (a path inside dir), checked whenever git says the patch
@@ -18,7 +18,7 @@ function(kp_apply_patch dir patch marker_file marker)
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${patch})  # an edited patch re-runs this
   endif()
   # git must look for a repository in ${dir} and no further up. Where ${dir} is not a work tree of its own but a
-  # plain directory inside some other repository (kepyur's sources vendored into one, or unpacked from an archive
+  # plain directory inside some other repository (fpvDROID's sources vendored into one, or unpacked from an archive
   # inside a checkout), git apply takes the patch's paths as relative to that repository's top, finds none of
   # them under ${dir}, skips them all and reports success, for the reverse check too: the patch then read as
   # already in and nothing was patched. With no repository in sight git apply is a plain patch tool.
@@ -30,7 +30,7 @@ function(kp_apply_patch dir patch marker_file marker)
   execute_process(COMMAND ${git} rev-parse --absolute-git-dir
                   OUTPUT_VARIABLE gitdir OUTPUT_STRIP_TRAILING_WHITESPACE RESULT_VARIABLE grc ERROR_QUIET)
   if(grc EQUAL 0 AND IS_DIRECTORY "${gitdir}")
-    file(LOCK "${gitdir}/kepyur-patch.lock" GUARD FUNCTION TIMEOUT 120)
+    file(LOCK "${gitdir}/fpvdroid-patch.lock" GUARD FUNCTION TIMEOUT 120)
   endif()
   # A .git in ${dir} that leads to no repository: a copy of a checkout made without the top .git directory (a
   # build context that leaves it out, an unpacked backup) still has the submodule's .git file, and git refuses
@@ -77,9 +77,9 @@ function(kp_apply_patch dir patch marker_file marker)
   endif()
 endfunction()
 
-# The patches, each with its marker. KEPYUR_ROOT: the repository root (the including CMakeLists.txt sets it).
-kp_apply_patch(${KEPYUR_ROOT}/third_party/wifi-sdr ${KEPYUR_ROOT}/patches/wifi-sdr-0001-playrx-stream.patch
+# The patches, each with its marker. FPVDROID_ROOT: the repository root (the including CMakeLists.txt sets it).
+kp_apply_patch(${FPVDROID_ROOT}/third_party/wifi-sdr ${FPVDROID_ROOT}/patches/wifi-sdr-0001-playrx-stream.patch
                src/receiver.h "double centre = 0;")
-kp_apply_patch(${KEPYUR_ROOT}/third_party/wifi-sdr/external/devourer
-               ${KEPYUR_ROOT}/patches/devourer-0001-playrx-usb.patch
+kp_apply_patch(${FPVDROID_ROOT}/third_party/wifi-sdr/external/devourer
+               ${FPVDROID_ROOT}/patches/devourer-0001-playrx-usb.patch
                src/UsbTransport.h "kCtrlDeadAfter")

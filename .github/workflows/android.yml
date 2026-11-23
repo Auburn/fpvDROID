@@ -48,15 +48,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cp android/app/build/outputs/apk/debug/app-debug.apk kepyur-main.apk
+          cp android/app/build/outputs/apk/debug/app-debug.apk fpvdroid-main.apk
           short=$(git rev-parse --short HEAD)
           {
             echo "Debug APK built from \`main\` at ${short}:"
             echo
             git log -1 --format='%s'
             echo
-            echo "Rolling build, replaced on every push to main. Install: \`adb install -r kepyur-main.apk\`."
+            echo "Rolling build, replaced on every push to main. Install: \`adb install -r fpvdroid-main.apk\`."
           } > notes.md
           gh release delete main-latest --yes --cleanup-tag || true
-          gh release create main-latest kepyur-main.apk --prerelease --target "$GITHUB_SHA" \
+          gh release create main-latest fpvdroid-main.apk --prerelease --target "$GITHUB_SHA" \
             --title "main (${short})" --notes-file notes.md

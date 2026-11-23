@@ -1,4 +1,4 @@
-package com.kepyur.app
+package com.fpvdroid.app
 
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -52,7 +52,7 @@ data class Plan(val title: String, val markers: List<Marker>, val analog: Boolea
 
 /**
  * What the Spectrum tab can mark: the analog bands, and the channel plans of the digital systems flown beside them
- * (centre frequencies as their makers publish them, FCC). Kepyur shows analog video only: these just say whose
+ * (centre frequencies as their makers publish them, FCC). fpvDROID shows analog video only: these just say whose
  * channel a signal is on.
  */
 object Plans {

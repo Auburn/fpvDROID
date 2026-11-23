@@ -3,9 +3,9 @@
     <uses-feature android:name="android.hardware.usb.host" android:required="true" />
 
     <application
-        android:label="Kepyur"
+        android:label="fpvDROID"
         android:icon="@mipmap/ic_launcher"
-        android:theme="@style/Theme.Kepyur">
+        android:theme="@style/Theme.FpvDroid">
         <activity
             android:name=".MainActivity"
             android:exported="true"

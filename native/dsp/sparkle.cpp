@@ -1,4 +1,4 @@
-// kepyur decoder: sparkle repair. See sparkle.h.
+// fpvDROID decoder: sparkle repair. See sparkle.h.
 #include "sparkle.h"
 
 #include <algorithm>

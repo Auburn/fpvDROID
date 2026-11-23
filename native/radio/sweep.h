@@ -1,4 +1,4 @@
-// kepyur radio: the Spectrum tab's sweep (the steps it retunes to, pass after pass) and the band picture as the app
+// fpvDROID radio: the Spectrum tab's sweep (the steps it retunes to, pass after pass) and the band picture as the app
 // reads it (band_json).
 #pragma once
 #include <cstdint>

@@ -1,4 +1,4 @@
-// kepyur decoder: fields into frames. A field is every other line of the picture: W x A pixels (RGBX), into a
+// fpvDROID decoder: fields into frames. A field is every other line of the picture: W x A pixels (RGBX), into a
 // frame of W x 2A.
 #pragma once
 #include <cstdint>

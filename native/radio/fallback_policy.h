@@ -1,4 +1,4 @@
-// kepyur radio: whether a watch at 40 MS/s is holding up, and what follows when it is not.
+// fpvDROID radio: whether a watch at 40 MS/s is holding up, and what follows when it is not.
 #pragma once
 #include <cstdint>
 #include <deque>

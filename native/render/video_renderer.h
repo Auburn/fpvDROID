@@ -1,4 +1,4 @@
-// kepyur: the picture on screen (OpenGL ES 3). Draws the decoder's frames into a viewport: laid out by aspect
+// fpvDROID: the picture on screen (OpenGL ES 3). Draws the decoder's frames into a viewport: laid out by aspect
 // ratio, fit mode and scale, once or twice side by side (goggles that hold a phone), or small in the menu's
 // preview with black all round it. Where there is no picture, the NO SIGNAL card (no_signal.h) takes its place.
 //

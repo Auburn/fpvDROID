@@ -1,4 +1,4 @@
-# kepyur build environment: everything the desktop harness, the Android app and the web version need.
+# fpvDROID build environment: everything the desktop harness, the Android app and the web version need.
 #   nix-shell                   # then: scripts/build-desktop.sh, scripts/build-android.sh, scripts/build-web.sh
 #   nix-shell --arg web true    # the web version only (no Android SDK/NDK: the Pages job)
 { web ? false }:
@@ -30,7 +30,7 @@ let
   # the web version: emscripten 4.0.12 (WebAssembly, JSPI, pthreads) and Node for its local server
   webTools = [ pkgs.emscripten pkgs.nodejs ];
   common = [ pkgs.cmake pkgs.ninja pkgs.pkg-config mips pkgs.xxd ];
-  mipsEnv = { KEPYUR_MIPS_PREFIX = "${mips}/bin/mipsel-unknown-linux-gnu-"; };
+  mipsEnv = { FPVDROID_MIPS_PREFIX = "${mips}/bin/mipsel-unknown-linux-gnu-"; };
 in
 if web then
   pkgs.mkShell ({ packages = common ++ webTools; } // mipsEnv)
@@ -47,7 +47,7 @@ else
     ANDROID_HOME = "${sdk}/libexec/android-sdk";
     ANDROID_SDK_ROOT = "${sdk}/libexec/android-sdk";
     ANDROID_NDK_ROOT = "${sdk}/libexec/android-sdk/ndk/${ndkVersion}";
-    KEPYUR_NDK_VERSION = ndkVersion;
+    FPVDROID_NDK_VERSION = ndkVersion;
     JAVA_HOME = "${pkgs.jdk17}";
     # aapt2 from Maven is a dynamically linked binary that NixOS cannot run; use the SDK's
     GRADLE_OPTS = "-Dorg.gradle.project.android.aapt2FromMavenOverride=${sdk}/libexec/android-sdk/build-tools/35.0.1/aapt2";

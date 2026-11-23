@@ -1,4 +1,4 @@
-// kepyur decoder: one line of video out of the sample rings into a row of pixels.
+// fpvDROID decoder: one line of video out of the sample rings into a row of pixels.
 #pragma once
 #include <complex>
 #include <cstdint>

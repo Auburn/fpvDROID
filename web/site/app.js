@@ -1,4 +1,4 @@
-// kepyur web: the page. The radio and decoder run in worker.js (kepyur.wasm, native/radio); this file is the
+// fpvDROID web: the page. The radio and decoder run in worker.js (fpvdroid.wasm, native/radio); this file is the
 // start card, the video canvas, the OSD pill, the corner buttons, the settings and guide dialogs, ?debug.
 import { BUILD } from './build.js';
 
@@ -13,7 +13,7 @@ const now = () => performance.timeOrigin + performance.now(); // epoch ms, the c
 const store = {
   get(k, d) {
     try {
-      const v = localStorage.getItem(`kepyur.${k}`);
+      const v = localStorage.getItem(`fpvdroid.${k}`);
       return v == null ? d : JSON.parse(v);
     } catch {
       return d;
@@ -21,7 +21,7 @@ const store = {
   },
   set(k, v) {
     try {
-      localStorage.setItem(`kepyur.${k}`, JSON.stringify(v));
+      localStorage.setItem(`fpvdroid.${k}`, JSON.stringify(v));
     } catch {}
   },
 };
@@ -439,7 +439,7 @@ if (DEBUG) {
 
 // ---- start ----
 if (!navigator.usb) {
-  card('kepyur needs Chrome or Edge on a computer: this browser cannot reach USB devices (WebUSB).', { help: false });
+  card('fpvDROID needs Chrome or Edge on a computer: this browser cannot reach USB devices (WebUSB).', { help: false });
   $('connect').hidden = true;
 } else {
   card('Analog FPV video in your browser.', { connect: true });

@@ -1,8 +1,8 @@
-// Hosts kepyur.wasm (web/kepyur_web.cpp). Its main thread serves libusb's proxied WebUSB calls and the stream's
+// Hosts fpvdroid.wasm (web/fpvdroid_web.cpp). Its main thread serves libusb's proxied WebUSB calls and the stream's
 // bulk-IN reads; it never blocks.
 // Page -> worker: {t:'cmd', text}, {t:'ack'} (a frame was painted).
 // Worker -> page: {t:'ready'}, {t:'fatal', msg}, {t:'ev', json}, {t:'frame', buf, w, h, ts}, {t:'log', text}.
-import createKepyur from './kepyur.js';
+import createFpvDroid from './fpvdroid.js';
 
 const queue = [];
 let mod = null;
@@ -77,7 +77,7 @@ function wsdrBulkStop(ctl) {
 }
 
 try {
-  const m = await createKepyur({
+  const m = await createFpvDroid({
     wsdrBulkStart,
     wsdrBulkStop,
     onEvent: (json) => self.postMessage({ t: 'ev', json }),

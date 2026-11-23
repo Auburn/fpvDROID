@@ -51,7 +51,7 @@ index 72e29c5..a8747bf 100644
        _st.gapped = c.gapped;
        _st.state = RxState::Streaming;
      }
-+    // kepyur: banks the run drops are counted in the status at once, and leave a hole in BankMeta::seq
++    // fpvDROID: banks the run drops are counted in the status at once, and leave a hole in BankMeta::seq
 +    c.on_drop = [&](bool at_start) {
 +      std::lock_guard<std::mutex> l(_m);
 +      (at_start ? _st.start_late_skips : _st.mid_drops)++;
@@ -66,7 +66,7 @@ index 72e29c5..a8747bf 100644
          std::lock_guard<std::mutex> l(_m);
          _st.error.clear();
        }
-+      seq += bi.seq - run_next; // kepyur: the run's count includes the banks it dropped before this one
++      seq += bi.seq - run_next; // fpvDROID: the run's count includes the banks it dropped before this one
 +      run_next = bi.seq + 1;
        meta.seq = seq++;
        {
@@ -76,7 +76,7 @@ index 72e29c5..a8747bf 100644
        next = RxState::Lost;
        why = "adapter lost: " + ss.error;
 +    } else if (ss.wedged) {
-+      // kepyur: no restart brings a wedged C2H engine back (stream88xx.cpp, c2h_wedged): stop now, and say why, so
++      // fpvDROID: no restart brings a wedged C2H engine back (stream88xx.cpp, c2h_wedged): stop now, and say why, so
 +      // that the owner opens the adapter again instead of waiting out five more failed starts
 +      next = RxState::Error;
 +      why = "stream wedged, open the adapter again: " + ss.error;
@@ -92,7 +92,7 @@ index 72e29c5..a8747bf 100644
      if (next != RxState::Starting)
        break;
 -    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-+    // kepyur: was 100 ms. A restart is a hole in the stream (in the picture) as long as this pause, the next
++    // fpvDROID: was 100 ms. A restart is a hole in the stream (in the picture) as long as this pause, the next
 +    // start's drain and the bring-up of the run add up to; 10 ms brings a restart's hole from ~200 ms to ~55 ms
 +    // on a host that restarts every few seconds (Pixel 8 Pro, USB 3), with no more failed starts. The
 +    // 5-faults-in-a-row rule above still ends a stream that never runs.
@@ -119,7 +119,7 @@ index f107565..e5344db 100644
  
  struct BankMeta {
 -  uint64_t seq = 0;      // banks delivered since start()
-+  uint64_t seq = 0;      // banks since start(). kepyur: counting those a run dropped (late or overrun, see
++  uint64_t seq = 0;      // banks since start(). fpvDROID: counting those a run dropped (late or overrun, see
 +                         // RxStatus), so a step of more than 1 within one gen means samples are missing there
    uint32_t gen = 0;      // stream run (changes on every restart: reset DSP state when it does)
    uint32_t cfg = 0;      // settings generation (changes only when the caller changed settings)
@@ -128,11 +128,11 @@ index f107565..e5344db 100644
    bool settling = false; // a settings change is waiting to be applied (the run above is about to end)
    bool gapped = false;   // the current run is gapped (BankMeta::gapped)
    unsigned start_retries = 0; // stream starts repeated because the first packet never came (issue #2)
-+  // kepyur: banks the 8822B stream dropped instead of delivering them, counted as it drops them: late among the
++  // fpvDROID: banks the 8822B stream dropped instead of delivering them, counted as it drops them: late among the
 +  // first few of a run / late or overrun mid-run (the run goes on; before, each of these ended it and showed in
 +  // restarts). Since open().
 +  uint64_t start_late_skips = 0, mid_drops = 0;
-+  // kepyur: the worker ended (state Error) because the 8822B's C2H engine wedged (stream88xx.cpp, c2h_wedged).
++  // fpvDROID: the worker ended (state Error) because the 8822B's C2H engine wedged (stream88xx.cpp, c2h_wedged).
 +  // Nothing short of opening the adapter again recovers it; until open(), this stays set.
 +  bool wedged = false;
  };
@@ -156,7 +156,7 @@ index c876980..e3ec784 100644
  namespace wsdr {
  
 -
-+// kepyur: whether the link is SuperSpeed. libusb asks the kernel, and for a device opened from an fd (Android) it
++// fpvDROID: whether the link is SuperSpeed. libusb asks the kernel, and for a device opened from an fd (Android) it
 +// can only do so with USBDEVFS_GET_SPEED, which older kernels lack (an LG G7 on Android 10, kernel 4.9): the speed
 +// comes back unknown. Taken as USB 2, a SuperSpeed link then got 4096-byte EP0 block writes (the USB 2 size in
 +// Reg), which the chip stalls: LIBUSB_ERROR_PIPE at the streamer's first block, every start. The descriptors say it
@@ -229,7 +229,7 @@ index a663615..1922fb3 100644
  
  // Where the CPU program got to, for a missed first packet: its DMEM state block (magic, seq, state,
 -// t_arm), the chip clock, the C2H trigger and the LA engine.
-+// t_arm), the chip clock, the C2H trigger and the LA engine. kepyur: and the RX DMA registers the C2H wedge
++// t_arm), the chip clock, the C2H trigger and the LA engine. fpvDROID: and the RX DMA registers the C2H wedge
 +// is known by (notes/c2h-wedge-handoff.md: r288 BIT7 overflow, r280 / r10c / r284 / r290 as left).
  std::string chip_state(Reg &r, Cpu8822b &cpu) {
    try {
@@ -251,7 +251,7 @@ index a663615..1922fb3 100644
    }
  }
  
-+// kepyur: the C2H engine has wedged (FINDINGS §4, notes/c2h-wedge-handoff.md, signature (a)): no packet has come
++// fpvDROID: the C2H engine has wedged (FINDINGS §4, notes/c2h-wedge-handoff.md, signature (a)): no packet has come
 +// for a whole timeout, yet the request last written to 0x294 is still pending (BIT16). A working engine takes a
 +// request in ~40 us; this one never will. A new start, an endpoint clear_halt and the register pokes tried so far
 +// do not bring it back; only a fresh bring-up (Session::open) does. It depends on the USB 3 host: never on most,
@@ -275,7 +275,7 @@ index a663615..1922fb3 100644
  
      rd.start();
 -    rd.drain(30);
-+    rd.drain(10);  // kepyur: was 30 ms; a packet ships in ~40 us (see the Receiver's pause between starts)
++    rd.drain(10);  // fpvDROID: was 30 ms; a packet ships in ~40 us (see the Receiver's pause between starts)
      cpu.start();
      // Now and then (~1 start in 30, issue #2) the CPU stalls at its first MAC-register access (the LA
      // arm) until the host itself reads the MAC block; a read of 0x0003 or 0x0080 does not release it.
@@ -315,7 +315,7 @@ index a663615..1922fb3 100644
              stopped = true;
              break;
            }
-+          // kepyur: a wedged C2H engine is not worth another start (see c2h_wedged): say so at once, and the
++          // fpvDROID: a wedged C2H engine is not worth another start (see c2h_wedged): say so at once, and the
 +          // Receiver gives up on the run so that its owner can open the adapter afresh
 +          if (c2h_wedged(r)) {
 +            st.wedged = true;
@@ -391,7 +391,7 @@ index a663615..1922fb3 100644
          break;
 +      if (late_skip) {  // AnalogRX: a late bank at the start of the run is not handed on (see above)
 +        seen[b] = true;
-+        if (_c.on_drop)  // kepyur: nor is one dropped mid-run; either way the caller hears of it now
++        if (_c.on_drop)  // fpvDROID: nor is one dropped mid-run; either way the caller hears of it now
 +          _c.on_drop(seq < kStartGraceBanks);
 +        continue;
 +      }
@@ -406,7 +406,7 @@ index 69c6cb3..7ce2fd0 100644
    int guard_us = 20;       // ship a bank this long after the ADC is due to finish it (< 0: test only)
    bool gapped = false;     // capture one bank, stop, ship, re-arm (banks not contiguous)
    unsigned pkt_timeout_ms = 200;
-+  // kepyur: called on the stream thread each time run() drops a bank instead of handing it to on_bank (late or
++  // fpvDROID: called on the stream thread each time run() drops a bank instead of handing it to on_bank (late or
 +  // overrun), as it happens: StreamStats only comes back when the run ends, and a run that keeps dropping an
 +  // occasional bank never does. at_start: one of the first banks of the run (start_late_skips), else mid_drops.
 +  std::function<void(bool at_start)> on_drop;
@@ -422,7 +422,7 @@ index 69c6cb3..7ce2fd0 100644
    double late_max_us = 0, ship_max_us = 0, end_max_us = 0;
    double wall_s = 0;
    std::string error;       // empty unless the stream stopped on a fault
-+  bool wedged = false;     // kepyur: the fault was the C2H wedge: only opening the adapter again recovers it
++  bool wedged = false;     // fpvDROID: the fault was the C2H wedge: only opening the adapter again recovers it
  };
  
  class Stream8822b {

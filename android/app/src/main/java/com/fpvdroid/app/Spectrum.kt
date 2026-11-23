@@ -1,4 +1,4 @@
-package com.kepyur.app
+package com.fpvdroid.app
 
 import org.json.JSONException
 import org.json.JSONObject

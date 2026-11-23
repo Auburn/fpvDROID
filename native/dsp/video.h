@@ -1,4 +1,4 @@
-// kepyur: analog FPV video decoder (FM composite -> 8-bit grey frames). Shared by the app and the desktop
+// fpvDROID: analog FPV video decoder (FM composite -> 8-bit grey frames). Shared by the app and the desktop
 // tools. Grown from vtx-spike/viewer/vtxview.cpp.
 //
 //   FrontEnd fe(fs_in, shift_hz, on_frame);   // fs_in 40e6 (halfband to 20 MS/s) or 20e6

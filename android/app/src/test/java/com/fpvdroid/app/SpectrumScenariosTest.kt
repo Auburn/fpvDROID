@@ -1,7 +1,7 @@
-package com.kepyur.app
+package com.fpvdroid.app
 
-import com.kepyur.app.FakeEngine.Call
-import com.kepyur.app.UsbLink.State
+import com.fpvdroid.app.FakeEngine.Call
+import com.fpvdroid.app.UsbLink.State
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue

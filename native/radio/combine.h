@@ -8,7 +8,7 @@
 // One chip and one clock, but the two paths need not come out of it in step, and not by the same time on every
 // board. wifi-sdr FINDINGS.md ("8822B dual-path tap") has path B leading path A by ~146 ns (6 samples at 40 MS/s),
 // from Wi-Fi frames on one 8812BU. On Realtek 0bda:b812 adapters receiving video it comes out near none: Play RX
-// measured 0 samples at 40 MS/s and -1 at 20; kepyur on a Pixel 8 Pro, 0 (now and then +1) at 40 MS/s and 0 at
+// measured 0 samples at 40 MS/s and -1 at 20; fpvDROID on a Pixel 8 Pro, 0 (now and then +1) at 40 MS/s and 0 at
 // 20. A time offset is a phase that grows with frequency, which the one phase per block below cannot undo: added
 // as they come, the paths would cancel 3.4 MHz either side of the carrier, where the colour is. So the leading
 // path is delayed by a whole number of samples first. That number is measured from the paths' own correlation at

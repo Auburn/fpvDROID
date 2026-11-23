@@ -1,12 +1,12 @@
-package com.kepyur.app
+package com.fpvdroid.app
 
 import android.hardware.usb.UsbDevice
 import android.os.SystemClock
 import android.view.InputDevice
 import android.view.MotionEvent
 import android.view.View
-import com.kepyur.app.FakeEngine.Call
-import com.kepyur.app.UsbLink.State
+import com.fpvdroid.app.FakeEngine.Call
+import com.fpvdroid.app.UsbLink.State
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.fail

@@ -1,4 +1,4 @@
-// kepyur JNI: the Kotlin app's view of the radio and the screen (com.kepyur.app.Native).
+// fpvDROID JNI: the Kotlin app's view of the radio and the screen (com.fpvdroid.app.Native).
 #include <android/native_window_jni.h>
 #include <jni.h>
 #include <unistd.h>
@@ -139,7 +139,7 @@ extern "C" {
 
 // Every new activity calls this on its main thread, possibly while an earlier one's radio is still being opened
 // (seconds, or for ever if the adapter hangs): so not under g_api, and the screen and radio are made only once.
-JNIEXPORT void JNICALL Java_com_kepyur_app_Native_init(JNIEnv *env, jclass, jstring log_path) {
+JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_init(JNIEnv *env, jclass, jstring log_path) {
   const std::string p = jstring_of(env, log_path);
   {
     std::lock_guard<std::mutex> lk(g_log_m);
@@ -152,10 +152,10 @@ JNIEXPORT void JNICALL Java_com_kepyur_app_Native_init(JNIEnv *env, jclass, jstr
     g_screen = std::make_unique<Screen>();
     g_radio = std::make_unique<Radio>([](const Frame &f) { g_screen->post(f); });
   });
-  KP_LOGI("kepyur native ready");
+  KP_LOGI("fpvDROID native ready");
 }
 
-JNIEXPORT jstring JNICALL Java_com_kepyur_app_Native_usb3Switch(JNIEnv *env, jclass, jint fd) {
+JNIEXPORT jstring JNICALL Java_com_fpvdroid_app_Native_usb3Switch(JNIEnv *env, jclass, jint fd) {
   std::string detail;
   const auto r = wsdr::request_usb3_fd(fd, &detail);
   std::string out = wsdr::usb3_switch_name(r);
@@ -164,7 +164,7 @@ JNIEXPORT jstring JNICALL Java_com_kepyur_app_Native_usb3Switch(JNIEnv *env, jcl
   return env->NewStringUTF(out.c_str());
 }
 
-JNIEXPORT jstring JNICALL Java_com_kepyur_app_Native_open(JNIEnv *env, jclass, jint fd) {
+JNIEXPORT jstring JNICALL Java_com_fpvdroid_app_Native_open(JNIEnv *env, jclass, jint fd) {
   std::lock_guard<std::mutex> l(g_api);
   try {
     g_radio->close();  // open() would; before the environment changes, so that none of its threads is reading it
@@ -177,65 +177,65 @@ JNIEXPORT jstring JNICALL Java_com_kepyur_app_Native_open(JNIEnv *env, jclass, j
   }
 }
 
-JNIEXPORT void JNICALL Java_com_kepyur_app_Native_close(JNIEnv *, jclass) {
+JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_close(JNIEnv *, jclass) {
   std::lock_guard<std::mutex> l(g_api);
   if (g_radio) g_radio->close();
   if (g_screen) g_screen->clear();
 }
 
-JNIEXPORT jboolean JNICALL Java_com_kepyur_app_Native_superspeed(JNIEnv *, jclass) {
+JNIEXPORT jboolean JNICALL Java_com_fpvdroid_app_Native_superspeed(JNIEnv *, jclass) {
   return g_radio && g_radio->superspeed();
 }
 
-JNIEXPORT void JNICALL Java_com_kepyur_app_Native_scan(JNIEnv *, jclass, jdouble prefer_hz) {
+JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_scan(JNIEnv *, jclass, jdouble prefer_hz) {
   if (g_radio) g_radio->scan(prefer_hz);
   if (g_screen) g_screen->clear();
 }
 
 // fresh: another channel (the old picture goes at once), not the same one again after a settings change
-JNIEXPORT void JNICALL Java_com_kepyur_app_Native_watch(JNIEnv *, jclass, jdouble hz, jboolean fresh) {
+JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_watch(JNIEnv *, jclass, jdouble hz, jboolean fresh) {
   if (g_radio) g_radio->watch(hz);
   if (fresh && g_screen) g_screen->clear();
 }
 
-JNIEXPORT void JNICALL Java_com_kepyur_app_Native_idle(JNIEnv *, jclass) {
+JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_idle(JNIEnv *, jclass) {
   if (g_radio) g_radio->idle();
 }
 
 // The Spectrum tab: no picture while it sweeps, so the preview shows the channel's card (as in a scan), not a
 // frame that looks live.
-JNIEXPORT void JNICALL Java_com_kepyur_app_Native_sweep(JNIEnv *, jclass, jdouble lo_hz, jdouble hi_hz) {
+JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_sweep(JNIEnv *, jclass, jdouble lo_hz, jdouble hi_hz) {
   if (g_radio) g_radio->sweep(lo_hz, hi_hz);
   if (g_screen) g_screen->clear();
 }
 
-JNIEXPORT jstring JNICALL Java_com_kepyur_app_Native_spectrum(JNIEnv *env, jclass, jdouble lo_hz, jdouble hi_hz) {
+JNIEXPORT jstring JNICALL Java_com_fpvdroid_app_Native_spectrum(JNIEnv *env, jclass, jdouble lo_hz, jdouble hi_hz) {
   const std::string s = g_radio ? g_radio->spectrum_json(lo_hz, hi_hz) : std::string("{}");
   return env->NewStringUTF(s.c_str());
 }
 
-JNIEXPORT void JNICALL Java_com_kepyur_app_Native_streamTest(JNIEnv *, jclass, jint rate_sel, jdouble seconds) {
+JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_streamTest(JNIEnv *, jclass, jint rate_sel, jdouble seconds) {
   if (g_radio) g_radio->stream_test(rate_sel, seconds);
 }
 
 // The setters that return a jboolean: true when the radio says a watch must be started again to have the change.
-JNIEXPORT jboolean JNICALL Java_com_kepyur_app_Native_setWatchRate(JNIEnv *, jclass, jint rate_sel) {
+JNIEXPORT jboolean JNICALL Java_com_fpvdroid_app_Native_setWatchRate(JNIEnv *, jclass, jint rate_sel) {
   return g_radio && g_radio->set_watch_rate(rate_sel);
 }
 
-JNIEXPORT jboolean JNICALL Java_com_kepyur_app_Native_setGain(JNIEnv *, jclass, jdouble db) {
+JNIEXPORT jboolean JNICALL Java_com_fpvdroid_app_Native_setGain(JNIEnv *, jclass, jdouble db) {
   return g_radio && g_radio->set_gain(db);
 }
 
-JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setDiversity(JNIEnv *, jclass, jboolean on) {
+JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_setDiversity(JNIEnv *, jclass, jboolean on) {
   if (g_radio) g_radio->set_combine(on);
 }
 
-JNIEXPORT jboolean JNICALL Java_com_kepyur_app_Native_setOffsetTuning(JNIEnv *, jclass, jboolean on) {
+JNIEXPORT jboolean JNICALL Java_com_fpvdroid_app_Native_setOffsetTuning(JNIEnv *, jclass, jboolean on) {
   return g_radio && g_radio->set_offset_tuning(on);
 }
 
-JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setPicture(JNIEnv *, jclass, jboolean luma_comb, jboolean adaptive,
+JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_setPicture(JNIEnv *, jclass, jboolean luma_comb, jboolean adaptive,
                                                              jboolean smooth, jboolean repair, jboolean colour_comb) {
   PictureOpts p;
   p.luma_comb = luma_comb;
@@ -246,7 +246,7 @@ JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setPicture(JNIEnv *, jclass, j
   if (g_radio) g_radio->set_picture(p);
 }
 
-JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setView(JNIEnv *, jclass, jfloat aspect, jint fit, jfloat scale,
+JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_setView(JNIEnv *, jclass, jfloat aspect, jint fit, jfloat scale,
                                                           jboolean stereo, jfloat eye_shift) {
   if (!g_screen) return;
   ViewOpts v;
@@ -258,41 +258,41 @@ JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setView(JNIEnv *, jclass, jflo
   g_screen->set_view(v);
 }
 
-JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setBackdrop(JNIEnv *, jclass, jboolean on, jboolean now) {
+JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_setBackdrop(JNIEnv *, jclass, jboolean on, jboolean now) {
   if (g_screen) g_screen->set_backdrop(on, now);
 }
 
-JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setCardLabel(JNIEnv *env, jclass, jstring label) {
+JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_setCardLabel(JNIEnv *env, jclass, jstring label) {
   if (g_screen) g_screen->set_card_label(jstring_of(env, label));
 }
 
-JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setPreview(JNIEnv *, jclass, jint left, jint top, jint right,
+JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_setPreview(JNIEnv *, jclass, jint left, jint top, jint right,
                                                              jint bottom, jfloat radius) {
   if (!g_screen) return;
   const float w = static_cast<float>(std::max(0, right - left)), h = static_cast<float>(std::max(0, bottom - top));
   g_screen->set_preview(Preview{Rect{static_cast<float>(left), static_cast<float>(top), w, h}, std::max(0.f, radius)});
 }
 
-JNIEXPORT void JNICALL Java_com_kepyur_app_Native_record(JNIEnv *env, jclass, jdouble seconds, jstring prefix) {
+JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_record(JNIEnv *env, jclass, jdouble seconds, jstring prefix) {
   const std::string p = jstring_of(env, prefix);
   if (g_radio) g_radio->record(seconds, p);
 }
 
-JNIEXPORT jstring JNICALL Java_com_kepyur_app_Native_status(JNIEnv *env, jclass) {
+JNIEXPORT jstring JNICALL Java_com_fpvdroid_app_Native_status(JNIEnv *env, jclass) {
   const std::string s = g_radio ? g_radio->status_json() : std::string("{\"open\":false}");
   return env->NewStringUTF(s.c_str());
 }
 
-JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setSurface(JNIEnv *env, jclass, jobject surface) {
+JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_setSurface(JNIEnv *env, jclass, jobject surface) {
   if (!g_screen) return;
   g_screen->set_window(surface ? ANativeWindow_fromSurface(env, surface) : nullptr);
 }
 
-JNIEXPORT void JNICALL Java_com_kepyur_app_Native_redraw(JNIEnv *, jclass) {
+JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_redraw(JNIEnv *, jclass) {
   if (g_screen) g_screen->redraw();
 }
 
-JNIEXPORT void JNICALL Java_com_kepyur_app_Native_testCard(JNIEnv *, jclass, jboolean on) {
+JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_testCard(JNIEnv *, jclass, jboolean on) {
   KP_LOGI("test picture %s", on ? "on" : "off");
   if (on) {
     card_start();
@@ -302,19 +302,19 @@ JNIEXPORT void JNICALL Java_com_kepyur_app_Native_testCard(JNIEnv *, jclass, jbo
   }
 }
 
-JNIEXPORT void JNICALL Java_com_kepyur_app_Native_log(JNIEnv *env, jclass, jstring msg) {
+JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_log(JNIEnv *env, jclass, jstring msg) {
   KP_LOGI("app: %s", jstring_of(env, msg).c_str());
 }
 
 // Keep the picture on screen (dimmed once stale) for up to `ms`, through the close and reopen of a wedged adapter.
-JNIEXPORT void JNICALL Java_com_kepyur_app_Native_holdPicture(JNIEnv *, jclass, jint ms) {
+JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_holdPicture(JNIEnv *, jclass, jint ms) {
   if (g_screen) g_screen->hold(ms);
 }
 
 // Debug: a switch by name. The radio's own two are set at once ("0" turns one off; anything else, or nothing, on).
 // Any other is an environment variable for wifi-sdr / devourer, in place from the next open; an empty value
 // removes it.
-JNIEXPORT void JNICALL Java_com_kepyur_app_Native_setDebugEnv(JNIEnv *env, jclass, jstring key, jstring value) {
+JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_setDebugEnv(JNIEnv *env, jclass, jstring key, jstring value) {
   const std::string k = jstring_of(env, key), v = jstring_of(env, value);
   if (k.empty()) return;
   const bool on = v.empty() || v[0] != '0';

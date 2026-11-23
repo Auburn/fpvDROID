@@ -1,4 +1,4 @@
-// kepyur radio: the retunes of a scan or a sweep, one after another, and the capture of the one under way.
+// fpvDROID radio: the retunes of a scan or a sweep, one after another, and the capture of the one under way.
 #pragma once
 #include <complex>
 #include <cstddef>
