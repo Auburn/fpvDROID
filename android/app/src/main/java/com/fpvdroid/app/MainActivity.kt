@@ -444,21 +444,23 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     }
 
     private fun linkState(): MenuState = linkHeadline().let { st ->
-        // the rail may have to cut a long message short on a small screen: the Signal tab shows all of it
-        if (st.tone == Tone.WARN || st.tone == Tone.ERROR) st.copy(stats = st.detail) else st
+        // trouble: the Signal tab says it again, with the radio's own words for what went wrong (the status line
+        // keeps to plain words, and a small screen may cut even those short)
+        if (st.tone == Tone.WARN || st.tone == Tone.ERROR)
+            st.copy(stats = listOf(st.detail, link.cause).filter { it.isNotEmpty() }.joinToString("\n"))
+        else st
     }
 
     private fun linkHeadline(): MenuState = when (link.state) {
         UsbLink.State.NO_ADAPTER -> MenuState(Tone.IDLE, "No adapter", "Plug the Wi-Fi adapter into the phone's USB port.")
         UsbLink.State.PERMISSION -> MenuState(Tone.BUSY, "Allow USB access", "Android is asking whether fpvDROID may use the adapter.")
-        UsbLink.State.DENIED -> MenuState(Tone.WARN, "Permission needed", "fpvDROID cannot use the adapter without it.", "Ask again")
+        UsbLink.State.DENIED -> MenuState(Tone.WARN, "USB access denied", "fpvDROID can't use the adapter without it.", "Ask again")
         UsbLink.State.SWITCHING -> MenuState(Tone.BUSY, "Switching to USB 3", "The adapter restarts itself. This takes a few seconds.")
-        UsbLink.State.OPENING, UsbLink.State.REOPENING ->
-            MenuState(Tone.BUSY, "Starting the radio", link.message.ifEmpty { "About five seconds." })
+        UsbLink.State.OPENING -> MenuState(Tone.BUSY, "Starting the radio", link.message.ifEmpty { "About five seconds." })
+        UsbLink.State.REOPENING -> MenuState(Tone.BUSY, "Restarting the radio", link.message.ifEmpty { "A few seconds." })
         UsbLink.State.WAITING -> MenuState(Tone.WARN, "Trying again", link.message, "Try now")
         UsbLink.State.FAILED -> MenuState(Tone.ERROR, "Adapter problem", link.message, "Try again")
-        UsbLink.State.USB2 -> MenuState(Tone.WARN, "USB 2 link",
-            "Video needs USB 3. Plug the adapter straight into the phone with a USB 3 (OTG) adapter or cable.", "Try again")
+        UsbLink.State.USB2 -> MenuState(Tone.WARN, "USB 2 link", "Video needs USB 3. Use a USB 3 OTG adapter or cable, with no hub.", "Try again")
         UsbLink.State.RUNNING -> MenuState()
     }
 
@@ -537,9 +539,9 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
                     it.banks, it.expected, it.seqGaps, it.restarts)
             } ?: "Starting…")
             Mode.WATCH -> when {
-                overloaded -> OVERLOAD_ADVICE.let { advice ->   // in full on the Signal tab: the rail may cut it short
-                    base.copy(tone = Tone.WARN, headline = where, detail = advice, stats = "$advice\n$stats")
-                }
+                // again on the Signal tab (a small screen may cut the status line short), where the sample rate is
+                overloaded -> base.copy(tone = Tone.WARN, headline = where, detail = OVERLOAD_ADVICE,
+                    stats = "$OVERLOAD_ADVICE Or set Sample rate to 20.\n$stats")
                 locked -> base.copy(tone = Tone.LIVE, headline = where, detail = buildString {
                     append(v?.std ?: "")
                     if (v?.colour == false) append(" · black and white")
@@ -547,11 +549,11 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
                     st.snrDb?.let { append(" · %.0f dB".format(it)) }
                 })
                 noVideoFound -> base.copy(tone = Tone.BUSY, headline = where,
-                    detail = "The scan found no video. Still looking on this channel…")
+                    detail = "Scan found no video. Still looking on this channel…")
                 else -> base.copy(tone = Tone.BUSY, headline = where, detail = "Looking for a picture…")
             }
             Mode.IDLE, null -> base.copy(tone = Tone.IDLE, headline = "Ready",
-                detail = if (noVideoFound) "The scan found no video. Pick a channel, or scan again." else "Pick a channel, or scan.")
+                detail = if (noVideoFound) "Scan found no video. Pick a channel or scan again." else "Pick a channel, or scan.")
         }
     }
 
@@ -697,8 +699,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         const val BACKGROUND_CLOSE_MS = 30000L
         /** This many blocks the adapter's stream gave up on, in the radio's window (5 s): the phone is not keeping up. */
         const val LATE_BLOCKS = 3
-        const val OVERLOAD_ADVICE =
-            "The phone is not keeping up. Turn off Clean OSD edges, Colour comb or Diversity, or use sample rate 20."
+        const val OVERLOAD_ADVICE = "The phone can't keep up. Turn off Clean OSD edges, Colour comb or Diversity."
 
         /** The activity whose SurfaceView the native screen is drawing on, by its token (main thread only). */
         private var surfaceOwner: Any? = null

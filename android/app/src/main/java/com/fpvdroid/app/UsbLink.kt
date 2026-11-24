@@ -49,7 +49,14 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
 
     var state = State.NO_ADAPTER
         private set
+    /** A short sentence in plain words for the status line: what happened, and what to do if anything. */
     var message = ""
+        private set
+    /**
+     * What went wrong in the radio's own terms (a libusb error, a chip bring-up step), for the Signal tab and a
+     * bug report: never on the status line. "" when there is nothing more to say than [message].
+     */
+    var cause = ""
         private set
 
     private val ui = Handler(Looper.getMainLooper())
@@ -108,6 +115,7 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
         // quietly: nobody is listening any more, and start() begins from nothing
         state = State.NO_ADAPTER
         message = ""
+        cause = ""
         askedFor = null
         switchDeadline = 0
         failures = 0
@@ -141,10 +149,11 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
         (d.vendorId == 0x2357 && d.productId in setOf(0x0115, 0x012d, 0x0138)) ||
             (d.vendorId == 0x0bda && d.productId == 0xb812)
 
-    private fun set(s: State, msg: String = "") {
-        if (s == state && msg == message) return
+    private fun set(s: State, msg: String = "", why: String = "") {
+        if (s == state && msg == message && why == cause) return
         state = s
         message = msg
+        cause = why
         events.onLinkChanged()
     }
 
@@ -185,7 +194,7 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
         askedFor = null
         val c = usb.openDevice(d)
         if (c == null) {
-            failLater("Android would not open the adapter. Another app may be using it.")
+            failLater("Can't open the adapter. Another app may be using it.")
             return
         }
         conn = c
@@ -196,7 +205,7 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
         // bring-up cannot be interrupted from here, but pulling the plug ends it: say so if it drags on
         ui.postDelayed({
             if (gen == generation && opening)
-                set(state, "This is taking longer than it should. Unplug the adapter and plug it in again.")
+                set(state, "Taking too long. $REPLUG")
         }, SLOW_OPEN_MS)
         val trySwitch = switchRequests < MAX_SWITCH_REQUESTS
         worker.execute {
@@ -221,7 +230,7 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
             ui.post {
                 if (gen != generation) return@post   // unplugged meanwhile: the close queued behind us tidies up
                 when {
-                    err.isNotEmpty() -> failLater("The radio did not start: $err")
+                    err.isNotEmpty() -> failLater("The radio didn't start.", err)
                     !fast -> set(State.USB2)
                     else -> {
                         // failures is not forgotten yet: a radio that opens and then never streams is still failing
@@ -288,7 +297,7 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
             }
             if (SystemClock.elapsedRealtime() >= switchDeadline) {
                 switchDeadline = 0
-                set(State.FAILED, "The adapter did not come back after switching to USB 3. Unplug it and plug it in again.")
+                set(State.FAILED, "No adapter after the switch to USB 3. Unplug it and plug it back in.")
                 return
             }
             ui.postDelayed(this, 1000)
@@ -298,15 +307,16 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
     private val retry = Runnable { connect(force = true) }
 
     /**
-     * Close what there is, say what went wrong, and try again shortly: soon the first time, then every
-     * [RETRY_MS], and less often once it keeps failing (it never gives up: the cause may be a loose plug).
+     * Close what there is, say what went wrong ([msg] in plain words, [why] in the radio's), and try again shortly:
+     * soon the first time, then every [RETRY_MS], and less often once it keeps failing (it never gives up: the cause
+     * may be a loose plug).
      */
-    private fun failLater(msg: String) {
-        engine.log("link: $msg (failure ${failures + 1})")
+    private fun failLater(msg: String, why: String = "") {
+        engine.log("link: $msg${if (why.isNotEmpty()) " ($why)" else ""} (failure ${failures + 1})")
         giveUpAdapter()
         failures++
         val persistent = failures >= PERSISTENT_FAILURES
-        set(State.WAITING, if (persistent) "$msg If this goes on, unplug the adapter and plug it in again." else msg)
+        set(State.WAITING, if (persistent) "$msg $REPLUG" else msg, why)
         ui.removeCallbacks(retry)
         ui.postDelayed(retry, if (failures <= 1) FIRST_RETRY_MS else if (persistent) SLOW_RETRY_MS else RETRY_MS)
     }
@@ -355,17 +365,17 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
             reopenAfterWedge(status)
             return
         }
-        val why = when {
-            status.dead || status.rxState == "lost" ->
-                status.rxError.ifEmpty { status.lastFault }.ifEmpty { "the adapter stopped answering" }
-            !status.open -> "it was closed"   // under us: nothing will come
-            now - banksMovedAt > STALL_MS -> "no samples for ${STALL_MS / 1000} seconds"
+        val (msg, why) = when {
+            status.rxState == "lost" -> "The adapter stopped answering." to status.rxError.ifEmpty { status.lastFault }
+            status.dead -> "The radio stopped." to status.rxError.ifEmpty { status.lastFault }
+            !status.open -> "The radio stopped." to "closed under the app"   // nothing will come
+            now - banksMovedAt > STALL_MS -> "The adapter stopped sending data." to "no samples for ${STALL_MS / 1000} s"
             else -> {
                 if (now - runningSince > HEALTHY_MS) failures = 0   // it has run well for a while: a clean slate
                 return
             }
         }
-        failLater("The radio stopped: $why.")
+        failLater(msg, why)
     }
 
     /**
@@ -386,9 +396,8 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
         engine.holdPicture(HOLD_PICTURE_MS)   // the last picture stays, dimmed, until the reopened radio's first frame
         giveUpAdapter()
         open(State.REOPENING, if (n >= WEDGE_ADVICE_COUNT)
-            "The adapter's USB link locked up $n times in $minutes minutes: starting it again. This phone's USB 3 " +
-                "port and this adapter do not get on; another phone or adapter may hold up better."
-        else "The adapter's USB link locked up: starting it again.")
+            "The USB link froze $n times in $minutes minutes. Another phone or adapter may do better."
+        else "The adapter's USB link froze.")
     }
 
     // ---------------------------------------------------------------------------------------- broadcasts
@@ -438,6 +447,8 @@ class UsbLink(context: Context, private val engine: Engine, private val events: 
         /** The token ([me]) of the link whose radio the native side has open, if any (touched on the worker only). */
         private var holder: Any? = null
 
+        /** The advice after anything that unplugging the adapter may cure. */
+        const val REPLUG = "Unplug the adapter and plug it back in."
         const val FIRST_RETRY_MS = 2500L
         const val RETRY_MS = 5000L
         const val SLOW_RETRY_MS = 10000L
