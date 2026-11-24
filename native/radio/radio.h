@@ -72,8 +72,8 @@ public:
   // The three setters below only take effect at the next watch() (the next tune). Each returns true when it
   // changed something, so that a watch already running has to be started again (watch()) to have it.
   //
-  // The rate watch uses (1 = 40 MS/s, the default; 2 = 20 MS/s). A change also clears a 20 MS/s fallback; the
-  // same rate again changes nothing (a fallback stays).
+  // The rate watch uses (1 = 40 MS/s, the default; 2 = 20 MS/s). A change also clears a 20 MS/s fallback, even
+  // one that holds over reopens (FallbackPolicy::receiver_failed); the same rate again changes nothing.
   bool set_watch_rate(int rate_sel);
   // Gain: < 0 = the chip's AGC, else fixed gain in dB (CCA off, IGI pinned).
   bool set_gain(double db);
@@ -167,7 +167,8 @@ private:
   int _req_rate = 1;
   int _watch_rate = 1;
   // 40 MS/s giving way to 20 MS/s in a watch. One for the process, like this Radio: open() clears a fallback, but
-  // not its "no more falling back". Locks for itself (taken inside _m where both are needed, never the reverse).
+  // not its "no more falling back", nor a fallback because 40 MS/s never streamed. Locks for itself (taken inside
+  // _m where both are needed, never the reverse).
   FallbackPolicy _fb;
   double _gain_db = -1;
   std::atomic<PictureOpts> _picture{PictureOpts{}};  // set_picture(); the DSP thread hands it to the decoder

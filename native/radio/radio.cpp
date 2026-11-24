@@ -280,7 +280,7 @@ bool Radio::set_watch_rate(int rate_sel) {
   std::lock_guard<std::mutex> l(_m);
   if (_watch_rate == rate_sel) return false;
   _watch_rate = rate_sel;
-  _fb.clear();
+  _fb.clear(true);
   return true;
 }
 
@@ -367,7 +367,10 @@ void Radio::dsp_loop() {
           std::lock_guard<std::mutex> m(_m);
           _dead = true;
           _wedged = st.wedged;
-          if (st.wedged) _fb.receiver_wedged(_mode == Mode::Watch);
+          if (st.wedged)
+            _fb.receiver_wedged(_mode == Mode::Watch);
+          else if (st.error.rfind("stream keeps failing", 0) == 0)  // wifi-sdr Receiver: five failed starts in a row
+            _fb.receiver_failed(_mode == Mode::Watch, wsdr::Receiver::rate_of(_req_rate));
           break;
         }
       }

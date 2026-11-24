@@ -144,6 +144,56 @@ static void fallback_disabled_by_a_wedge_at_20() {
   CHECK(!p.active());
 }
 
+static void fallback_when_40_never_streams() {
+  FP p;
+  p.watch_started(0);
+  // the receiver gives up at 20 MS/s, or outside a watch: that says nothing about 40 MS/s
+  CHECK(!p.receiver_failed(true, k20));
+  CHECK(!p.receiver_failed(false, k40));
+  CHECK(!p.active());
+  // in a 40 MS/s watch it falls back at once, inside the grace
+  CHECK(p.receiver_failed(true, k40));
+  CHECK(p.active() && p.rate_for(1) == 2);
+  // the reopen that follows keeps it, and so does the next
+  p.clear();
+  CHECK(p.active() && p.rate_for(1) == 2);
+  p.watch_started(5000);
+  p.clear();
+  CHECK(p.active() && p.rate_for(1) == 2);
+  // a wedge at 20 MS/s then does not end the falling back: 20 MS/s is all this host has
+  p.watch_started(9000);
+  p.receiver_wedged(true);
+  CHECK(!p.disabled() && p.active());
+  // the watch rate set anew tries 40 MS/s again, and the next reopen does not bring the fallback back
+  p.clear(true);
+  CHECK(!p.active() && p.rate_for(1) == 1);
+  p.clear();
+  CHECK(!p.active() && p.rate_for(1) == 1);
+  // ... and it can fall back the same way again
+  p.watch_started(20000);
+  CHECK(p.receiver_failed(true, k40));
+  CHECK(p.active());
+}
+
+static void fallback_not_held_after_giving_up() {
+  FP p;
+  p.watch_started(0);
+  for (int i = 0; i < FP::kFaults; i++) p.stream_restarted(FP::kGraceMs + i, k40);
+  p.receiver_wedged(true);  // fallen back by restarts, then wedged at 20 MS/s: no more falling back
+  CHECK(p.disabled());
+  p.clear();
+  p.watch_started(100000);
+  CHECK(!p.receiver_failed(true, k40));
+  CHECK(!p.active() && p.rate_for(1) == 1);
+  // a fallback already running is not made to hold over reopens either
+  FP q;
+  q.watch_started(0);
+  for (int i = 0; i < FP::kFaults; i++) q.stream_restarted(FP::kGraceMs + i, k40);
+  CHECK(!q.receiver_failed(true, k40));
+  q.clear();
+  CHECK(!q.active());
+}
+
 static void late_recent_counts_the_current_watch() {
   FP p;
   CHECK(p.late_recent(0) == 0);  // no watch
@@ -556,6 +606,8 @@ int main() {
   fallback_poll_cadence();
   fallback_cleared();
   fallback_disabled_by_a_wedge_at_20();
+  fallback_when_40_never_streams();
+  fallback_not_held_after_giving_up();
   late_recent_counts_the_current_watch();
   late_recent_leaves_out_a_streams_first_moments();
   late_recent_goes_when_the_stream_stops();

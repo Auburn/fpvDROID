@@ -21,9 +21,10 @@ int FallbackPolicy::rate_for(int asked) const {
   return _active && asked == 1 ? 2 : asked;
 }
 
-void FallbackPolicy::clear() {
+void FallbackPolicy::clear(bool rate_set) {
   std::lock_guard<std::mutex> l(_m);
-  _active = false;
+  if (rate_set) _held = false;
+  _active = _held;
 }
 
 uint64_t FallbackPolicy::late_recent(int64_t now_ms) const {
@@ -104,9 +105,20 @@ bool FallbackPolicy::blocks_lost(int64_t now_ms, double fs, uint64_t lost_total)
 
 void FallbackPolicy::receiver_wedged(bool watching) {
   std::lock_guard<std::mutex> l(_m);
-  if (!watching || !_active || _disabled) return;
+  // after a fallback held from a 40 MS/s that never streamed, 20 MS/s is not the worse of the two: it is all there is
+  if (!watching || !_active || _disabled || _held) return;
   _disabled = true;
   KP_LOGW("radio: wedged at 20 MS/s after falling back from 40: no more falling back this session");
+}
+
+bool FallbackPolicy::receiver_failed(bool watching, double fs) {
+  std::lock_guard<std::mutex> l(_m);
+  if (!watching || fs != 40e6 || _disabled || _active) return false;
+  KP_LOGW("radio: 40 MS/s would not stream (the receiver gave up): watching at 20 MS/s from now on, also when the "
+          "adapter is opened again");
+  fall_back();
+  _held = true;
+  return true;
 }
 
 }  // namespace kp
