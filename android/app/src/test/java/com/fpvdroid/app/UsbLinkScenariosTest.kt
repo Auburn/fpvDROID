@@ -42,11 +42,14 @@ class UsbLinkScenariosTest : AppHarness() {
         val failedAt = SystemClock.elapsedRealtime()
 
         assertEquals(State.WAITING, link.state)
-        assertEquals("The radio did not start: boom", link.message)
+        assertEquals("The radio didn't start.", link.message)
+        assertEquals("boom", link.cause)
         advance(300)
         assertEquals("Trying again", headline)
-        assertEquals("The radio did not start: boom", detail)
+        // plain words along the top; the radio's own words for it on the Signal tab, under them
+        assertEquals("The radio didn't start.", detail)
         assertEquals("Try now", action)
+        assertTrue(views(menu).any { it is android.widget.TextView && it.text.toString() == "The radio didn't start.\nboom" })
         assertEquals(1, fake.count("open"))
         assertEquals(1, fake.count("close"))
         assertEquals(listOf("open", "close"), fake.radioCalls().map { it.name }.filter { it == "open" || it == "close" })
@@ -82,13 +85,16 @@ class UsbLinkScenariosTest : AppHarness() {
     }
 
     // ------------------------------------------------------------------------------------------ 5. the radio dies
-    private fun assertReopensAndTunesAgain(maxDetectMs: Long) {
+    /** It [says] that in plain words on the status line, with [cause] (when given) kept for the Signal tab. */
+    private fun assertReopensAndTunesAgain(maxDetectMs: Long, says: String = "The radio stopped.", cause: String? = null) {
         val detect = advanceUntil("the app to close the dead radio", maxDetectMs) { fake.count("close") == 1 }
         assertEquals(State.WAITING, link.state)
-        assertTrue(link.message, link.message.startsWith("The radio stopped"))
+        assertEquals(says, link.message)
+        if (cause != null) assertEquals(cause, link.cause)
         fake.freezeBanks = false
         advanceUntil("the reopen", 3000) { fake.count("open") == 2 }
         assertEquals(State.RUNNING, link.state)
+        assertEquals("", link.cause)
         assertEquals(List(2) { FakeEngine.Call("watch", listOf(f2, true)) }, fake.calls("watch"))
         lastDetect = detect
     }
@@ -143,7 +149,7 @@ class UsbLinkScenariosTest : AppHarness() {
         running()
         wedgeIntoHeldOpen()
         assertEquals(State.REOPENING, link.state)
-        assertEquals("The adapter's USB link locked up: starting it again.", link.message)
+        assertEquals("The adapter's USB link froze.", link.message)
         releaseUntilRunning()
         assertEquals("", link.message)
         // once more a few seconds later (not held), and then a third time within two minutes: the note says what to try
@@ -155,7 +161,7 @@ class UsbLinkScenariosTest : AppHarness() {
         wedgeIntoHeldOpen()
         assertEquals(4, fake.count("open"))
         assertEquals(State.REOPENING, link.state)
-        assertTrue(link.message, link.message.startsWith("The adapter's USB link locked up 3 times in 2 minutes"))
+        assertTrue(link.message, link.message.startsWith("The USB link froze 3 times in 2 minutes"))
         releaseUntilRunning()
         assertEquals("", link.message)
         // none of it was handled as a failure (no waits, no slower retries)
@@ -167,7 +173,7 @@ class UsbLinkScenariosTest : AppHarness() {
         running()
         fake.rxState = "lost"
         fake.rxError = "bulk transfer: no device"
-        assertReopensAndTunesAgain(maxDetectMs = 500)
+        assertReopensAndTunesAgain(maxDetectMs = 500, says = "The adapter stopped answering.", cause = "bulk transfer: no device")
     }
 
     @Test
@@ -227,7 +233,7 @@ class UsbLinkScenariosTest : AppHarness() {
         // open -> no samples for 4 s -> close -> wait -> open ..., with no healthy spell in between
         advanceUntil("the fourth failure in a row", 60000) { fake.count("close") >= UsbLink.PERSISTENT_FAILURES }
         assertEquals(State.WAITING, link.state)
-        assertTrue(link.message, link.message.contains("unplug the adapter"))
+        assertEquals("The adapter stopped sending data. ${UsbLink.REPLUG}", link.message)
         val closes = fake.count("close")
         // and it still recovers by itself once the stream comes back
         fake.freezeBanks = false
@@ -242,7 +248,7 @@ class UsbLinkScenariosTest : AppHarness() {
         running()
         advance(1000)
         fake.freezeBanks = true
-        assertReopensAndTunesAgain(maxDetectMs = 6000)
+        assertReopensAndTunesAgain(maxDetectMs = 6000, says = "The adapter stopped sending data.")
         assertTrue("stall declared after $lastDetect ms, expected just over 4000", lastDetect in 4000..4600)
     }
 
@@ -319,7 +325,7 @@ class UsbLinkScenariosTest : AppHarness() {
         assertEquals(State.SWITCHING, link.state)
         advance(1000)
         assertEquals(State.FAILED, link.state)
-        assertTrue(link.message, link.message.contains("did not come back"))
+        assertTrue(link.message, link.message.startsWith("No adapter after the switch to USB 3"))
         assertEquals("Adapter problem", headline)
         assertEquals("Try again", action)
 
@@ -477,7 +483,7 @@ class UsbLinkScenariosTest : AppHarness() {
         answerPermission(false)
         assertEquals(State.DENIED, link.state)
         advance(300)
-        assertEquals("Permission needed", headline)
+        assertEquals("USB access denied", headline)
         assertEquals("Ask again", action)
         advance(10000)
         assertEquals("a denial is not asked again by itself", 1, permissionRequests.size)

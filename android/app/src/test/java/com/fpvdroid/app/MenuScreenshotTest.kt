@@ -129,7 +129,14 @@ class MenuScreenshotTest {
     @Test @Config(qualifiers = PHONE)
     fun channelError() = shoot("channel_error", Tab.CHANNEL, MenuState(
         tone = Tone.WARN, headline = "Trying again",
-        detail = "The radio did not start: bulk transfer timed out while loading firmware", action = "Try now"), 2400, 1080)
+        detail = "The radio didn't start.", action = "Try now",
+        stats = "The radio didn't start.\nbulk transfer timed out while loading firmware"), 2400, 1080)
+
+    /** The same trouble on the Signal tab: the status line's words again, and the radio's own under them. */
+    @Test @Config(qualifiers = PHONE)
+    fun signalError() = shoot("signal_error", Tab.SIGNAL, MenuState(
+        tone = Tone.WARN, headline = "Trying again", detail = "The radio didn't start.", action = "Try now",
+        stats = "The radio didn't start.\nbulk transfer timed out while loading firmware"), 2400, 1080)
 
     /** Nothing to say along the top: the name of the app there instead. */
     @Test @Config(qualifiers = PHONE)
@@ -268,7 +275,7 @@ class MenuScreenshotTest {
     @Test @Config(qualifiers = SMALL)
     fun smallError() = shoot("small_error", Tab.VIEW, MenuState(
         tone = Tone.WARN, headline = "Trying again",
-        detail = "The radio stopped: no samples for 4 seconds. If this goes on, unplug the adapter and plug it in again.",
+        detail = "The adapter stopped sending data. ${UsbLink.REPLUG}",
         action = "Try now"), 1600, 720)
 
     /** Narrower still: the same screen with a camera cutout taking 68 dp of its width. */
