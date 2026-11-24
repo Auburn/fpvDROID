@@ -417,11 +417,13 @@ void Radio::dsp_loop() {
       _load_t0_ms = t;
       if (++_status_ticks % 5 == 0 && _mode == Mode::Watch)
         KP_LOGI("status: watch %.1f MHz, cpu demod %.0f%% decode %.0f%%, dropped stream %llu usb %llu decode %llu, "
-                "restarts %llu, %s %s lock %.2f fps %.0f, acq %llu lost %llu rephase %llu, torn frames hidden %llu",
+                "restarts %llu, unwedged %llu, %s %s lock %.2f fps %.0f, acq %llu lost %llu rephase %llu, "
+                "torn frames hidden %llu",
                 _watch_hz / 1e6,
                 _load * 100, _dload * 100, (unsigned long long)(_rx ? _rx->status().mid_drops : 0),
                 (unsigned long long)_dropped.load(), (unsigned long long)_decq.dropped(),
-                (unsigned long long)(_rx ? _rx->status().restarts : 0), _vstats.std_name,
+                (unsigned long long)(_rx ? _rx->status().restarts : 0),
+                (unsigned long long)(_rx ? _rx->status().unwedged : 0), _vstats.std_name,
                 _vstats.colour ? "colour" : "grey", _vstats.lock_recent, _fps,
                 (unsigned long long)_vstats.acquisitions, (unsigned long long)_vstats.losses,
                 (unsigned long long)_vstats.rephases, (unsigned long long)_gate.hidden());
@@ -915,7 +917,8 @@ std::string Radio::status_json() {
     << ",\"watch_hz\":" << num(_watch_hz) << ",\"fs\":" << num(rs.fs) << ",\"banks\":" << _banks.load()
     << ",\"dropped\":" << _dropped.load() << ",\"decode_dropped\":" << _decq.dropped()
     << ",\"stream_dropped\":" << rs.mid_drops << ",\"late_recent\":" << late_recent
-    << ",\"restarts\":" << rs.restarts << ",\"dsp_load\":" << num(_load) << ",\"decode_load\":" << num(_dload)
+    << ",\"restarts\":" << rs.restarts << ",\"unwedged\":" << rs.unwedged << ",\"dsp_load\":" << num(_load)
+    << ",\"decode_load\":" << num(_dload)
     << ",\"watch_msps\":" << (_mode == Mode::Watch ? wsdr::Receiver::rate_of(_req_rate) / 1e6 : 0)
     << ",\"fallback\":" << (_fb.active() ? "true" : "false") << ",\"dead\":" << (_dead ? "true" : "false")
     << ",\"wedged\":" << (_wedged ? "true" : "false")

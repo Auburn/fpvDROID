@@ -17,10 +17,15 @@ namespace kp {
 //    minute, at most four at one go: left alone. kDrops in the window is two a second kept up.
 // Neither counts in the first kGraceMs of a watch. On some hosts a fresh stream starts badly for a while: a
 // Pixel 8 Pro loses the run at bank 51-55 for one to four seconds, a restart each time, before it keeps up for
-// good, and on that phone 20 MS/s is far worse (its USB path wedges within ~0.2 s, where 40 MS/s runs for many
-// seconds). A link that cannot carry 40 MS/s goes on restarting past the grace, and still falls back.
-// And none at all once a stream that had fallen back wedged at 20 MS/s: on such a host 20 MS/s is worse than a
-// 40 MS/s that restarts, so there is no more falling back for as long as this object lives (clear() keeps that).
+// good. A link that cannot carry 40 MS/s goes on restarting past the grace, and still falls back.
+// On that phone 20 MS/s is the better rate, now that the stream frees its USB path's wedge without stopping (the
+// wifi-sdr patch, patches/README.md; before, 20 MS/s wedged within ~0.2 s there and was far the worse). Measured:
+// one restart in ~15 minutes at 20 MS/s, two to four a minute at 40 MS/s. And what cost a restart at 40 MS/s
+// there now mostly costs one to four lost blocks instead, so it is the lost blocks that can take such a watch to
+// 20 MS/s (in one run of three, 20 s in), where the restarts seldom did.
+// And none at all once a stream that had fallen back wedged at 20 MS/s for good (the receiver stopped: the wedge
+// was back straight after being freed): on such a host 20 MS/s is worse than a 40 MS/s that restarts, so there is
+// no more falling back for as long as this object lives (clear() keeps that).
 //
 // The lost blocks are counted at every sample rate, for late_recent(): how many the current watch has lost
 // lately, which is what tells the app that the host is not keeping up. Not the ones a stream loses in its first

@@ -160,7 +160,9 @@ goggles before there is anything to watch.
 To see how long a phone's USB link holds up, `--ez soak true` streams at 40 MS/s after every open instead of
 watching; `fpvdroid.log` then has each stream fault as it happens (with what wifi-sdr itself reports) and the
 adapter's USB 3 power management at every open. `--es env WSDR_URB_DEPTH=512` passes a switch to wifi-sdr
-(several: comma-separated), in place from the next time the adapter is opened. The app's own, under the same
+(several: comma-separated), in place from the next time the adapter is opened. `WSDR_WEDGE_US=0` is one: it turns
+off the chip's own recovery from the adapter's USB 3 lock-up (it frees itself within the block, and the status
+line counts that as `unwedged`), so that each lock-up shows in the log as a stream fault. The app's own, under the same
 extra: `KP_CONCEAL=0` shows the frames torn by a stream restart (at once), and `KP_FAST_CPUS=0` lets Android put
 the two processing threads on any core (from the next open; by default they are kept off the phone's slowest
 cores, where they fall behind).
