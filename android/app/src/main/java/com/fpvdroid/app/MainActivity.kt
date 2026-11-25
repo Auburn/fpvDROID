@@ -19,7 +19,6 @@ import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
-import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
 import com.fpvdroid.app.RadioStatus.Mode
 import java.io.File
@@ -29,8 +28,9 @@ import kotlin.math.roundToInt
 /**
  * fpvDROID: one screen. The picture fills it; the menu ([MenuView]) lies over a black screen with the picture moved
  * into its preview (tapping that closes the menu), and is open when the app starts. With the menu closed there is
- * nothing on screen but the picture: a tap brings up a MENU button for three seconds. Where there is no picture,
- * full size or small, the screen shows colour bars naming the chosen channel (NO SIGNAL before there is one).
+ * nothing on screen but the picture, and the menu's status line along the top while it has something to say: a tap
+ * brings up a MENU button for three seconds. Where there is no picture, full size or small, the screen shows colour
+ * bars naming the chosen channel (NO SIGNAL before there is one).
  *
  * USB stream test (for the first hardware check):  adb shell am start -n com.fpvdroid.app/.MainActivity --es mode usbtest
  */
@@ -51,7 +51,6 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     private lateinit var video: SurfaceView
     private lateinit var menu: MenuView
     private lateinit var hint: MenuHint
-    private var menuOpen = true
     /**
      * The menu opened itself, because there was no picture to show and a reason to give (the adapter gone, a
      * radio being started again): it closes itself when the picture is back, unless it has been touched since.
@@ -207,7 +206,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     /** Back goes up: from the picture to the menu, from the menu out of the app. */
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
-        if (menuOpen) {
+        if (menu.isOpen) {
             @Suppress("DEPRECATION") super.onBackPressed()
         } else openMenu()
     }
@@ -308,7 +307,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     }
 
     override fun onSweep(on: Boolean) {
-        sweepOn = on && menuOpen
+        sweepOn = on && menu.isOpen
         syncSweep()
         refresh()
     }
@@ -337,7 +336,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     }
 
     /** A view slider is being dragged: the picture full size under it, so the change can be judged. */
-    override fun onPeek(on: Boolean) = engine.setBackdrop(menuOpen && !on, false)
+    override fun onPeek(on: Boolean) = engine.setBackdrop(menu.isOpen && !on, false)
 
     /** The menu and the video fill the same screen: the preview's place in the menu is its place on the Surface. */
     override fun onPreview(left: Int, top: Int, right: Int, bottom: Int, radius: Float) =
@@ -368,7 +367,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     }
 
     private fun showMenuForTrouble() {
-        if (menuOpen || !::menu.isInitialized) return
+        if (!::menu.isInitialized || menu.isOpen) return
         openMenu()
         menuAuto = true
     }
@@ -433,7 +432,8 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         if (!::menu.isInitialized) return
         val running = link.state == UsbLink.State.RUNNING
         val st = if (running) radioState() else linkState()
-        if (menuOpen) menu.render(if (running && menu.tab == Tab.SPECTRUM) st.copy(spectrum = spectrum()) else st)
+        // closed, the menu still shows its status line over the picture
+        menu.render(if (running && menu.showsSpectrum) st.copy(spectrum = spectrum()) else st)
     }
 
     /** What the radio has seen of the span the Spectrum tab shows. */
@@ -623,7 +623,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         root.setOnTouchListener { _, e ->
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN -> { downX = e.x; downY = e.y }
-                MotionEvent.ACTION_UP -> if (!menuOpen && abs(e.x - downX) < dp(16f) && abs(e.y - downY) < dp(16f)) showHint()
+                MotionEvent.ACTION_UP -> if (!menu.isOpen && abs(e.x - downX) < dp(16f) && abs(e.y - downY) < dp(16f)) showHint()
             }
             true
         }
@@ -643,33 +643,24 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     }
 
     private fun openMenu() {
-        if (menuOpen) return
-        menuOpen = true
+        if (menu.isOpen) return
         menuAuto = false
         ui.removeCallbacks(hideHint)
         hint.animate().cancel()
         hint.alpha = 0f
         hint.visibility = View.GONE
         engine.setBackdrop(true, false)
+        menu.open()
         refresh()
-        menu.animate().cancel()
-        menu.visibility = View.VISIBLE
-        menu.alpha = 0f
-        menu.translationY = dp(10f)
-        menu.animate().alpha(1f).translationY(0f).setDuration(240).setInterpolator(DecelerateInterpolator(1.5f)).withEndAction(null).start()
     }
 
     private fun closeMenu() {
-        if (!menuOpen) return
-        menuOpen = false
+        if (!menu.isOpen) return
+        menu.close()   // all but its status line, which stays over the picture while it has something to say
         menuAuto = false
         sweepOn = false
         syncSweep()   // a sweep under way gives way to the picture
-        menu.endPeek()
         engine.setBackdrop(false, false)
-        menu.animate().cancel()
-        menu.animate().alpha(0f).translationY(dp(10f)).setDuration(200).setInterpolator(DecelerateInterpolator(1.5f))
-            .withEndAction { menu.visibility = View.GONE }.start()
     }
 
     /**

@@ -67,6 +67,9 @@ fun label(ctx: Context, text: String, size: Float, color: Int, medium: Boolean =
 /** A small all-caps heading. */
 fun caption(ctx: Context, text: String) = label(ctx, text.uppercase(), 11f, Skin.TEXT_3, medium = true).apply { letterSpacing = 0.14f }
 
+/** A shadow under the words, so that they read over the picture, whatever it shows (over black it is not seen). */
+fun TextView.overPicture() = apply { setShadowLayer(dp(3f), 0f, dp(1f), Color.argb(200, 0, 0, 0)) }
+
 /** A rounded button. [primary]: the one obvious thing to press (white), else quiet glass. */
 @SuppressLint("ViewConstructor")
 class PillButton(ctx: Context, text: String, private val primary: Boolean = false) : TextView(ctx) {
