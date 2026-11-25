@@ -165,7 +165,8 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
 
     // picture page
     private lateinit var cleanOsdRow: SettingRow
-    private lateinit var lowLatencyRow: SettingRow
+    private lateinit var maxHzRow: SettingRow
+    private lateinit var vsyncRow: SettingRow
 
     // signal page
     private lateinit var offsetRow: SettingRow
@@ -590,13 +591,30 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         p.addView(divider(context))
         p.addView(toggle("Colour comb", "Fewer rainbows on fine detail, at the cost of more processing (NTSC cameras)", s.colourComb) { s.colourComb = it })
         p.addView(divider(context))
-        lowLatencyRow = toggle("Low latency", "Shows each part of the picture as soon as it arrives. Uses more battery", s.lowLatency) { s.lowLatency = it }
-        p.addView(lowLatencyRow)
+        maxHzRow = toggle("Max screen Hz", MAX_HZ_WORDS, s.maxScreenHz) { s.maxScreenHz = it }
+        p.addView(maxHzRow)
+        p.addView(divider(context))
+        vsyncRow = toggle("Vsync", "Shows each picture whole. Off: each part goes up as soon as it arrives, for less delay", s.vsync) { s.vsync = it }
+        p.addView(vsyncRow)
         return p
     }
 
-    /** Low latency was set from outside the menu (the debug extra): its switch follows [Settings]. */
-    fun syncLowLatency() = (lowLatencyRow.control as Toggle).set(s.lowLatency, animate = false)
+    /** Vsync was set from outside the menu (the debug extra): its switch follows [Settings]. */
+    fun syncVsync() = (vsyncRow.control as Toggle).set(s.vsync, animate = false)
+
+    /**
+     * The screen's refresh rate, said under Max screen Hz: [now], and where it differs [flying], what it was the
+     * last time the menu was closed (0: not known). An open menu can hold the screen at a faster rate than it runs
+     * at with the picture alone.
+     */
+    fun showScreenHz(now: Float, flying: Float) {
+        fun hz(v: Float) = if (abs(v - v.roundToInt()) < 0.01f) "${v.roundToInt()} Hz" else "%.2f Hz".format(v)
+        maxHzRow.detailView.text = MAX_HZ_WORDS + when {
+            now <= 0 -> ""
+            flying > 0 && hz(flying) != hz(now) -> "\nScreen now ${hz(now)}, ${hz(flying)} with the menu closed"
+            else -> "\nScreen now ${hz(now)}"
+        }
+    }
 
     // ------------------------------------------------------------------------------------------ signal
     private fun buildSignalPage(): View {
@@ -665,6 +683,9 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     private fun <T : View> T.sized(width: Int): T = apply { layoutParams = LinearLayout.LayoutParams(width, dpi(38f)) }
 
     companion object {
+        /** What Max screen Hz says of itself; the screen's rate now goes under it ([showScreenHz]). */
+        const val MAX_HZ_WORDS = "Runs the screen at its fastest rate, so the picture shows sooner. Uses more battery. " +
+            "Off: the screen is asked for the camera's rate"
         const val RAIL_DP = 204f
         /** A screen lower than this is short: most phones held sideways are, by a little. */
         const val SHORT_DP = 400f

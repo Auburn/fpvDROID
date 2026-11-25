@@ -85,6 +85,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     /** Debug ("refresh" extra: "field", "max" or "none"): in place of what [matchDisplayTo] would ask for. */
     private var refreshOverride: RefreshAsk? = null
     private var toldRefresh = 0f           // the display's refresh rate as last told to the engine ([tellRefresh])
+    private var flyingHz = 0f              // ... and as it was with the menu closed, the picture alone (0: not seen yet)
     private val displayWatch = object : DisplayManager.DisplayListener {
         override fun onDisplayAdded(displayId: Int) {}
         override fun onDisplayRemoved(displayId: Int) {}
@@ -132,8 +133,8 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
 
     /**
      * adb shell am start -n com.fpvdroid.app/.MainActivity [--es mode usbtest] [--ef gain 30] [--ef record 3] [--ez testcard true]
-     * Picture delay: [--ez lowlatency true] (the Picture tab's Low latency), [--es refresh field|max|none] (the display
-     * rate asked for, in place of what Low latency says: the field rate, the display's fastest, or none),
+     * Picture delay: [--ez vsync true] (the Picture tab's Vsync), [--es refresh field|max|none] (the display rate
+     * asked for, in place of what Max screen Hz says: the field rate, the display's fastest, or none),
      * [--ez menu false] (the menu closed, the picture full size, as when flying; true opens it).
      * USB debugging: [--es env WSDR_URB_DEPTH=64,OTHER=1] (wifi-sdr / devourer switches, in place from the next
      * open; KEY= removes one), [--ez soak true] (a 40 MS/s stream test after every open instead of watching: how long
@@ -162,10 +163,10 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
             if (::menu.isInitialized) menu.syncGain()
             onSignal()
         }
-        if (i.hasExtra("lowlatency")) {   // the same as the Picture tab's Low latency
-            settings.lowLatency = i.getBooleanExtra("lowlatency", false)
-            engine.log("debug: low latency ${settings.lowLatency}")
-            if (::menu.isInitialized) menu.syncLowLatency()
+        if (i.hasExtra("vsync")) {   // the same as the Picture tab's Vsync
+            settings.vsync = i.getBooleanExtra("vsync", false)
+            engine.log("debug: vsync ${settings.vsync}")
+            if (::menu.isInitialized) menu.syncVsync()
             applyPicture()
         }
         if (i.hasExtra("menu") && ::menu.isInitialized) {
@@ -257,8 +258,8 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     // ---------------------------------------------------------------------------------------- settings -> native
     private fun applyPicture() {
         engine.setPicture(settings.lumaComb, settings.lumaComb && settings.cleanOsd, settings.smoothLines,
-            settings.sparkleRepair, settings.colourComb, settings.lowLatency)
-        // low latency asks the display for another refresh rate
+            settings.sparkleRepair, settings.colourComb, !settings.vsync)
+        // Max screen Hz asks the display for another refresh rate
         if (::video.isInitialized && displayStd.isNotEmpty()) matchDisplayTo(displayStd)
     }
 
@@ -617,16 +618,16 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     }
 
     /**
-     * Ask for a display mode that suits the picture. Whole pictures: one that fits the camera's field rate, so frames
-     * do not beat against the refresh. Low latency: the fastest the display has, at its resolution: the picture
-     * comes in strips many times a field, and a faster refresh shows each sooner (a 90 or 120 Hz panel asked for
-     * the field rate drops to 60 Hz).
+     * Ask for a display mode that suits the picture. Max screen Hz: the fastest the display has, at its resolution,
+     * which shows each picture, or each strip of it, sooner. Without it: the camera's field rate, so that frames do
+     * not beat against the refresh. That only works on a display with such a mode: a panel with only 60 and 120 Hz
+     * asked for 59.94 goes to 60, which neither matches nor is fast.
      */
     private fun matchDisplayTo(std: String) {
         displayStd = std
         if (Build.VERSION.SDK_INT < 30) return
         val field = when (std) { "PAL" -> 50f; "NTSC" -> 59.94f; else -> return }
-        val ask = refreshOverride ?: if (settings.lowLatency) RefreshAsk.MAX else RefreshAsk.FIELD
+        val ask = refreshOverride ?: if (settings.maxScreenHz) RefreshAsk.MAX else RefreshAsk.FIELD
         if (ask to std == asked) return
         val surface = video.holder.surface ?: return
         if (!surface.isValid) return
@@ -642,6 +643,8 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         } catch (e: Exception) {
             engine.log("setFrameRate: $e")
         }
+        flyingHz = 0f   // that was with the request before
+        tellRefresh()
     }
 
     /** The fastest refresh rate the display has at the resolution it is in (0: not known). */
@@ -666,16 +669,20 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     }
 
     /**
-     * Tell the engine the display's refresh rate when it changed (what [matchDisplayTo] asked for is not always what
-     * the display does: a panel with only 60 and 120 Hz asked for 59.94 goes to 60). The picture-delay readout needs
-     * it where the display's own timing is out of date (front-buffer drawing).
+     * The display's refresh rate as it is now (what [matchDisplayTo] asked for is not always what the display does).
+     * To the engine when it changed: the picture-delay readout needs it where the display's own timing is out of
+     * date (front-buffer drawing). And to the menu, under Max screen Hz, with the rate the screen had while the menu
+     * was closed: an open menu can hold it at a faster one.
      */
     private fun tellRefresh() {
         val hz = shownOn()?.mode?.refreshRate ?: return
-        if (hz == toldRefresh) return
-        toldRefresh = hz
-        engine.setDisplayRefresh(hz)
-        engine.log("display: now $hz Hz")
+        if (hz != toldRefresh) {
+            toldRefresh = hz
+            engine.setDisplayRefresh(hz)
+            engine.log("display: now $hz Hz")
+        }
+        if (!menuOpen) flyingHz = hz
+        if (::menu.isInitialized) menu.showScreenHz(hz, flyingHz)
     }
 
     /**
@@ -774,6 +781,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     private fun closeMenu() {
         if (!menuOpen) return
         menuOpen = false
+        tellRefresh()   // from here on the screen's rate is the one it flies at
         menuAuto = false
         sweepOn = false
         syncSweep()   // a sweep under way gives way to the picture

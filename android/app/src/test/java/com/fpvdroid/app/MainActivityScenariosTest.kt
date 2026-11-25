@@ -48,7 +48,7 @@ class MainActivityScenariosTest : AppHarness() {
         val c = changes()
         assertTrue(c.toString(), call("setBackdrop", true, true) in c)
         // luma comb, clean OSD, smooth lines; no repair, no colour comb
-        assertTrue(c.toString(), call("setPicture", true, true, true, false, false, false) in c)
+        assertTrue(c.toString(), call("setPicture", true, true, true, false, false, true) in c)
         assertTrue(c.toString(), call("setView", 4f / 3f, Settings.FIT, 1f, false, 0f) in c)
         assertTrue(c.toString(), call("setWatchRate", 1) in c)
         assertTrue(c.toString(), call("setDiversity", false) in c)
@@ -216,41 +216,60 @@ class MainActivityScenariosTest : AppHarness() {
 
         fake.clearCalls()
         click(comb)   // off
-        assertChanges(call("setPicture", false, false, true, false, false, false))
+        assertChanges(call("setPicture", false, false, true, false, false, true))
         assertFalse(savedSettings().lumaComb)
         assertFalse("Clean OSD edges needs the comb filter", clean.isEnabled)
 
         fake.clearCalls()
         click(comb)   // on again: clean OSD (still on) counts again
-        assertChanges(call("setPicture", true, true, true, false, false, false))
+        assertChanges(call("setPicture", true, true, true, false, false, true))
 
         fake.clearCalls()
         click(clean)  // off
-        assertChanges(call("setPicture", true, false, true, false, false, false))
+        assertChanges(call("setPicture", true, false, true, false, false, true))
         assertFalse(savedSettings().cleanOsd)
 
         fake.clearCalls()
         click(control("Smooth lines"))
-        assertChanges(call("setPicture", true, false, false, false, false, false))
+        assertChanges(call("setPicture", true, false, false, false, false, true))
 
         fake.clearCalls()
         click(control("Sparkle repair"))
-        assertChanges(call("setPicture", true, false, false, true, false, false))
+        assertChanges(call("setPicture", true, false, false, true, false, true))
         assertTrue(savedSettings().sparkleRepair)
     }
 
     @Test
-    fun lowLatencyReachesTheEngine() {
+    fun vsyncShowsWholePicturesAndWithoutItStripsGoUp() {
         running()
         showTab("Picture")
+        assertFalse("off unless it was set", savedSettings().vsync)
         fake.clearCalls()
-        click(control("Low latency"))
+        click(control("Vsync"))
+        assertChanges(call("setPicture", true, true, true, false, false, false))   // no strips
+        assertTrue(savedSettings().vsync)
+        fake.clearCalls()
+        click(control("Vsync"))
         assertChanges(call("setPicture", true, true, true, false, false, true))
-        assertTrue(savedSettings().lowLatency)
-        fake.clearCalls()
-        click(control("Low latency"))
-        assertChanges(call("setPicture", true, true, true, false, false, false))
-        assertFalse(savedSettings().lowLatency)
+        assertFalse(savedSettings().vsync)
+    }
+
+    @Test
+    fun maxScreenHzIsKeptAndSaysTheScreensRate() {
+        running()
+        showTab("Picture")
+        assertTrue("on unless it was set", savedSettings().maxScreenHz)
+        val said = { views(menu).filterIsInstance<SettingRow>().first { it.control === control("Max screen Hz") }.detailView.text.toString() }
+        assertTrue(said(), said().endsWith("\nScreen now 60 Hz"))
+        click(control("Max screen Hz"))
+        assertFalse(savedSettings().maxScreenHz)
+        click(control("Max screen Hz"))
+        assertTrue(savedSettings().maxScreenHz)
+        // an open menu can hold the screen at a faster rate than it has with the picture alone: both are said
+        menu.showScreenHz(120f, 59.94f)
+        assertTrue(said(), said().endsWith("\nScreen now 120 Hz, 59.94 Hz with the menu closed"))
+        menu.showScreenHz(120f, 120f)
+        assertTrue(said(), said().endsWith("\nScreen now 120 Hz"))
     }
 
     @Test
@@ -273,7 +292,7 @@ class MainActivityScenariosTest : AppHarness() {
         showTab("Picture")
         fake.clearCalls()
         click(control("Colour comb"))
-        assertChanges(call("setPicture", true, true, true, false, true, false))
+        assertChanges(call("setPicture", true, true, true, false, true, true))
         assertTrue(savedSettings().colourComb)
     }
 
