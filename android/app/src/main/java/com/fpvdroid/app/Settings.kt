@@ -2,7 +2,9 @@ package com.fpvdroid.app
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.view.WindowManager
 import kotlin.math.abs
+import kotlin.math.exp
 import kotlin.math.roundToInt
 import kotlin.reflect.KProperty
 
@@ -62,6 +64,8 @@ class Settings(private val prefs: SharedPreferences) {
     var eyeSpacing by pref("eye_spacing", 0f)                // pictures apart .. together: ±EYE_SHIFT_MAX of the width
     var eyeOffsetX by pref("eye_offset_x", 0f)               // both left .. right: ±EYE_OFFSET_X_MAX of the width
     var eyeOffsetY by pref("eye_offset_y", 0f)               // both down .. up: ±EYE_OFFSET_Y_MAX of the height
+    var brightnessSet by pref("brightness_set", false)       // false: the phone's own brightness
+    var brightness by pref("brightness", 1f)                 // when it is not: 0..1 along the slider (pictureBrightness)
     // picture
     var lumaComb by pref("luma_comb", true)
     var cleanOsd by pref("clean_osd", true)
@@ -92,6 +96,13 @@ class Settings(private val prefs: SharedPreferences) {
         return ViewOpts(aspect, fit, gogglesScale, lenses)
     }
 
+    /**
+     * The screen's brightness while the picture fills it (a window's screenBrightness): the phone's own unless one
+     * is set, and then [brightness] by the curve of Android's own slider ([screenBrightness]).
+     */
+    val pictureBrightness: Float get() =
+        if (brightnessSet) screenBrightness(brightness) else WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+
     /** One setting: its value, and how it is written back when it is set. */
     private inner class Pref<T>(private var value: T, private val put: SharedPreferences.Editor.(T) -> Unit) {
         operator fun getValue(owner: Settings, property: KProperty<*>): T = value
@@ -121,5 +132,22 @@ class Settings(private val prefs: SharedPreferences) {
         const val EYE_OFFSET_X_MAX = 0.1f
         const val EYE_OFFSET_Y_MAX = 0.2f
         const val GAIN_MAX = 45f
+
+        /**
+         * The window brightness (0..1, in light) for [level] along a brightness slider (0..1), by the curve Android's
+         * own slider follows (SettingsLib's BrightnessUtils.convertGammaToLinear: the HLG curve, inverted). So 50%
+         * here looks like 50% there, and the slider's lower half is not all lost in the dark: 50% is 1/12 of the light.
+         */
+        fun screenBrightness(level: Float): Float {
+            val v = level.coerceIn(0f, 1f)
+            val hlg = if (v <= HLG_R) (v / HLG_R).let { it * it } else exp((v - HLG_C) / HLG_A) + HLG_B
+            return (hlg / 12f).coerceIn(0f, 1f)
+        }
+
+        // the HLG curve's constants (ITU-R BT.2100), as BrightnessUtils has them
+        private const val HLG_R = 0.5f
+        private const val HLG_A = 0.17883277f
+        private const val HLG_B = 0.28466892f
+        private const val HLG_C = 0.55991073f
     }
 }

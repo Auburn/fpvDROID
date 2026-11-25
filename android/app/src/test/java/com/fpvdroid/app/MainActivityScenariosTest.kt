@@ -2,6 +2,7 @@ package com.fpvdroid.app
 
 import android.view.SurfaceView
 import android.view.View
+import android.view.WindowManager
 import com.fpvdroid.app.FakeEngine.Call
 import com.fpvdroid.app.UsbLink.State
 import org.junit.Assert.assertEquals
@@ -498,6 +499,61 @@ class MainActivityScenariosTest : AppHarness() {
         assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 0.75f)
         assertEquals(View.VISIBLE, screenSize.visibility)
         assertTrue(shownRow("Size") === screenSize)
+    }
+
+    @Test
+    fun pictureBrightnessIsTheScreensOnlyWhileThePictureFillsIt() {
+        val phones = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+        fun screen() = activity.window.attributes.screenBrightness
+        running()
+        showTab("View")
+        val slider = control("Brightness value") as Slider
+        assertFalse("no slider while the phone's own is chosen", slider.isShown)
+
+        pick(control("Screen brightness") as Segmented, 1, 2)   // Set
+        assertTrue(savedSettings().brightnessSet)
+        assertEquals("the menu keeps the phone's", phones, screen(), 0f)
+        layOut()
+        assertTrue(slider.isShown)
+
+        // held, the menu steps aside and the screen shows it; let go, the menu is back and so is the phone's
+        val lift = hold(slider, 0.9f, 0.6f)
+        assertEquals(0.6f, savedSettings().brightness, 0.02f)
+        assertEquals("while held", savedSettings().pictureBrightness, screen(), 0.0001f)
+        lift()
+        assertEquals("let go", phones, screen(), 0f)
+
+        click(preview())   // the menu closed: the picture's
+        assertEquals(Settings.screenBrightness(0.6f), screen(), 0.005f)
+        @Suppress("DEPRECATION") activity.onBackPressed()   // open again: the phone's
+        settle()
+        assertEquals(phones, screen(), 0f)
+
+        showTab("View")
+        pick(control("Screen brightness") as Segmented, 0, 2)   // Auto
+        assertFalse(savedSettings().brightnessSet)
+        click(preview())
+        assertEquals("the phone's, menu or not", phones, screen(), 0f)
+    }
+
+    /** A setting saved earlier is the screen's from the first time the menu closes. */
+    @Test
+    fun savedPictureBrightnessIsTheScreensWhenTheMenuFirstCloses() {
+        Settings(app).apply { brightnessSet = true; brightness = 1f }
+        running()
+        assertEquals(WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE, activity.window.attributes.screenBrightness, 0f)
+        click(preview())
+        assertEquals(1f, activity.window.attributes.screenBrightness, 0.001f)
+    }
+
+    /** Android's own slider curve: the ends are off and full, the middle a twelfth of the light. */
+    @Test
+    fun brightnessSliderFollowsAndroidsCurve() {
+        assertEquals(0f, Settings.screenBrightness(0f), 0f)
+        assertEquals(1f / 12, Settings.screenBrightness(0.5f), 0.001f)
+        assertEquals(1f, Settings.screenBrightness(1f), 0.001f)
+        var last = -1f
+        for (i in 0..100) Settings.screenBrightness(i / 100f).let { assertTrue("rises at ${i}%", it > last); last = it }
     }
 
     @Test

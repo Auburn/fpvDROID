@@ -85,7 +85,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         /** A channel was picked ([Settings.channelMhz] and [Settings.band] are already set). */
         fun onTune()
         fun onScan()
-        /** A view setting changed (aspect, scaling, size, goggles). */
+        /** A view setting changed (aspect, scaling, size, screen brightness, goggles). */
         fun onView()
         /** A picture switch changed. */
         fun onPicture()
@@ -123,6 +123,8 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         private set
     /** The Spectrum tab is on screen: only then is the spectrum worth reading for it. */
     val showsSpectrum get() = isOpen && tab == Tab.SPECTRUM
+    /** The picture fills the screen: the menu is closed, or has stepped aside for a view slider being dragged. */
+    val pictureFull get() = !isOpen || peeking != null
     private val group = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }   // status line, rail + card
     internal val body = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }   // the rail and the card
     private lateinit var rail: View
@@ -571,7 +573,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
                 on.onView()
             }.sized(dpi(216f)))
         p.addView(fitRow)
-        /** A slider for the picture's place or size: the picture is shown sharp while it is dragged (peek). */
+        /** A slider for the picture's place, size or brightness: the picture is shown full while it is dragged (peek). */
         fun sliderRow(title: String, words: () -> String, min: Float, max: Float, value: Float, detent: Float,
                       fromDetent: Boolean = false, set: (Float) -> Unit): SettingRow {
             lateinit var row: SettingRow
@@ -589,6 +591,18 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         sizeRow = sliderRow("Size", { "${percent(s.scale)}% of the screen" }, Settings.SCALE_MIN, Settings.SCALE_MAX,
             s.scale, 1f) { s.scale = it }
         p.addView(sizeRow)
+        p.addView(divider(context))
+        // Set: the value's row under the choice
+        val brightnessRows = listOf(divider(context),
+            sliderRow("Brightness value", { "${percent(s.brightness)}%" }, 0f, 1f, s.brightness, 1f) { s.brightness = it })
+        p.addView(SettingRow(context, "Screen brightness", "Let the phone manage it, or set one for the picture with the menu closed",
+            Segmented(context, listOf("Auto", "Set"), if (s.brightnessSet) 1 else 0) { i ->
+                s.brightnessSet = i == 1
+                showRows(s.brightnessSet, brightnessRows)
+                on.onView()
+            }.sized(dpi(170f))))
+        for (v in brightnessRows) p.addView(v)
+        showRows(s.brightnessSet, brightnessRows)
         p.addView(divider(context))
         p.addView(SettingRow(context, "Goggles", "The picture twice, side by side, for goggles that hold a phone",
             Toggle(context, s.goggles) { v ->

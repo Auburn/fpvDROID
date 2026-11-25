@@ -228,6 +228,21 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
 
     private fun applyView() = engine.setView(settings.view)
 
+    /** The picture fills the screen ([MenuView.pictureFull]), or sits in the menu's preview over the black backdrop. */
+    private fun showPicture() {
+        engine.setBackdrop(!menu.pictureFull, false)
+        applyBrightness()
+    }
+
+    /** The picture's own brightness while it fills the screen ([Settings.pictureBrightness]); the phone's in the menu. */
+    private fun applyBrightness() {
+        val to = if (menu.pictureFull) settings.pictureBrightness else WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+        val lp = window.attributes
+        if (lp.screenBrightness == to) return
+        lp.screenBrightness = to
+        window.attributes = lp
+    }
+
     /**
      * Where there is no picture, the screen's card names the chosen channel ("R8"; a frequency off every channel by
      * its MHz), or says NO SIGNAL when none has been chosen yet.
@@ -327,7 +342,10 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         refresh()
     }
 
-    override fun onView() = applyView()
+    override fun onView() {
+        applyView()
+        applyBrightness()
+    }
 
     override fun onPicture() = applyPicture()
 
@@ -335,8 +353,8 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         if (applySignal()) retune()
     }
 
-    /** A view slider is being dragged: the picture full size under it, so the change can be judged. */
-    override fun onPeek(on: Boolean) = engine.setBackdrop(menu.isOpen && !on, false)
+    /** A view slider is being dragged, or was let go: while it is, the picture fills the screen, so the change can be judged. */
+    override fun onPeek(on: Boolean) = showPicture()
 
     /** The menu and the video fill the same screen: the preview's place in the menu is its place on the Surface. */
     override fun onPreview(left: Int, top: Int, right: Int, bottom: Int, radius: Float) =
@@ -649,8 +667,8 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         hint.animate().cancel()
         hint.alpha = 0f
         hint.visibility = View.GONE
-        engine.setBackdrop(true, false)
         menu.open()
+        showPicture()
         refresh()
     }
 
@@ -660,7 +678,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         menuAuto = false
         sweepOn = false
         syncSweep()   // a sweep under way gives way to the picture
-        engine.setBackdrop(false, false)
+        showPicture()
     }
 
     /**

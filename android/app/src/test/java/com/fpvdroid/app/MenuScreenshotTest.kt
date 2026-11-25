@@ -177,6 +177,12 @@ class MenuScreenshotTest {
         tuned(); goggles = true; wide = true; fit = Settings.CROP; gogglesScale = 0.85f; eyeSpacing = 0.3f; eyeOffsetY = 0.2f
     })
 
+    /** A brightness of the picture's own: its value's row under the choice. */
+    @Test @Config(qualifiers = PHONE)
+    fun viewBrightness() = shoot("view_brightness", Tab.VIEW, live, 2400, 1080, {
+        tuned(); brightnessSet = true; brightness = 0.8f
+    })
+
     @Test @Config(qualifiers = PHONE)
     fun picture() = shoot("picture", Tab.PICTURE, live, 2400, 1080, tuned)
 
