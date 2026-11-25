@@ -400,7 +400,7 @@ class MainActivityScenariosTest : AppHarness() {
         assertTrue(gainRow.isShown)
 
         fake.clearCalls()
-        slide(gainRow as Slider, 0f, Settings.GAIN_MAX, 40f)
+        slide(gainRow as Slider, 40f)
         assertChanges(call("setWatchRate", 1), call("setGain", 40.0), call("setDiversity", false), call("setOffsetTuning", true), call("watch", f2, false))
         assertEquals(40f, savedSettings().gainDb, 0.01f)
 
@@ -450,7 +450,7 @@ class MainActivityScenariosTest : AppHarness() {
         assertEquals(Settings.CROP, savedSettings().fit)
 
         fake.clearCalls()
-        slide(control("Size") as Slider, Settings.SCALE_MIN, Settings.SCALE_MAX, 0.75f)
+        slide(control("Size") as Slider, 0.75f)
         assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 0.75f)
         // the picture is shown sharp while the slider is held, the backdrop back when it is let go
         val backdrops = fake.calls("setBackdrop")
@@ -468,26 +468,26 @@ class MainActivityScenariosTest : AppHarness() {
 
         layOut()
         fake.clearCalls()
-        slide(shownRow("Size").control as Slider, Settings.SCALE_MIN, Settings.SCALE_MAX, 0.9f)
+        slide(shownRow("Size").control as Slider, 0.9f)
         assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 0.9f, Goggles(0f, 0f, 0f))
         assertEquals(0.9f, savedSettings().gogglesScale, 0.02f)
         assertEquals(0.75f, savedSettings().scale, 0.02f)
 
         // the three that line the pictures up with the lenses: each -1..1, a fraction of the screen as far as its max
         fake.clearCalls()
-        slide(control("Eye spacing") as Slider, -1f, 1f, 0.5f)
+        slide(control("Eye spacing") as Slider, 0.5f)
         val shift = 0.5f * Settings.EYE_SHIFT_MAX
         assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 0.9f, Goggles(shift, 0f, 0f))
         assertEquals(0.5f, savedSettings().eyeSpacing, 0.03f)
 
         fake.clearCalls()
-        slide(control("Horizontal offset") as Slider, -1f, 1f, 0.5f)
+        slide(control("Horizontal offset") as Slider, 0.5f)
         val x = 0.5f * Settings.EYE_OFFSET_X_MAX
         assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 0.9f, Goggles(shift, x, 0f))
         assertEquals(0.5f, savedSettings().eyeOffsetX, 0.03f)
 
         fake.clearCalls()
-        slide(control("Vertical offset") as Slider, -1f, 1f, -0.5f)
+        slide(control("Vertical offset") as Slider, -0.5f)
         val y = -0.5f * Settings.EYE_OFFSET_Y_MAX
         assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 0.9f, Goggles(shift, x, y))
         assertEquals(-0.5f, savedSettings().eyeOffsetY, 0.03f)
