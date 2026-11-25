@@ -19,7 +19,6 @@ import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
-import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
 import com.fpvdroid.app.RadioStatus.Mode
 import java.io.File
@@ -29,7 +28,8 @@ import kotlin.math.roundToInt
 /**
  * fpvDROID: one screen. The picture fills it; the menu ([MenuView]) lies over a black screen with the picture moved
  * into its preview (tapping that closes the menu), and is open when the app starts. With the menu closed there is
- * nothing on screen but the picture: a tap brings up a MENU button for three seconds. Where there is no picture,
+ * nothing on screen but the picture, and the menu's status line along the top while it has something to say: a tap
+ * brings up a MENU button for three seconds. Where there is no picture,
  * full size or small, the screen shows colour bars naming the chosen channel (NO SIGNAL before there is one).
  *
  * USB stream test (for the first hardware check):  adb shell am start -n com.fpvdroid.app/.MainActivity --es mode usbtest
@@ -434,7 +434,8 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         if (!::menu.isInitialized) return
         val running = link.state == UsbLink.State.RUNNING
         val st = if (running) radioState() else linkState()
-        if (menuOpen) menu.render(if (running && menu.tab == Tab.SPECTRUM) st.copy(spectrum = spectrum()) else st)
+        // closed, the menu still shows its status line over the picture
+        menu.render(if (menuOpen && running && menu.tab == Tab.SPECTRUM) st.copy(spectrum = spectrum()) else st)
     }
 
     /** What the radio has seen of the span the Spectrum tab shows. */
@@ -652,12 +653,8 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         hint.alpha = 0f
         hint.visibility = View.GONE
         engine.setBackdrop(true, false)
+        menu.open()
         refresh()
-        menu.animate().cancel()
-        menu.visibility = View.VISIBLE
-        menu.alpha = 0f
-        menu.translationY = dp(10f)
-        menu.animate().alpha(1f).translationY(0f).setDuration(240).setInterpolator(DecelerateInterpolator(1.5f)).withEndAction(null).start()
     }
 
     private fun closeMenu() {
@@ -666,11 +663,8 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         menuAuto = false
         sweepOn = false
         syncSweep()   // a sweep under way gives way to the picture
-        menu.endPeek()
+        menu.close()   // all but its status line, which stays over the picture while it has something to say
         engine.setBackdrop(false, false)
-        menu.animate().cancel()
-        menu.animate().alpha(0f).translationY(dp(10f)).setDuration(200).setInterpolator(DecelerateInterpolator(1.5f))
-            .withEndAction { menu.visibility = View.GONE }.start()
     }
 
     /**

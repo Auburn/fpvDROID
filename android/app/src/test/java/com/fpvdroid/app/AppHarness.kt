@@ -240,6 +240,10 @@ abstract class AppHarness {
     val detail: String get() = shown(menu.statusDetail)
     val action: String get() = shown(menu.statusAction)
 
+    /** The words of the status line along the top, as it shows now (closed, the menu keeps it over the picture). */
+    val line: String get() = if (menu.statusRow.visibility != View.VISIBLE || menu.statusRow.alpha < 1f) ""
+        else listOf(detail, action).filter { it.isNotEmpty() }.joinToString(" ")
+
     /** A tap on the status, as the user does to retry. */
     fun tapStatus() {
         menu.statusRow.performClick()

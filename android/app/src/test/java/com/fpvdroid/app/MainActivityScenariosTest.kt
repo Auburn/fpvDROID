@@ -42,7 +42,7 @@ class MainActivityScenariosTest : AppHarness() {
     fun launchWithNoAdapterShowsTheMenuAndAppliesTheDefaults() {
         launch()
         advance(300)
-        assertEquals(View.VISIBLE, menu.visibility)
+        assertTrue(menu.isOpen)
         assertEquals("No adapter", headline)
         assertEquals(State.NO_ADAPTER, link.state)
         val c = changes()
@@ -115,7 +115,7 @@ class MainActivityScenariosTest : AppHarness() {
         click(preview())
         assertTrue(changes().toString(), call("setBackdrop", false, false) in changes())
         looper.idleFor(Duration.ofMillis(300))
-        assertEquals(View.GONE, menu.visibility)
+        assertFalse(menu.isOpen)
 
         tap(root, 300f, 300f)
         assertEquals(View.VISIBLE, hint.visibility)
@@ -130,17 +130,17 @@ class MainActivityScenariosTest : AppHarness() {
         fake.clearCalls()
         click(hint)
         assertTrue(changes().toString(), call("setBackdrop", true, false) in changes())
-        assertEquals(View.VISIBLE, menu.visibility)
+        assertTrue(menu.isOpen)
         assertEquals(View.GONE, hint.visibility)
         looper.idleFor(Duration.ofMillis(300))
-        assertEquals(1f, menu.alpha, 0.01f)
+        assertEquals(1f, menu.body.alpha, 0.01f)
 
         // Back from the picture: the menu
         click(preview())
         looper.idleFor(Duration.ofMillis(300))
         @Suppress("DEPRECATION") activity.onBackPressed()
         settle()
-        assertEquals(View.VISIBLE, menu.visibility)
+        assertTrue(menu.isOpen)
         assertFalse(activity.isFinishing)
         // Back from the menu: out of the app
         @Suppress("DEPRECATION") activity.onBackPressed()
@@ -155,8 +155,8 @@ class MainActivityScenariosTest : AppHarness() {
         looper.idleFor(Duration.ofMillis(50))   // the 200 ms fade is under way
         @Suppress("DEPRECATION") activity.onBackPressed()
         looper.idleFor(Duration.ofMillis(600))
-        assertEquals(View.VISIBLE, menu.visibility)
-        assertEquals(1f, menu.alpha, 0.01f)
+        assertTrue(menu.isOpen)
+        assertEquals(1f, menu.body.alpha, 0.01f)
     }
 
     /** The picture goes where the preview is: its place on the Surface, told to the native screen as it is laid out. */
@@ -196,6 +196,74 @@ class MainActivityScenariosTest : AppHarness() {
         fake.locked = false
         advance(500)
         assertTrue("the picture lost: the headline is back ($headline)", headline.contains("F2"))
+    }
+
+    /**
+     * With the menu closed its status line stays where it was, over the picture, while it has something to say: not
+     * the figures of a picture that is fine. A tap on it is a tap on the picture.
+     */
+    @Test
+    fun theStatusLineStaysInItsPlaceOverThePictureWithTheMenuClosed() {
+        running()
+        layOut()
+        val row = menu.statusRow
+        fun where() = IntArray(2).also { row.getLocationInWindow(it) }.toList()
+        val open = where()
+        assertEquals("Looking for a picture…", line)
+
+        click(preview())
+        looper.idleFor(Duration.ofMillis(300))
+        assertFalse(menu.isOpen)
+        assertEquals(View.INVISIBLE, menu.body.visibility)
+        assertEquals("Looking for a picture…", line)
+        layOut()
+        assertEquals("in the same place", open, where())
+
+        // a locked picture that is fine: nothing over it
+        fake.locked = true
+        advance(500)
+        assertEquals("", line)
+        assertEquals(View.INVISIBLE, row.visibility)
+        // the phone falling behind: said over it
+        fake.lateRecent = MainActivity.LATE_BLOCKS.toLong()
+        advance(500)
+        assertEquals(MainActivity.OVERLOAD_ADVICE, line)
+
+        // a tap on the line is a tap on the picture: the MENU button
+        layOut()
+        val r = IntArray(2).also { root.getLocationInWindow(it) }
+        val at = where()
+        tap(root, at[0] - r[0] + row.width / 2f, at[1] - r[1] + row.height / 2f)
+        assertEquals(View.VISIBLE, hint.visibility)
+        assertFalse(menu.isOpen)
+
+        // open again: the menu's figures are back on the line
+        fake.lateRecent = 0
+        click(hint)
+        advance(500)
+        assertTrue(menu.isOpen)
+        assertTrue(line, line.contains("fps"))
+    }
+
+    /** Closed with something to do ("Ask again"), the line's action still does it. */
+    @Test
+    fun theLinesActionWorksWithTheMenuClosed() {
+        plug(adapter(), permission = false, broadcast = false)
+        launch()
+        answerPermission(false)
+        advance(300)
+        assertEquals("Ask again", action)
+        click(preview())
+        looper.idleFor(Duration.ofMillis(300))
+        assertFalse(menu.isOpen)
+        assertEquals("fpvDROID can't use the adapter without it. Ask again", line)
+        layOut()
+        val r = IntArray(2).also { root.getLocationInWindow(it) }
+        val a = IntArray(2).also { menu.statusAction.getLocationInWindow(it) }
+        tap(root, a[0] - r[0] + menu.statusAction.width / 2f, a[1] - r[1] + menu.statusAction.height / 2f)
+        assertEquals(State.PERMISSION, link.state)
+        assertEquals(2, permissionRequests.size)
+        assertEquals("a tap on the action is not a tap on the picture", View.GONE, hint.visibility)
     }
 
     @Test

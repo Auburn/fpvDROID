@@ -12,6 +12,7 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
@@ -65,6 +66,9 @@ data class MenuState(
  * chosen tab's settings on the right, and a line of the status's words along the top, the whole width. It changes
  * [Settings] itself and tells the [Listener] which kind of thing changed; it knows nothing of the radio. The
  * preview is a hole: it tells the [Listener] where it is, and the native screen draws the picture there.
+ *
+ * Closed ([close]), the status line is all that is left of it: in its place, over the picture, while it has
+ * something to say (see [lineWanted]). Touches then go through it to the picture, but for the line's action.
  */
 @SuppressLint("ViewConstructor")
 class MenuView(ctx: Context, private val s: Settings, private val on: Listener) : FrameLayout(ctx) {
@@ -105,7 +109,12 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     /** The tab chosen (whether or not the menu is open). */
     var tab = Tab.CHANNEL
         private set
+    /** Open: the whole menu. Closed: the status line alone, while it has something to say. */
+    var isOpen = true
+        private set
+    private var lineShown = true   // the status line is showing, or coming
     private val group = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }   // status line, rail + card
+    internal val body = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }   // the rail and the card
     private lateinit var rail: View
     private lateinit var railContent: LinearLayout   // the rail above the preview: the tabs
     private lateinit var preview: PreviewTile
@@ -130,11 +139,15 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         ellipsize = TextUtils.TruncateAt.END
         setShadowLayer(dp(3f), 0f, dp(1f), Color.argb(200, 0, 0, 0))   // over the picture, whatever it shows
     }
+    // the line's words have a shadow too: with the menu closed they are over the picture
     internal val statusDetail = label(ctx, "", 12.5f, Skin.TEXT_2).apply {
         maxLines = 1   // a long message in full: the Signal tab
         ellipsize = TextUtils.TruncateAt.END
+        setShadowLayer(dp(3f), 0f, dp(1f), Color.argb(200, 0, 0, 0))
     }
-    internal val statusAction = label(ctx, "", 12.5f, Skin.ACCENT, medium = true)
+    internal val statusAction = label(ctx, "", 12.5f, Skin.ACCENT, medium = true).apply {
+        setShadowLayer(dp(3f), 0f, dp(1f), Color.argb(200, 0, 0, 0))
+    }
     internal val statusRow = LinearLayout(ctx).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.TOP
@@ -207,7 +220,6 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         statusRow.addView(statusDetail, LinearLayout.LayoutParams(0, -2, 1f))
         statusRow.addView(statusAction, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dpi(14f) })
         group.addView(statusRow, LinearLayout.LayoutParams(-1, dpi(STATUS_ROW_DP)))
-        val body = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
         body.addView(rail, LinearLayout.LayoutParams(dpi(RAIL_DP), -1))
         body.addView(card, LinearLayout.LayoutParams(0, -1, 1f).apply { marginStart = dpi(12f) })
         group.addView(body, LinearLayout.LayoutParams(-1, 0, 1f))
@@ -230,7 +242,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     }
 
     override fun dispatchTouchEvent(e: MotionEvent): Boolean {
-        if (e.actionMasked == MotionEvent.ACTION_DOWN) on.onTouched()
+        if (isOpen && e.actionMasked == MotionEvent.ACTION_DOWN) on.onTouched()
         // While a slider is held and the rest has faded away, what cannot be seen must not be pressed: a second
         // finger (a thumb resting where the preview was) goes nowhere.
         if (peeking != null && e.actionMasked == MotionEvent.ACTION_POINTER_DOWN) return true
@@ -271,6 +283,49 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
             previewAt.set(at)
             on.onPreview(at.left, at.top, at.right, at.bottom, preview.radius)
         }
+    }
+
+    // ------------------------------------------------------------------------------------------ open, closed
+    /** The rail and the card come up under the status line (which stays where it is, if it was showing). */
+    fun open() {
+        if (isOpen) return
+        isOpen = true
+        isClickable = true   // touches stop here again: nothing behind the menu reacts
+        render(state)        // the pages catch up with what they were not shown while it was closed
+        body.animate().cancel()
+        body.visibility = View.VISIBLE
+        body.alpha = 0f
+        body.translationY = dp(10f)
+        body.animate().alpha(1f).translationY(0f).setDuration(OPEN_MS).setInterpolator(DecelerateInterpolator(1.5f))
+            .withEndAction(null).start()
+    }
+
+    /** The rail and the card go; the status line stays in its place while it has something to say. */
+    fun close() {
+        if (!isOpen) return
+        endPeek()
+        isOpen = false
+        isClickable = false   // a tap anywhere but on the line's action is a tap on the picture
+        render(state)
+        body.animate().cancel()
+        body.animate().alpha(0f).translationY(dp(10f)).setDuration(CLOSE_MS).setInterpolator(DecelerateInterpolator(1.5f))
+            .withEndAction { body.visibility = View.INVISIBLE }.start()   // not GONE: the preview keeps its place
+    }
+
+    /**
+     * The status line shows while the menu is open; closed, while it has something to say about the picture or
+     * the adapter: not the app's name, nor the figures of a picture that is fine (they would sit over it for good).
+     */
+    private fun lineWanted(st: MenuState) =
+        isOpen || (st.detail.isNotEmpty() || st.action != null) && st.tone != Tone.LIVE
+
+    private fun showLine(want: Boolean) {
+        if (want == lineShown) return
+        lineShown = want
+        statusRow.animate().cancel()
+        if (want) statusRow.visibility = View.VISIBLE
+        statusRow.animate().alpha(if (want) 1f else 0f).setDuration(CLOSE_MS)
+            .withEndAction(if (want) null else Runnable { statusRow.visibility = View.INVISIBLE }).start()
     }
 
     // ------------------------------------------------------------------------------------------ rail
@@ -662,6 +717,8 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         /** A screen lower than this is short: most phones held sideways are, by a little. */
         const val SHORT_DP = 400f
         const val PEEK_MS = 150L
+        const val OPEN_MS = 240L
+        const val CLOSE_MS = 200L
         /** The preview is no lower than this (dp), and sits at least this far below the tabs. */
         const val PREVIEW_MIN_DP = 64f
         const val PREVIEW_GAP_DP = 8f
@@ -676,8 +733,22 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     // ------------------------------------------------------------------------------------------ state
     fun render(new: MenuState) {
         val st = new.copy(found = new.found.filter { it.mhz.isFinite() && it.mhz > 0 })   // nothing to tune otherwise
-        val foundChanged = st.found != state.found
         state = st
+        // the line along the top; while it is not wanted its words are left as they were (they may be fading)
+        val want = lineWanted(st)
+        if (want) {
+            // nothing to say: the name of the app in its place (an action alone keeps its place at the end)
+            val quiet = st.detail.isEmpty() && st.action == null
+            wordmark.visibility = if (quiet) View.VISIBLE else View.GONE
+            if (statusDetail.text.toString() != st.detail) statusDetail.text = st.detail
+            statusDetail.visibility = if (quiet) View.GONE else if (st.detail.isEmpty()) View.INVISIBLE else View.VISIBLE
+            statusAction.text = st.action ?: ""
+            statusAction.visibility = if (st.action == null) View.GONE else View.VISIBLE
+        }
+        statusRow.isClickable = want && st.action != null   // else a tap there is the menu's, or the picture's
+        showLine(want)
+        if (!isOpen) return   // the rest is not on screen: open() catches it up
+
         (dot.background as GradientDrawable).setColor(when (st.tone) {
             Tone.LIVE -> Skin.ACCENT
             Tone.BUSY -> Color.WHITE
@@ -688,13 +759,6 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         // a locked picture speaks for itself: over it only the dot
         if (statusTitle.text.toString() != st.headline) statusTitle.text = st.headline
         statusTitle.visibility = if (st.locked || st.headline.isEmpty()) View.GONE else View.VISIBLE
-        // nothing to say: the name of the app in its place (an action alone keeps its place at the end)
-        val quiet = st.detail.isEmpty() && st.action == null
-        wordmark.visibility = if (quiet) View.VISIBLE else View.GONE
-        if (statusDetail.text.toString() != st.detail) statusDetail.text = st.detail
-        statusDetail.visibility = if (quiet) View.GONE else if (st.detail.isEmpty()) View.INVISIBLE else View.VISIBLE
-        statusAction.text = st.action ?: ""
-        statusAction.visibility = if (st.action == null) View.GONE else View.VISIBLE
 
         scanButton.isEnabled = st.radioReady && !st.scanning
         scanButton.text = if (st.scanning) "Scanning" else "Scan"
@@ -707,7 +771,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         }
         if (scanText.text.toString() != words) scanText.text = words
         scanText.visibility = if (words.isEmpty()) View.GONE else View.VISIBLE
-        if (foundChanged || foundShown == null) {
+        if (st.found != foundShown) {
             foundShown = st.found
             foundRow.removeAllViews()
             for (f in st.found.sortedByDescending { it.snrDb }) {

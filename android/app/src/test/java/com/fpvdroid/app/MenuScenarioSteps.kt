@@ -33,7 +33,7 @@ abstract class MenuScenarioSteps : AppHarness() {
 
     protected fun call(name: String, vararg args: Any?) = Call(name, args.toList())
 
-    protected val menuShowing get() = menu.visibility == View.VISIBLE
+    protected val menuShowing get() = menu.isOpen
 
     protected fun closeTheMenu() {
         click(preview())
