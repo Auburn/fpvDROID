@@ -186,8 +186,8 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     // Everything the pages read while they are built has to be declared above this point: Kotlin runs property
     // initialisers and init blocks in the order they are written.
     private val fitWords = listOf(
-        "The whole picture, black bars where the screen is wider",
-        "Pulled to the shape of the screen",
+        "Black bars on the side",
+        "Image stretched to fill the screen",
         "Fills the screen, the picture's edges cut off",
     )
 
@@ -558,7 +558,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     // ------------------------------------------------------------------------------------------ view
     private fun buildViewPage(): View {
         val p = page()
-        p.addView(SettingRow(context, "Aspect ratio", "How the camera's picture is shaped",
+        p.addView(SettingRow(context, "Aspect ratio", "The aspect ratio of the camera feed",
             Segmented(context, listOf("4:3", "16:9"), if (s.wide) 1 else 0) { i ->
                 s.wide = i == 1
                 requestLayout()   // the preview takes the picture's shape
@@ -604,7 +604,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         for (v in brightnessRows) p.addView(v)
         showRows(s.brightnessSet, brightnessRows)
         p.addView(divider(context))
-        p.addView(SettingRow(context, "Goggles", "The picture twice, side by side, for goggles that hold a phone",
+        p.addView(SettingRow(context, "Goggles", "Show the image twice, side by side for goggles that hold a phone",
             Toggle(context, s.goggles) { v ->
                 s.goggles = v
                 showEyeRows()
@@ -620,7 +620,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         }
         eyeRow(sliderRow("Size", { "${percent(s.gogglesScale)}% of each half of the screen" }, Settings.SCALE_MIN,
             Settings.SCALE_MAX, s.gogglesScale, 1f) { s.gogglesScale = it })
-        eyeRow(sliderRow("Eye spacing", { "Slide until the two pictures become one" }, -1f, 1f, s.eyeSpacing, 0f,
+        eyeRow(sliderRow("Eye spacing", { "Slide until the two pictures line up with the lenses" }, -1f, 1f, s.eyeSpacing, 0f,
             fromDetent = true) { s.eyeSpacing = it })
         eyeRow(sliderRow("Horizontal offset", { "Moves both pictures left or right" }, -1f, 1f, s.eyeOffsetX, 0f,
             fromDetent = true) { s.eyeOffsetX = it })
