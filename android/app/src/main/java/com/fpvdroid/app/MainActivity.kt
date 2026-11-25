@@ -227,8 +227,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         return engine.setOffsetTuning(settings.offsetTune) || rate || gain
     }
 
-    private fun applyView() = engine.setView(settings.aspect, settings.fit, settings.viewScale, settings.goggles,
-        settings.eyeShift, settings.eyeOffsetX, settings.eyeOffsetY)
+    private fun applyView() = engine.setView(settings.view)
 
     /**
      * Where there is no picture, the screen's card names the chosen channel ("R8"; a frequency off every channel by

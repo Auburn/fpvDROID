@@ -161,7 +161,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     private lateinit var fitRow: SettingRow
     private lateinit var sizeRow: SettingRow
     private lateinit var sizeDivider: View          // the line above it: both give way to the goggles rows
-    private val eyeViews = mutableListOf<View>()   // goggles only: the eye rows and the dividers above them
+    private val eyeViews = mutableListOf<View>()   // goggles only: their rows, each after the line above it
 
     // picture page
     private lateinit var cleanOsdRow: SettingRow
@@ -385,6 +385,17 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         }
     }
 
+    /**
+     * Rows that come and go with a setting, each after the line above it: [views] in that order, so the last is a
+     * row, brought into view as they appear. (Kept on the page itself, not in a group of their own: [peek] fades
+     * the page's children one by one, all but the row being dragged.)
+     */
+    private fun showRows(on: Boolean, views: List<View>) {
+        val appearing = on && views.last().visibility != View.VISIBLE
+        for (v in views) v.visibility = if (on) View.VISIBLE else View.GONE
+        if (appearing) reveal(views.last())
+    }
+
     private fun View.isDescendantOf(group: ViewGroup): Boolean {
         var p = parent
         while (p != null) {
@@ -565,10 +576,10 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
             Settings.SCALE_MAX, s.gogglesScale, 1f) { s.gogglesScale = it })
         eyeRow(sliderRow("Eye spacing", { "Slide until the two pictures become one" }, -1f, 1f, s.eyeSpacing, 0f,
             fromDetent = true) { s.eyeSpacing = it })
-        eyeRow(sliderRow("Horizontal offset", { "Moves both pictures left or right" }, -Settings.EYE_OFFSET_X_MAX,
-            Settings.EYE_OFFSET_X_MAX, s.eyeOffsetX, 0f, fromDetent = true) { s.eyeOffsetX = it })
-        eyeRow(sliderRow("Vertical offset", { "Moves both pictures down or up" }, -Settings.EYE_OFFSET_Y_MAX,
-            Settings.EYE_OFFSET_Y_MAX, s.eyeOffsetY, 0f, fromDetent = true) { s.eyeOffsetY = it })
+        eyeRow(sliderRow("Horizontal offset", { "Moves both pictures left or right" }, -1f, 1f, s.eyeOffsetX, 0f,
+            fromDetent = true) { s.eyeOffsetX = it })
+        eyeRow(sliderRow("Vertical offset", { "Moves both pictures down or up" }, -1f, 1f, s.eyeOffsetY, 0f,
+            fromDetent = true) { s.eyeOffsetY = it })
         showEyeRows()
         return p
     }
@@ -580,11 +591,8 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
      * gives way to theirs.
      */
     private fun showEyeRows() {
-        val was = eyeViews.last().visibility
-        for (v in eyeViews) v.visibility = if (s.goggles) View.VISIBLE else View.GONE
-        sizeRow.visibility = if (s.goggles) View.GONE else View.VISIBLE
-        sizeDivider.visibility = sizeRow.visibility
-        if (s.goggles && was != View.VISIBLE) reveal(eyeViews.last())
+        showRows(s.goggles, eyeViews)
+        showRows(!s.goggles, listOf(sizeDivider, sizeRow))
     }
 
     // ------------------------------------------------------------------------------------------ picture
@@ -669,12 +677,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         showGainRow()
     }
 
-    private fun showGainRow() {
-        val was = gainRow.visibility
-        gainRow.visibility = if (s.gainAuto) View.GONE else View.VISIBLE
-        gainDivider.visibility = gainRow.visibility
-        if (!s.gainAuto && was != View.VISIBLE) reveal(gainRow)
-    }
+    private fun showGainRow() = showRows(!s.gainAuto, listOf(gainDivider, gainRow))
 
     private fun <T : View> T.sized(width: Int): T = apply { layoutParams = LinearLayout.LayoutParams(width, dpi(38f)) }
 

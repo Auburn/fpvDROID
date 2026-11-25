@@ -57,12 +57,11 @@ class Settings(private val prefs: SharedPreferences) {
     var fit by pref("fit", FIT)
     var scale by pref("scale", 1f)                           // SCALE_MIN..SCALE_MAX
     var goggles by pref("goggles", false)
-    // goggles: their own size, in place of scale
+    // goggles: their own size, in place of scale, and the pictures lined up with their lenses (-1..1, 0 in the middle)
     var gogglesScale by pref("goggles_scale", 1f)            // SCALE_MIN..SCALE_MAX
-    var eyeSpacing by pref("eye_spacing", 0f)                // -1..1: pictures apart .. together
-    // fractions of the screen's width (up or down: of its height)
-    var eyeOffsetX by pref("eye_offset_x", 0f)               // both moved right (+) or left (-): ±EYE_OFFSET_X_MAX
-    var eyeOffsetY by pref("eye_offset_y", 0f)               // both moved up (+) or down (-): ±EYE_OFFSET_Y_MAX
+    var eyeSpacing by pref("eye_spacing", 0f)                // pictures apart .. together: ±EYE_SHIFT_MAX of the width
+    var eyeOffsetX by pref("eye_offset_x", 0f)               // both left .. right: ±EYE_OFFSET_X_MAX of the width
+    var eyeOffsetY by pref("eye_offset_y", 0f)               // both down .. up: ±EYE_OFFSET_Y_MAX of the height
     // picture
     var lumaComb by pref("luma_comb", true)
     var cleanOsd by pref("clean_osd", true)
@@ -86,10 +85,12 @@ class Settings(private val prefs: SharedPreferences) {
     }
 
     val aspect get() = if (wide) 16f / 9f else 4f / 3f
-    /** The picture's size as shown: with goggles, theirs. */
-    val viewScale get() = if (goggles) gogglesScale else scale
-    /** Fraction of the screen width each eye's picture moves toward the middle. */
-    val eyeShift get() = eyeSpacing * EYE_SHIFT_MAX
+    /** How the picture is laid out ([Engine.setView]): with goggles, at their own size and lined up with their lenses. */
+    val view: ViewOpts get() {
+        if (!goggles) return ViewOpts(aspect, fit, scale)
+        val lenses = Goggles(eyeSpacing * EYE_SHIFT_MAX, eyeOffsetX * EYE_OFFSET_X_MAX, eyeOffsetY * EYE_OFFSET_Y_MAX)
+        return ViewOpts(aspect, fit, gogglesScale, lenses)
+    }
 
     /** One setting: its value, and how it is written back when it is set. */
     private inner class Pref<T>(private var value: T, private val put: SharedPreferences.Editor.(T) -> Unit) {

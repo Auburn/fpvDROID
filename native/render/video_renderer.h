@@ -53,9 +53,9 @@ struct Scene {
   std::string label;   // what the card says: the chosen channel ("R8"), or "" for NO SIGNAL
 };
 
-// Where a picture lands in a window, in pixels from the window's top left (may reach outside it: Crop,
-// scale > 1). Pure arithmetic, exposed for tests.
-Rect layout(float win_w, float win_h, float aspect, Fit fit, float scale);
+// Where a picture lands in the window `win`, both in pixels from the viewport's top left (it may reach outside
+// the window: Crop, scale > 1). Pure arithmetic.
+Rect layout(const Rect &win, float aspect, Fit fit, float scale);
 
 class VideoRenderer {
 public:

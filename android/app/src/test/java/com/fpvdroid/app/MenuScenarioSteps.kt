@@ -105,11 +105,6 @@ abstract class MenuScenarioSteps : AppHarness() {
     /** The Size slider showing: the screen's, or with goggles on, theirs. */
     protected fun sizeSlider() = shownRow("Size").control as Slider
 
-    protected fun scaleOf(c: Call?): Float {
-        if (c == null || c.name != "setView") fail("expected setView, got $c")
-        return c!!.args[2] as Float
-    }
-
     protected fun lastBackdrop(): Call? = fake.last("setBackdrop")
 
     protected fun chips(): List<String> = views(menu).filterIsInstance<FoundChip>().map { it.contentDescription.toString() }

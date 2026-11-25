@@ -12,17 +12,17 @@
 
 namespace kp {
 
-Rect layout(float win_w, float win_h, float aspect, Fit fit, float scale) {
-  float w = win_w, h = win_h;
-  if (fit != Fit::Stretch && win_w > 0 && win_h > 0 && aspect > 0) {
-    const bool window_wider = win_w / win_h > aspect;
+Rect layout(const Rect &win, float aspect, Fit fit, float scale) {
+  float w = win.w, h = win.h;
+  if (fit != Fit::Stretch && win.w > 0 && win.h > 0 && aspect > 0) {
+    const bool window_wider = win.w / win.h > aspect;
     // Fit: the window's short side limits the picture; Crop: its long side does
-    if ((fit == Fit::Fit) == window_wider) w = win_h * aspect;
-    else h = win_w / aspect;
+    if ((fit == Fit::Fit) == window_wider) w = win.h * aspect;
+    else h = win.w / aspect;
   }
   w *= scale;
   h *= scale;
-  return {(win_w - w) / 2, (win_h - h) / 2, w, h};
+  return {win.x + (win.w - w) / 2, win.y + (win.h - h) / 2, w, h};
 }
 
 namespace {
@@ -258,22 +258,18 @@ void VideoRenderer::draw(unsigned target, int view_w, int view_h, const ViewOpts
   glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
   glEnable(GL_SCISSOR_TEST);
   // in the preview: the picture as the screen would show it at its own size, one of it
-  Rect small = layout(box.w, box.h, o.aspect, o.fit, 1);
-  small.x += box.x;
-  small.y += box.y;
+  const Rect small = layout(box, o.aspect, o.fit, 1);
   const int windows = o.stereo ? 2 : 1;
   const float ww = vw / windows;
   // stereo: the two windows, and the pictures in them, moved together by the offset
   const float ox = o.stereo ? o.offset_x * vw : 0, oy = o.stereo ? -o.offset_y * vh : 0;
   for (int i = 0; i < windows; i++) {
-    const float wx = ww * i + ox;
-    Rect r = layout(ww, vh, o.aspect, o.fit, std::max(o.scale, 0.01f));
-    r.x += wx;
-    r.y += oy;
+    const Rect home{ww * i + ox, oy, ww, vh};
+    Rect r = layout(home, o.aspect, o.fit, std::max(o.scale, 0.01f));
     if (o.stereo) r.x += (i == 0 ? 1 : -1) * o.eye_shift * vw;
     // each window keeps to itself (a cropped or enlarged picture must not run into the other eye's), and on the
     // way into the preview, it and the picture in it move there together
-    const Rect win = lerp({wx, oy, ww, vh}, box, t);
+    const Rect win = lerp(home, box, t);
     r = lerp(r, small, t);
     const long sx0 = std::lround(win.x), sx1 = std::lround(win.x + win.w);
     const long sy0 = std::lround(vh - win.y - win.h), sy1 = std::lround(vh - win.y);

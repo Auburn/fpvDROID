@@ -264,6 +264,12 @@ abstract class AppHarness {
         views(row).any { it is TextView && it.text.toString() == title }
     }.control
 
+    /** What the view call [c] asked for. */
+    fun viewOf(c: FakeEngine.Call?): ViewOpts {
+        if (c == null || c.name != "setView") fail("expected setView, got $c")
+        return c!!.args[0] as ViewOpts
+    }
+
     /** The row titled [title] that is showing: with goggles on, theirs stands in for the screen's Size row. */
     fun shownRow(title: String): SettingRow = views(menu).filterIsInstance<SettingRow>().first { row ->
         row.visibility == View.VISIBLE && views(row).any { it is TextView && it.text.toString() == title }
