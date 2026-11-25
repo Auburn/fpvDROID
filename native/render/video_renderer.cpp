@@ -185,7 +185,7 @@ void VideoRenderer::destroy(bool context_alive) {
   _have = false;
 }
 
-void VideoRenderer::upload(const uint8_t *rgbx, int width, int height) {
+void VideoRenderer::upload(const uint8_t *rgbx, int width, int height, int y0, int y1) {
   if (!_tex || !rgbx || width <= 0 || height <= 0) return;
   glBindTexture(GL_TEXTURE_2D, _tex);
   glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
@@ -194,7 +194,11 @@ void VideoRenderer::upload(const uint8_t *rgbx, int width, int height) {
     _tex_w = width;
     _tex_h = height;
   } else {
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgbx);
+    y0 = std::clamp(y0, 0, height);
+    y1 = y1 < 0 ? height : std::clamp(y1, y0, height);
+    if (y1 > y0)
+      glTexSubImage2D(GL_TEXTURE_2D, 0, 0, y0, width, y1 - y0, GL_RGBA, GL_UNSIGNED_BYTE,
+                      rgbx + static_cast<size_t>(y0) * width * 4);
   }
   _have = true;
 }
@@ -229,15 +233,19 @@ void VideoRenderer::quad(unsigned tex, int tex_w, int tex_h, float gain, float a
   glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 }
 
-void VideoRenderer::draw(unsigned target, int view_w, int view_h, const ViewOpts &o, const Scene &s) {
+void VideoRenderer::draw(unsigned target, int view_w, int view_h, const ViewOpts &o, const Scene &s, float band0,
+                         float band1) {
   if (view_w <= 0 || view_h <= 0) return;
+  const bool part = band0 > 0 || band1 < 1;
   glDisable(GL_DEPTH_TEST);
   glDisable(GL_BLEND);
   glDisable(GL_SCISSOR_TEST);
   glBindFramebuffer(GL_FRAMEBUFFER, target);
   glViewport(0, 0, view_w, view_h);
-  glClearColor(0, 0, 0, 1);
-  glClear(GL_COLOR_BUFFER_BIT);
+  if (!part) {
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+  }
   if (!_prog) return;
   // how much of the picture, and of the card in its place
   const float g = _have ? std::clamp(s.gain, 0.f, 1.f) : 0.f;
@@ -273,7 +281,15 @@ void VideoRenderer::draw(unsigned target, int view_w, int view_h, const ViewOpts
     const Rect win = lerp({wx, 0, ww, vh}, box, t);
     r = lerp(r, small, t);
     const long sx0 = std::lround(win.x), sx1 = std::lround(win.x + win.w);
-    const long sy0 = std::lround(vh - win.y - win.h), sy1 = std::lround(vh - win.y);
+    long sy0 = std::lround(vh - win.y - win.h), sy1 = std::lround(vh - win.y);
+    if (part && _tex_h > 0) {
+      // the screen rows that show picture rows [band0, band1), and as many more as the bicubic filter reaches
+      // (2 texels either way) and a pixel for rounding
+      const float pad = 2.f * r.h / static_cast<float>(_tex_h) + 1, top = r.y + r.h * band0 - pad,
+                  bottom = r.y + r.h * band1 + pad;
+      sy0 = std::max(sy0, std::lround(vh - bottom));
+      sy1 = std::min(sy1, std::lround(vh - top));
+    }
     if (sx1 <= sx0 || sy1 <= sy0 || r.w <= 0 || r.h <= 0) continue;
     glScissor(static_cast<GLint>(sx0), static_cast<GLint>(sy0), static_cast<GLsizei>(sx1 - sx0),
               static_cast<GLsizei>(sy1 - sy0));
@@ -288,6 +304,25 @@ void VideoRenderer::draw(unsigned target, int view_w, int view_h, const ViewOpts
   }
   glDisable(GL_SCISSOR_TEST);
   glDisable(GL_BLEND);
+}
+
+void VideoRenderer::blank(unsigned target, int view_w, int view_h) {
+  glDisable(GL_SCISSOR_TEST);
+  glBindFramebuffer(GL_FRAMEBUFFER, target);
+  glViewport(0, 0, std::max(view_w, 1), std::max(view_h, 1));
+  glClearColor(0, 0, 0, 1);
+  glClear(GL_COLOR_BUFFER_BIT);
+}
+
+bool VideoRenderer::wait_drawn(int timeout_ms) {
+  GLsync s = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+  if (!s) {
+    glFinish();
+    return true;
+  }
+  const GLenum r = glClientWaitSync(s, GL_SYNC_FLUSH_COMMANDS_BIT, static_cast<GLuint64>(timeout_ms) * 1000000);
+  glDeleteSync(s);
+  return r == GL_ALREADY_SIGNALED || r == GL_CONDITION_SATISFIED;
 }
 
 }  // namespace kp

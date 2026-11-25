@@ -165,6 +165,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
 
     // picture page
     private lateinit var cleanOsdRow: SettingRow
+    private lateinit var lowLatencyRow: SettingRow
 
     // signal page
     private lateinit var offsetRow: SettingRow
@@ -588,8 +589,14 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         p.addView(toggle("Sparkle repair", "Patches the white and black sparkles of a weak signal", s.sparkleRepair) { s.sparkleRepair = it })
         p.addView(divider(context))
         p.addView(toggle("Colour comb", "Fewer rainbows on fine detail, at the cost of more processing (NTSC cameras)", s.colourComb) { s.colourComb = it })
+        p.addView(divider(context))
+        lowLatencyRow = toggle("Low latency", "Shows each part of the picture as soon as it arrives. Uses more battery", s.lowLatency) { s.lowLatency = it }
+        p.addView(lowLatencyRow)
         return p
     }
+
+    /** Low latency was set from outside the menu (the debug extra): its switch follows [Settings]. */
+    fun syncLowLatency() = (lowLatencyRow.control as Toggle).set(s.lowLatency, animate = false)
 
     // ------------------------------------------------------------------------------------------ signal
     private fun buildSignalPage(): View {

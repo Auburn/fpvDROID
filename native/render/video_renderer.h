@@ -60,12 +60,24 @@ public:
   bool init();
   // Frees the GL objects (context current), or forgets them (context already gone).
   void destroy(bool context_alive = true);
-  // A new frame: 4 bytes per pixel, R G B X, top row first (kp::Frame).
-  void upload(const uint8_t *rgbx, int width, int height);
+  // A new frame: 4 bytes per pixel, R G B X, top row first (kp::Frame). Only its rows [y0, y1) have changed since
+  // the last upload (y1 < 0: to the bottom; low latency, kp::Strip): only those go to the GPU, unless the frame's
+  // size has changed too.
+  void upload(const uint8_t *rgbx, int width, int height, int y0 = 0, int y1 = -1);
   void clear();  // no picture: the NO SIGNAL card until the next upload
   bool has_picture() const { return _have; }
-  // The whole viewport, into framebuffer `target` (0 = the window surface).
-  void draw(unsigned target, int view_w, int view_h, const ViewOpts &view, const Scene &scene);
+  // The whole viewport, into framebuffer `target` (0 = the window surface). band0, band1: only the part of the
+  // screen that shows the picture's rows [band0, band1) (fractions of its height, top first) is drawn again, and
+  // nothing is cleared (front-buffer drawing: everything else is on the screen already, and unchanged). That is
+  // only right for a picture that was drawn whole before with the same view and scene: no card, no fade, not in
+  // the preview.
+  void draw(unsigned target, int view_w, int view_h, const ViewOpts &view, const Scene &scene, float band0 = 0,
+            float band1 = 1);
+  // The whole of framebuffer `target` black (nothing else: the renderer need not be set up).
+  static void blank(unsigned target, int view_w, int view_h);
+  // Returns once the GPU has done what it was given so far (front-buffer drawing: then it is in the buffer the
+  // display shows). False: it had not after timeout_ms.
+  bool wait_drawn(int timeout_ms);
 
 private:
   void ensure_card(float aspect, const std::string &label);

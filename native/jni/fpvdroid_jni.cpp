@@ -150,7 +150,10 @@ JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_init(JNIEnv *env, jclass, js
   std::call_once(made, [] {
     forward_stderr();
     g_screen = std::make_unique<Screen>();
-    g_radio = std::make_unique<Radio>([](const Frame &f) { g_screen->post(f); });
+    // low latency (PictureOpts::strips): the strips are drawn as they come, and the frame they add up to is then
+    // in already (Screen::post skips it)
+    g_radio = std::make_unique<Radio>([](const Frame &f) { g_screen->post(f); },
+                                      [](const Strip &s) { g_screen->post_rows(s); });
   });
   KP_LOGI("fpvDROID native ready");
 }
@@ -236,14 +239,22 @@ JNIEXPORT jboolean JNICALL Java_com_fpvdroid_app_Native_setOffsetTuning(JNIEnv *
 }
 
 JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_setPicture(JNIEnv *, jclass, jboolean luma_comb, jboolean adaptive,
-                                                             jboolean smooth, jboolean repair, jboolean colour_comb) {
+                                                             jboolean smooth, jboolean repair, jboolean colour_comb,
+                                                             jboolean strips) {
   PictureOpts p;
   p.luma_comb = luma_comb;
   p.adaptive_comb = adaptive;
   p.smooth_lines = smooth;
   p.repair = repair;
   p.chroma_comb = colour_comb;
+  p.strips = strips;
   if (g_radio) g_radio->set_picture(p);
+}
+
+// The picture's delay on screen (render/latency.h), over the last second, as JSON.
+JNIEXPORT jstring JNICALL Java_com_fpvdroid_app_Native_latency(JNIEnv *env, jclass) {
+  const std::string s = g_screen ? g_screen->latency_json() : std::string("{}");
+  return env->NewStringUTF(s.c_str());
 }
 
 JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_setView(JNIEnv *, jclass, jfloat aspect, jint fit, jfloat scale,
@@ -292,6 +303,10 @@ JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_redraw(JNIEnv *, jclass) {
   if (g_screen) g_screen->redraw();
 }
 
+JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_setDisplayRefresh(JNIEnv *, jclass, jfloat hz) {
+  if (g_screen) g_screen->set_display_hz(hz);
+}
+
 JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_testCard(JNIEnv *, jclass, jboolean on) {
   KP_LOGI("test picture %s", on ? "on" : "off");
   if (on) {
@@ -311,7 +326,8 @@ JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_holdPicture(JNIEnv *, jclass
   if (g_screen) g_screen->hold(ms);
 }
 
-// Debug: a switch by name. The radio's own two are set at once ("0" turns one off; anything else, or nothing, on).
+// Debug: a switch by name. The radio's own two are set at once ("0" turns one off; anything else, or nothing, on),
+// and so are the screen's: KP_FRONT_BUFFER, KP_PRESENT_ALIGN, KP_PRESENT_MARGIN_US (render/screen.h).
 // Any other is an environment variable for wifi-sdr / devourer, in place from the next open; an empty value
 // removes it.
 JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_setDebugEnv(JNIEnv *env, jclass, jstring key, jstring value) {
@@ -322,6 +338,14 @@ JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_setDebugEnv(JNIEnv *env, jcl
     if (g_radio) g_radio->set_conceal(on);
   } else if (k == "KP_FAST_CPUS") {
     if (g_radio) g_radio->set_fast_cores(on);
+  } else if (k == "KP_FRONT_BUFFER") {  // front-buffer drawing (a prototype: Screen::set_front_buffer)
+    if (g_screen) g_screen->set_front_buffer(on);
+  } else if (k == "KP_PRESENT_ALIGN" || k == "KP_PRESENT_MARGIN_US") {  // how strips go up (Screen::set_present)
+    static bool align = true;
+    static int margin = 2500;
+    if (k == "KP_PRESENT_ALIGN") align = on;
+    else margin = std::atoi(v.c_str());
+    if (g_screen) g_screen->set_present(align, margin);
   } else {
     std::lock_guard<std::mutex> l(g_env_m);
     g_env_wanted.emplace_back(k, v);

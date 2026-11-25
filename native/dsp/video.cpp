@@ -25,9 +25,12 @@ const VideoStd kPal{64.0, 10.5, 52.0, 288, 22, "PAL"};
 // It finds the sync pulses (levels, acquisition, a line PLL that freewheels and re-phases), which is all its own;
 // for the rest it runs the modules: the luma and colour paths behind the pulse tracking into the sample rings
 // (picture_filters.h, rings.h), and as each line ends, its burst, sparkle repair (sparkle.h), the line into a row
-// (line_draw.h) and, as each field ends, the frame (deinterlace.h).
+// (line_draw.h) and, as each field ends, the frame (deinterlace.h); with strips (PictureOpts::strips), the frame a
+// strip at a time as the rows come in.
 class Decoder {
 public:
+  void set_strip_sink(StripSink s) { strip_sink = std::move(s); }
+
   // picture: the switches, which whoever owns the decoder may change at any time (FrontEnd::set_picture)
   Decoder(double fs, FrameSink sink, const DecoderOpts &o, const std::atomic<PictureOpts> &picture)
       : fs(fs), sink(std::move(sink)), o(o), picture(picture), drawer(o.width, fs), filt(fs, o.colour), spark(fs) {
@@ -161,6 +164,11 @@ private:
   bool haveA = false, haveB = false;
   int cur_field = -1;
   int64_t field_line0 = 0;
+  // Low latency (PictureOpts::strips): the field being drawn goes into the frame, and out, a strip at a time
+  StripSink strip_sink;
+  bool field_strips = false;     // this field does (strips as the field began)
+  int strip_y = 0;               // the frame's lines [0, strip_y) are in and out already
+  std::vector<uint64_t> row_at;  // n when each of the field's rows was drawn (0: not yet), for the LineTimes
   uint64_t frames_out = 0, fields_seen = 0;
   std::vector<uint32_t> hist;
   double hlo = -8, hhi = 8;
@@ -283,6 +291,8 @@ private:
     fieldA.assign(static_cast<size_t>(o.width) * s.active * 4, 0);
     fieldB = fieldA;
     frame.assign(static_cast<size_t>(o.width) * s.active * 2 * 4, 0);
+    row_at.assign(s.active, 0);
+    strip_y = 0;
     filt.set_std(s);
     refresh_switches();
     comb_epoch++;
@@ -336,6 +346,7 @@ private:
     acq_n = 0;
     lines = lines_locked = 0;
     cur_field = -1;
+    field_strips = false;
     haveA = haveB = false;
     recent_n = recent_locked = recent_pos = 0;
     line_start = -1;
@@ -566,6 +577,7 @@ private:
     } else if (in_picture(cur.k)) {
       draw_line(cur, false, false);
       if (pic.repair) mend_rows(cur.k, cur.hit);
+      row_drawn(cur.k);
     }
   }
 
@@ -580,6 +592,7 @@ private:
       };
       draw_line(m, pair(comb_up, -1), pair(cur, 1));
       if (pic.repair) mend_rows(m.k, m.hit);
+      row_drawn(m.k);
     }
     comb_up = comb_mid;
     comb_mid = cur;
@@ -663,19 +676,68 @@ private:
     gated_lines++;
   }
 
-  // A frame to the sink: from one field with its lines interpolated (smooth lines), or from two (the same one
-  // twice: each line doubled).
-  void emit_field(const std::vector<uint8_t> &f, bool upper) {
-    deint.smooth(f.data(), upper, o.width, std_->active, frame.data());
-    emit_frame();
+  // Row k of the field has been drawn, and sparkle repair has done what it can with it so far. With strips, the frame
+  // lines that are now final go out once there are a strip's worth of them. Final: sparkle repair may yet redraw
+  // this row and the two above it (a run of badly hit rows, mended once a good row comes below it: mend_rows), and
+  // with smooth lines the frame line below an upper field's row is made with the row after it too.
+  void row_drawn(int64_t k) {
+    row_at[k] = n;
+    if (!field_strips) return;
+    const int64_t fin = pic.repair ? k - 3 : k;
+    if (fin < 0) return;
+    const int y1 = static_cast<int>(pic.smooth_lines && cur_field == 1 ? 2 * fin + 1 : 2 * fin + 2);
+    if (y1 - strip_y >= 2 * kStripRows) put_strip(y1);
   }
+
+  // Frame lines [strip_y, y1) of the field being drawn into the frame, as the field's frame will have them, and out
+  // as a strip: smooth lines or each line twice (DecoderOpts::fields).
+  void put_strip(int y1) {
+    const int W = o.width, A = std_->active, H = 2 * A;
+    y1 = std::min(y1, H);
+    if (y1 <= strip_y) return;
+    const uint8_t *f = (cur_field == 0 ? fieldA : fieldB).data();
+    if (pic.smooth_lines) deint.smooth(f, cur_field == 1, W, A, frame.data(), strip_y, y1);
+    else double_lines(f, W, A, frame.data(), strip_y, y1);
+    const Strip s{frame.data() + static_cast<size_t>(strip_y) * W * 4, W, H, strip_y, y1 - strip_y, std_, y1 == H,
+                  times_of(strip_y, y1)};
+    strip_y = y1;
+    strip_sink(s);
+  }
+
+  // When the field rows in frame lines [y0, y1) were drawn (LineTimes; 0 for none drawn yet)
+  LineTimes times_of(int y0, int y1) const {
+    LineTimes t;
+    const int r0 = std::max(y0 >> 1, 0), r1 = std::min((y1 - 1) >> 1, std_->active - 1);
+    for (int r = r0; r <= r1 && !t.first_at; r++) t.first_at = row_at[r];
+    for (int r = r1; r >= r0 && !t.last_at; r--) t.last_at = row_at[r];
+    return t;
+  }
+
+  // A field begins: strips or not, as the switches say now
+  void begin_field() {
+    field_strips = o.fields && strip_sink && pic.strips;
+    strip_y = 0;
+    std::fill(row_at.begin(), row_at.end(), 0);
+  }
+
+  // The field being drawn has ended (DecoderOpts::fields): its frame to the sink, with its lines interpolated
+  // (smooth lines) or each one twice. With strips most of the frame is in already: the rest goes out as the last.
+  void field_done() {
+    const int A = std_->active;
+    const bool upper = cur_field == 1;
+    if (field_strips) put_strip(2 * A);
+    else if (pic.smooth_lines) deint.smooth((upper ? fieldB : fieldA).data(), upper, o.width, A, frame.data());
+    else double_lines((upper ? fieldB : fieldA).data(), o.width, A, frame.data(), 0, 2 * A);
+    emit_frame(field_strips, times_of(0, 2 * A));
+  }
+  // A frame woven from two fields (not DecoderOpts::fields)
   void emit(const std::vector<uint8_t> &a, const std::vector<uint8_t> &b) {
     weave(a.data(), b.data(), o.width, std_->active, frame.data());
-    emit_frame();
+    emit_frame(false, {});
   }
-  void emit_frame() {
+  void emit_frame(bool in_strips, const LineTimes &t) {
     frames_out++;
-    if (sink) sink(Frame{frame.data(), o.width, 2 * std_->active, std_});
+    if (sink) sink(Frame{frame.data(), o.width, 2 * std_->active, std_, in_strips, t});
   }
 
   void close_line(double next_start) {
@@ -686,15 +748,9 @@ private:
       ph -= std::floor(ph + 0.25);  // -> [-0.25, 0.75)
       const bool odd = std::fabs(ph) < 0.25;
       // smooth lines: A is the lower field, B the upper one (B's line k is drawn above A's line k)
-      const bool smooth = pic.smooth_lines;
-      if (cur_field == 0) {
-        haveA = true;
-        if (o.fields) smooth ? emit_field(fieldA, false) : emit(fieldA, fieldA);
-      }
-      if (cur_field == 1) {
-        haveB = true;
-        if (o.fields) smooth ? emit_field(fieldB, true) : emit(fieldB, fieldB);
-      }
+      if (cur_field == 0) haveA = true;
+      if (cur_field == 1) haveB = true;
+      if (o.fields && cur_field >= 0) field_done();
       if (!o.fields && haveA && haveB) {
         emit(fieldA, fieldB);
         haveA = haveB = false;
@@ -703,6 +759,7 @@ private:
       field_line0 = static_cast<int64_t>(line_idx);
       fields_seen++;
       if (odd) haveB = false;  // a frame is A then B
+      begin_field();
     }
     prev_line_vsync = vs;
     line_idx++;
@@ -806,6 +863,8 @@ void FrontEnd::set_shift(double s) {
 }
 
 DecoderStats FrontEnd::stats() const { return _dec->stats(); }
+
+void FrontEnd::set_strip_sink(StripSink s) { _dec->set_strip_sink(std::move(s)); }
 
 namespace {
 // branch-free atan2 (a polynomial, max error ~1e-4 rad) so the discriminator loop vectorises

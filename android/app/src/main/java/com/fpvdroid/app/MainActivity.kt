@@ -5,11 +5,13 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
+import android.hardware.display.DisplayManager
 import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.Display
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.Surface
@@ -73,6 +75,17 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     private var lastDropped = 0L
     private var overloadedUntil = 0L
     private var frameRateFor = ""
+    private var displayStd = ""            // the camera's standard the display was last asked to fit ("" none yet)
+    /** Debug ("refresh" extra): "field", "max" or "none" in place of what [matchDisplayTo] would ask for. */
+    private var refreshOverride: String? = null
+    private var toldRefresh = 0f           // the display's refresh rate as last told to the engine ([tellRefresh])
+    private val displayWatch = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) {}
+        override fun onDisplayRemoved(displayId: Int) {}
+        override fun onDisplayChanged(displayId: Int) {
+            if (displayId == shownOn()?.displayId) tellRefresh()
+        }
+    }
     private var scanOnReturn = false       // a scan is owed: the first one, or one the background cut short
     private var scanStartedAt = 0L         // when the last scan began (elapsedRealtime); 0: none this session
     private var statusBroken = false
@@ -113,6 +126,9 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
 
     /**
      * adb shell am start -n com.fpvdroid.app/.MainActivity [--es mode usbtest] [--ef gain 30] [--ef record 3] [--ez testcard true]
+     * Picture delay: [--ez lowlatency true] (the Picture tab's Low latency), [--es refresh field|max|none] (the display
+     * rate asked for, in place of what Low latency says: the field rate, the display's fastest, or none),
+     * [--ez menu false] (the menu closed, the picture full size, as when flying; true opens it).
      * USB debugging: [--es env WSDR_URB_DEPTH=64,OTHER=1] (wifi-sdr / devourer switches, in place from the next
      * open; KEY= removes one), [--ez soak true] (a 40 MS/s stream test after every open instead of watching: how long
      * the link holds up, open after open).
@@ -140,6 +156,23 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
             if (::menu.isInitialized) menu.syncGain()
             onSignal()
         }
+        if (i.hasExtra("lowlatency")) {   // the same as the Picture tab's Low latency
+            settings.lowLatency = i.getBooleanExtra("lowlatency", false)
+            engine.log("debug: low latency ${settings.lowLatency}")
+            if (::menu.isInitialized) menu.syncLowLatency()
+            applyPicture()
+        }
+        if (i.hasExtra("menu") && ::menu.isInitialized) {
+            val open = i.getBooleanExtra("menu", true)
+            engine.log("debug: menu ${if (open) "open" else "closed"}")
+            if (open) openMenu() else closeMenu()
+        }
+        i.getStringExtra("refresh")?.let {
+            refreshOverride = it.takeIf { r -> r == "field" || r == "max" || r == "none" }
+            engine.log("debug: display refresh ${refreshOverride ?: "as the settings say"}")
+            frameRateFor = ""
+            if (displayStd.isNotEmpty()) matchDisplayTo(displayStd)
+        }
         if (i.hasExtra("record")) {
             val secs = i.getFloatExtra("record", 3f).toDouble()
             val name = "rec-" + java.text.SimpleDateFormat("HHmmss", java.util.Locale.US).format(java.util.Date())
@@ -153,6 +186,8 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         ui.removeCallbacks(closeInBackground)
         ui.removeCallbacks(poll)
         ui.post(poll)
+        getSystemService(DisplayManager::class.java)?.registerDisplayListener(displayWatch, ui)
+        tellRefresh()   // it may have changed while the app was away
         if (!link.started) {
             // the adapter was let go in the background: it takes a few seconds to come back (onRadioUp then
             // tunes), and until then the menu says so instead of a black screen saying nothing
@@ -180,6 +215,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     override fun onStop() {
         foreground = false
         ui.removeCallbacks(poll)
+        getSystemService(DisplayManager::class.java)?.unregisterDisplayListener(displayWatch)
         // nobody is watching: no reason to keep two cores decoding
         if (link.state == UsbLink.State.RUNNING && !testRunning) {
             if (mode == Mode.SCAN) scanOnReturn = true   // cut short: start it over when the app is back
@@ -213,8 +249,12 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     }
 
     // ---------------------------------------------------------------------------------------- settings -> native
-    private fun applyPicture() = engine.setPicture(settings.lumaComb, settings.lumaComb && settings.cleanOsd,
-        settings.smoothLines, settings.sparkleRepair, settings.colourComb)
+    private fun applyPicture() {
+        engine.setPicture(settings.lumaComb, settings.lumaComb && settings.cleanOsd, settings.smoothLines,
+            settings.sparkleRepair, settings.colourComb, settings.lowLatency)
+        // low latency asks the display for another refresh rate
+        if (::video.isInitialized && displayStd.isNotEmpty()) matchDisplayTo(displayStd)
+    }
 
     /**
      * True when something changed that a watch only takes when it starts: the native side knows which of its
@@ -524,6 +564,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
             if (st.fallback) append(" (40 kept dropping out)")
             append(" · processing %.0f%%".format(load * 100))
             append(" · $dropped dropped · ${st.restarts} restarts")
+            if (mode == Mode.WATCH && locked) pictureDelay()?.let { append("\n").append(it) }
             st.antennas?.let { a ->
                 if (a.combine) append("\nAntenna A %.0f dB · B %.0f dB · together %.0f dB".format(a.snrA, a.snrB, a.snrC))
             }
@@ -569,18 +610,85 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         showChannel()
     }
 
-    /** Ask for a display mode that fits the camera's field rate, so frames do not beat against the refresh. */
+    /**
+     * Ask for a display mode that suits the picture. Whole pictures: one that fits the camera's field rate, so frames
+     * do not beat against the refresh. Low latency: the fastest the display has, at its resolution: the picture
+     * comes in strips many times a field, and a faster refresh shows each sooner (a 90 or 120 Hz panel asked for
+     * the field rate drops to 60 Hz).
+     */
     private fun matchDisplayTo(std: String) {
-        if (Build.VERSION.SDK_INT < 30 || std == frameRateFor) return
-        val rate = when (std) { "PAL" -> 50f; "NTSC" -> 59.94f; else -> return }
+        displayStd = std
+        if (Build.VERSION.SDK_INT < 30) return
+        val field = when (std) { "PAL" -> 50f; "NTSC" -> 59.94f; else -> return }
+        val how = refreshOverride ?: if (settings.lowLatency) "max" else "field"
+        if ("$how $std" == frameRateFor) return
         val surface = video.holder.surface ?: return
         if (!surface.isValid) return
-        frameRateFor = std
+        frameRateFor = "$how $std"
+        val max = display?.let { d ->
+            val now = d.mode
+            d.supportedModes.filter { it.physicalWidth == now.physicalWidth && it.physicalHeight == now.physicalHeight }
+                .maxOfOrNull { it.refreshRate }
+        } ?: 0f
         try {
-            surface.setFrameRate(rate, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)
+            when (how) {
+                "max" -> surface.setFrameRate(max, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT)
+                "none" -> surface.setFrameRate(0f, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT)
+                else -> surface.setFrameRate(field, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)
+            }
+            engine.log("display: asked for ${if (how == "max") "$max Hz" else if (how == "none") "no rate" else "$field Hz"} ($std picture)")
         } catch (e: Exception) {
             engine.log("setFrameRate: $e")
         }
+    }
+
+    /** The display the activity is on. */
+    private fun shownOn(): Display? {
+        if (Build.VERSION.SDK_INT >= 30) {
+            try {
+                return display
+            } catch (e: UnsupportedOperationException) {
+                // not tied to a display yet (seen under Robolectric in onStart): the window manager's is the same
+            }
+        }
+        @Suppress("DEPRECATION")
+        return windowManager.defaultDisplay
+    }
+
+    /**
+     * Tell the engine the display's refresh rate when it changed (what [matchDisplayTo] asked for is not always what
+     * the display does: a panel with only 60 and 120 Hz asked for 59.94 goes to 60). The picture-delay readout needs
+     * it where the display's own timing is out of date (front-buffer drawing).
+     */
+    private fun tellRefresh() {
+        val hz = shownOn()?.mode?.refreshRate ?: return
+        if (hz == toldRefresh) return
+        toldRefresh = hz
+        engine.setDisplayRefresh(hz)
+        engine.log("display: now $hz Hz")
+    }
+
+    /**
+     * How old the picture is on screen, for the Signal tab: from the adapter taking its top and bottom lines to the
+     * display showing them, or, where the display does not say when it shows a frame, to the frame being handed
+     * to it. null: nothing measured.
+     */
+    private fun pictureDelay(): String? {
+        val o = try { org.json.JSONObject(engine.latency()) } catch (e: org.json.JSONException) { return null }
+        fun ms(k: String) = o.optDouble(k, 0.0).takeIf { it.isFinite() && it > 0 }
+        val hz = o.optDouble("refresh_hz", 0.0).takeIf { it.isFinite() && it > 0 }?.let { " · %.0f Hz display".format(it) } ?: ""
+        ms("shown_top_ms")?.let { top ->
+            return "Picture delay %.0f ms at the top, %.0f at the bottom$hz".format(top, ms("shown_bottom_ms") ?: 0.0)
+        }
+        ms("expected_top_ms")?.let { top ->   // the display gives no time for each frame: as the compositor expects
+            // front-buffer drawing (a debug switch): drawn straight into what the display shows, half a refresh added
+            val how = if (o.optBoolean("front")) ", drawn straight to the screen" else ""
+            return "Picture delay %.0f ms at the top, %.0f at the bottom$how$hz".format(top, ms("expected_bottom_ms") ?: 0.0)
+        }
+        ms("queued_top_ms")?.let { top ->
+            return "Picture delay %.0f ms at the top, %.0f at the bottom, before the display$hz".format(top, ms("queued_bottom_ms") ?: 0.0)
+        }
+        return null
     }
 
     // ---------------------------------------------------------------------------------------- UI

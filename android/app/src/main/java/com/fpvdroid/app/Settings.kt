@@ -64,6 +64,7 @@ class Settings(private val prefs: SharedPreferences) {
     var smoothLines by pref("smooth_lines", true)
     var sparkleRepair by pref("sparkle_repair", false)
     var colourComb by pref("comb", false)                    // the 3-line chroma comb ("comb" is where installs have it)
+    var lowLatency by pref("low_latency", false)             // the picture shown in strips as it is decoded
     // signal
     var rate40 by pref("rate40", true)
     var diversity by pref("diversity", false)

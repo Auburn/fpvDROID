@@ -259,8 +259,8 @@ class FakeEngine : Engine {
     }
 
     @Synchronized override fun setPicture(lumaComb: Boolean, adaptiveComb: Boolean, smoothLines: Boolean, repair: Boolean,
-                                          colourComb: Boolean) =
-        rec("setPicture", lumaComb, adaptiveComb, smoothLines, repair, colourComb)
+                                          colourComb: Boolean, strips: Boolean) =
+        rec("setPicture", lumaComb, adaptiveComb, smoothLines, repair, colourComb, strips)
 
     @Synchronized override fun setView(aspect: Float, fit: Int, scale: Float, stereo: Boolean, eyeShift: Float) =
         rec("setView", aspect, fit, scale, stereo, eyeShift)
@@ -272,6 +272,7 @@ class FakeEngine : Engine {
     @Synchronized override fun record(seconds: Double, prefix: String) = rec("record", seconds, prefix)
     @Synchronized override fun setSurface(surface: Surface?) = rec("setSurface", surface != null)
     @Synchronized override fun redraw() = rec("redraw")
+    @Synchronized override fun setDisplayRefresh(hz: Float) = rec("setDisplayRefresh", hz)
     @Synchronized override fun testCard(on: Boolean) = rec("testCard", on)
     @Synchronized override fun log(msg: String) = rec("log", msg)
     @Synchronized override fun holdPicture(ms: Int) = rec("holdPicture", ms)

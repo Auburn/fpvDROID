@@ -22,6 +22,7 @@
 #include "decode_queue.h"
 #include "fallback_policy.h"
 #include "frame_gate.h"
+#include "sample_clock.h"
 #include "spectrum.h"
 #include "steps.h"
 #include "sweep.h"
@@ -30,6 +31,7 @@
 namespace wsdr {
 class Receiver;
 struct RxStatus;
+struct BankMeta;
 }
 
 namespace kp {
@@ -45,7 +47,9 @@ struct Pilot {
 
 class Radio {
 public:
-  explicit Radio(FrameSink frames);
+  // frames: the watched channel's pictures. strips (optional): its strips while PictureOpts::strips is on (low
+  // latency). Both on the decode thread, past the FrameGate, their LineTimes with the times the adapter took them.
+  explicit Radio(FrameSink frames, StripSink strips = {});
   ~Radio();
   Radio(const Radio &) = delete;
   Radio &operator=(const Radio &) = delete;
@@ -122,11 +126,12 @@ private:
     uint64_t seq;
     uint32_t gen;
     double fs, centre_hz, shift_hz;
+    double t_sampled;  // when its last sample was taken (steady clock, s): it came in, less the adapter's shipping
   };
   enum Path { kPathA = 0, kPathB = 1 };
   void dsp_loop();
   void decode_loop();
-  void on_bank(const uint8_t *b, size_t n, uint64_t seq, uint32_t gen, double fs, double centre, double shift);
+  void on_bank(const uint8_t *b, size_t n, const wsdr::BankMeta &m);
   // watching: off-centre tuning applies (the hardware centre recomputed for this rate)
   void tune(double hz, int rate_sel, bool watching = false);
   void begin_watch();
@@ -145,7 +150,8 @@ private:
   bool begin_recording(const Bank &b);
   void end_recording();
   void combine_antennas(const Bank &b, bool gap, int64_t t_ms);
-  void demod_for_decoder(bool gap);
+  void demod_for_decoder(bool gap, double t_sampled);
+  void stamp(LineTimes &t) const;  // decode thread: t_first, t_last from the decoder's counts (_clock)
   // the steps of a scan or a sweep (_steps), each a retune
   void start_steps(std::vector<double> plan);
   bool next_step();
@@ -205,6 +211,7 @@ private:
   FrameGate _gate;  // between the decoders and the frame sink: the frames torn by a hole in the stream stop here
   std::thread _decoder;
   DecodeQueue _decq;
+  SampleClock _clock;  // decode thread: when the samples it decodes were taken (stamp)
   double _dload = 0;
 
   // DSP-thread state

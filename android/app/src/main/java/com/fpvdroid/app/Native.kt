@@ -37,9 +37,21 @@ interface Engine {
     fun setOffsetTuning(on: Boolean): Boolean
     /**
      * The decoder's picture switches (PictureOpts in native/dsp/video.h). At once. [colourComb]: the NTSC 3-line
-     * chroma comb (fewer rainbows on fine detail, more decode CPU).
+     * chroma comb (fewer rainbows on fine detail, more decode CPU). [strips]: low latency, each part of the picture
+     * on screen as soon as its lines are decoded instead of a whole picture at a time (from the next field).
      */
-    fun setPicture(lumaComb: Boolean, adaptiveComb: Boolean, smoothLines: Boolean, repair: Boolean, colourComb: Boolean)
+    fun setPicture(lumaComb: Boolean, adaptiveComb: Boolean, smoothLines: Boolean, repair: Boolean, colourComb: Boolean,
+                   strips: Boolean)
+    /**
+     * How old the picture is on screen, over the last second, as JSON (native/render/latency.h, Screen::latency_json):
+     * from the adapter taking the picture's top / bottom line to the screen. "{}" or zeros: nothing measured.
+     */
+    fun latency(): String = "{}"
+    /**
+     * The display's refresh rate, each time it changes: [latency] takes it where the display's own timing is out of
+     * date (front-buffer drawing).
+     */
+    fun setDisplayRefresh(hz: Float) {}
     /** How the picture is laid out on the Surface. [fit]: 0 fit, 1 stretch, 2 crop. [eyeShift]: fraction of the width. */
     fun setView(aspect: Float, fit: Int, scale: Float, stereo: Boolean, eyeShift: Float)
     /**
@@ -62,8 +74,10 @@ interface Engine {
     /** Debug: a moving test picture in place of video (no adapter needed), for looking at the screen side alone. */
     fun testCard(on: Boolean) {}
     /**
-     * Debug: a switch by name. KP_CONCEAL and KP_FAST_CPUS are the radio's own ("0" turns one off). Any other is an
-     * environment variable for wifi-sdr / devourer, in place from the next open ("" removes it).
+     * Debug: a switch by name. KP_CONCEAL and KP_FAST_CPUS are the radio's own ("0" turns one off); KP_FRONT_BUFFER
+     * (front-buffer drawing, a prototype), KP_PRESENT_ALIGN and KP_PRESENT_MARGIN_US (how strips go up) the
+     * screen's (native/render/screen.h). Any other is an environment variable for wifi-sdr / devourer, in place from
+     * the next open ("" removes it).
      */
     fun setDebugEnv(key: String, value: String) {}
     /** Keep the picture on screen, dimmed once stale, for up to [ms] (through a close and reopen); the next frame ends it. */
@@ -95,7 +109,10 @@ object Native : Engine {
     external override fun setGain(db: Double): Boolean
     external override fun setDiversity(on: Boolean)
     external override fun setOffsetTuning(on: Boolean): Boolean
-    external override fun setPicture(lumaComb: Boolean, adaptiveComb: Boolean, smoothLines: Boolean, repair: Boolean, colourComb: Boolean)
+    external override fun setPicture(lumaComb: Boolean, adaptiveComb: Boolean, smoothLines: Boolean, repair: Boolean, colourComb: Boolean,
+                                     strips: Boolean)
+    external override fun latency(): String
+    external override fun setDisplayRefresh(hz: Float)
     external override fun setView(aspect: Float, fit: Int, scale: Float, stereo: Boolean, eyeShift: Float)
     external override fun setBackdrop(on: Boolean, now: Boolean)
     external override fun setPreview(left: Int, top: Int, right: Int, bottom: Int, radius: Float)
