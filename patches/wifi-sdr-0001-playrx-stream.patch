@@ -1,5 +1,5 @@
 diff --git a/src/fw/stream8822b.S b/src/fw/stream8822b.S
-index 57c5d0d..4503263 100644
+index 57c5d0d..1b155a3 100644
 --- a/src/fw/stream8822b.S
 +++ b/src/fw/stream8822b.S
 @@ -26,9 +26,12 @@
@@ -26,7 +26,7 @@ index 57c5d0d..4503263 100644
 +        # 0x294 BIT16 stays set). Switching the RX DMA enables in REG_CR (0x100 bits 1 and 3) off and on lets it
 +        # go again (measured from the host on a wedged chip: fpvDROID's wedge lab). So a request still pending
 +        # +0x28 us after it was written gets that pulse, counted at +0x30, and the wait starts over. A limit of
-+        # 0 waits for ever, as before. The engine takes a 16 KiB packet in 38..46 us.
++        # 0 waits for ever, as before. The engine takes a 16 KiB packet in 38..49 us.
          .macro  SEND
          sw      $2, 0x294($17)
 +        lw      $3, 0x568($17)
@@ -117,7 +117,7 @@ index 57c5d0d..4503263 100644
          LI32    $2, 0xfff8
          addu    $6, $6, $2              # a2 = last sample of the bank
 diff --git a/src/receiver.cpp b/src/receiver.cpp
-index 72e29c5..425fd6f 100644
+index 72e29c5..29b512b 100644
 --- a/src/receiver.cpp
 +++ b/src/receiver.cpp
 @@ -3,6 +3,7 @@
@@ -128,7 +128,21 @@ index 72e29c5..425fd6f 100644
  #include <stdexcept>
  #include <tuple>
  
-@@ -87,7 +88,7 @@ void Receiver::open(uint16_t pid, const RxSettings &initial, int bus, const std:
+@@ -14,6 +15,13 @@ namespace wsdr {
+ 
+ using clk = std::chrono::steady_clock;
+ 
++// fpvDROID: for what holds on Android only (the worker's StreamCfg::unwedge_us)
++#ifdef __ANDROID__
++constexpr bool kAndroid = true;
++#else
++constexpr bool kAndroid = false;
++#endif
++
+ const char *rx_state_name(RxState s) {
+   switch (s) {
+   case RxState::Closed: return "closed";
+@@ -87,7 +95,7 @@ void Receiver::open(uint16_t pid, const RxSettings &initial, int bus, const std:
    if (sys_fd >= 0)
      o.reset = false; // a USB reset can re-enumerate the device and invalidate the granted fd
    o.bw = cu && !initial.allow_gapped ? 20 : width_of(initial, cu); // 8812CU at 40 MS/s only gapped
@@ -137,7 +151,7 @@ index 72e29c5..425fd6f 100644
    o.thermal_track = false; // no host register traffic while streaming
    auto s = std::make_unique<Session>(_log);
    try {
-@@ -171,7 +172,7 @@ void Receiver::set(const RxSettings &s) {
+@@ -171,7 +179,7 @@ void Receiver::set(const RxSettings &s) {
      n.gain_db = std::clamp(n.gain_db, 0.0, _caps.gain_max);
      const auto hw = [&](const RxSettings &x) {
        const int w = width_of(x, _caps.cu);
@@ -146,16 +160,16 @@ index 72e29c5..425fd6f 100644
      };
      const bool same_hw = hw(n) == hw(_set);
      _set = n;
-@@ -205,6 +206,8 @@ void Receiver::worker() {
+@@ -205,6 +213,8 @@ void Receiver::worker() {
    } done{this};
    uint64_t seq = 0;
    int consecutive_faults = 0;
 +  bool unwedge_tried = false; // fpvDROID: the last run ended wedged and this one is its one new start
-+  [[maybe_unused]] bool wedge_seen = false; // fpvDROID: a run of this worker ended wedged (Android only, below)
++  bool wedge_seen = false;    // fpvDROID: a run of this worker ended wedged (StreamCfg::unwedge_us, below)
    while (_active) {
      // Let a burst of setter calls settle before restarting.
      for (;;) {
-@@ -230,7 +233,7 @@ void Receiver::worker() {
+@@ -230,7 +240,7 @@ void Receiver::worker() {
        _st.state = RxState::Starting;
      }
      const int width = width_of(cur, _caps.cu);
@@ -164,17 +178,31 @@ index 72e29c5..425fd6f 100644
      const double fs = rate_of(cur.rate_sel);
      const double centre = centre_of(ch, width);
      try {
-@@ -257,6 +260,9 @@ void Receiver::worker() {
+@@ -257,6 +267,23 @@ void Receiver::worker() {
      c.la.rate_sel = cur.rate_sel;
      // >= 20 MS/s needs ~13 ms of posted URBs; the 8812CU wants ~100 ms (FINDINGS §4)
      c.depth = _caps.cu || cur.rate_sel <= 2 ? 256 : 64;
 +    // AnalogRX: WSDR_URB_DEPTH overrides the posted bulk-IN transfers (Windows tuning experiments)
 +    if (const char *d = std::getenv("WSDR_URB_DEPTH"))
 +      if (std::atoi(d) > 0) c.depth = std::min(4096, std::atoi(d));
++    // fpvDROID: the onboard program frees a wedged C2H engine by itself after this wait (StreamCfg::unwedge_us):
++    //  - on USB 3 only: a packet takes ~350 us on USB 2, which never wedges;
++    //  - on Android only: that is where the wedge is met, and where this was measured;
++    //  - only once this host has wedged the adapter (wedge_seen: a run of this worker ended so, which costs the
++    //    one new start). On a host that does not wedge, the pulse can only fall on a packet that is merely slow,
++    //    which then comes out in pieces.
++    // The measurements are in fpvDROID's patches/c2h-wedge.md. WSDR_WEDGE_US sets the wait instead, from the first
++    // run on and on any host (0: no pulse).
++    c.unwedge_us = kAndroid && wedge_seen && !_caps.cu && _s->superspeed() ? 100 : 0;
++    if (const char *e = std::getenv("WSDR_WEDGE_US"))
++      c.unwedge_us = static_cast<unsigned>(std::max(0, std::atoi(e)));
++    // fpvDROID: WSDR_SKIP=0 has the onboard program ship late banks too (StreamCfg::skip_late)
++    if (const char *e = std::getenv("WSDR_SKIP"))
++      c.skip_late = std::atoi(e) != 0;
      c.la.igi = cur.agc ? -1 : igi_for(cur.gain_db, _caps.cu);
      c.la.no_cca = !cur.agc;
      // 0 leaves devourer's DFIR (8822B: BW20 set; 8822C: per width). The wide sets only where the rate carries
-@@ -285,14 +291,42 @@ void Receiver::worker() {
+@@ -285,14 +312,27 @@ void Receiver::worker() {
        _st.gapped = c.gapped;
        _st.state = RxState::Streaming;
      }
@@ -183,21 +211,6 @@ index 72e29c5..425fd6f 100644
 +      std::lock_guard<std::mutex> l(_m);
 +      (at_start ? _st.start_late_skips : _st.mid_drops)++;
 +    };
-+    // fpvDROID: the onboard program frees a wedged C2H engine by itself (StreamCfg::unwedge_us). On USB 3 only: a
-+    // packet takes ~350 us on USB 2, which never wedges. On Android only, where the wedge is met and this was
-+    // measured; elsewhere WSDR_WEDGE_US turns it on (stream88xx.cpp reads it). And only once this host has wedged
-+    // the adapter (a run of this worker ended so, below, which costs the one new start): on a host that does not,
-+    // the pulse can only fall on a packet that is merely slow, which then comes out in pieces. MEASURED at
-+    // 20 MS/s. A Pixel 8 Pro wedges ~100 times a minute, and with the pulse ran ~15 minutes with one new start.
-+    // An LG G7+ (Android 10) runs for minutes without a wedge, and then wedges at every start for a while. With
-+    // the pulse from the start, three runs of four there had new starts (1, 5, and one that failed start after
-+    // start for its last minute), where two runs without it had one between them; with no pulse at all a wedge
-+    // left it wedged through 18 opens of the adapter, ~70 s; given the pulse after its first wedge it was running
-+    // again 0.3 s and 1.8 s after the two it had (2 and 10 failed starts).
-+#ifdef __ANDROID__
-+    if (wedge_seen && !_caps.cu && _s->superspeed())
-+      c.unwedge_us = 100;
-+#endif
 +    c.on_unwedge = [&] {
 +      std::lock_guard<std::mutex> l(_m);
 +      _st.unwedged++;
@@ -218,7 +231,7 @@ index 72e29c5..425fd6f 100644
        meta.seq = seq++;
        {
          std::lock_guard<std::mutex> l(_m);
-@@ -319,12 +353,26 @@ void Receiver::worker() {
+@@ -319,12 +359,26 @@ void Receiver::worker() {
      // The count and the reason change together: a status() read between them would show a new
      // restart with the old (or no) text, and the reason is the only record of why.
      RxState next = RxState::Starting;
@@ -245,7 +258,7 @@ index 72e29c5..425fd6f 100644
        why = "stream keeps failing: " + ss.error;
      }
      {
-@@ -333,10 +381,17 @@ void Receiver::worker() {
+@@ -333,10 +387,17 @@ void Receiver::worker() {
        _st.state = next;
        _st.error = why;
        _st.last_fault = why;
@@ -321,7 +334,7 @@ index f107565..aadf279 100644
  
  class Receiver {
 diff --git a/src/session.cpp b/src/session.cpp
-index c876980..c79ec89 100644
+index c876980..2574ec5 100644
 --- a/src/session.cpp
 +++ b/src/session.cpp
 @@ -2,6 +2,8 @@
@@ -333,10 +346,11 @@ index c876980..c79ec89 100644
  #include <stdexcept>
  
  #include "UsbOpen.h"
-@@ -9,7 +11,56 @@
+@@ -9,7 +11,24 @@
  
  namespace wsdr {
  
+-
 +// fpvDROID: whether the link is SuperSpeed. libusb asks the kernel, and for a device opened from an fd (Android) it
 +// can only do so with USBDEVFS_GET_SPEED, which older kernels lack (an LG G7 on Android 10, kernel 4.9): the speed
 +// comes back unknown. Taken as USB 2, a SuperSpeed link then got 4096-byte EP0 block writes (the USB 2 size in
@@ -356,41 +370,9 @@ index c876980..c79ec89 100644
 +  return ss;
 +}
  
-+// fpvDROID: the USB 3 PHY value Realtek's drivers write at bring-up and devourer does not. halmac
-+// (usb3_phy_param_8822b, applied by phy_cfg_usb_8822b) and Linux's rtw88 (usb3_param_8822b, rtw_usb_phy_cfg) both
-+// set the 8822B's USB 3 PHY register 0x01 to 0xA841, on cut D only, through 0xFF0D/0xFF0E (data) and 0xFF0C
-+// (address; BIT(7) writes, BIT(6) reads with the value then in 0xFF0C's bytes 1-2: halmac's usbphy_*_88xx).
-+// Realtek does not say what it tunes. On trial against the C2H wedge (FINDINGS §4) on phones, whose 5 Gbps links
-+// are more marginal than a PC's: WSDR_USB3_PHY=1 writes it (cut D only), =0 only reads and logs it, and unset
-+// leaves the link alone.
-+static void usb3_phy_param(Reg &reg, const std::string &chip, bool ss) {
-+  const char *e = std::getenv("WSDR_USB3_PHY");
-+  if (!e || !*e || chip != "RTL8822B" || !ss)
-+    return;
-+  try {
-+    auto read = [&reg](uint8_t a) {
-+      reg.w8(0xFF0C, static_cast<uint8_t>(a | 0x40));
-+      return static_cast<unsigned>((reg.r32(0xFF0C) >> 8) & 0xFFFF);
-+    };
-+    const unsigned cut = (reg.r32(0x00F0) >> 12) & 0xF;
-+    const unsigned before = read(0x01);
-+    if (std::atoi(e) != 1 || cut != 3) {
-+      std::fprintf(stderr, "usb3 phy: cut %u, reg 0x01 = 0x%04x, left alone\n", cut, before);
-+      return;
-+    }
-+    reg.w8(0xFF0D, 0x41);
-+    reg.w8(0xFF0E, 0xA8);
-+    reg.w8(0xFF0C, 0x01 | 0x80);
-+    std::fprintf(stderr, "usb3 phy: cut %u, reg 0x01 was 0x%04x, wrote 0xa841, reads 0x%04x\n", cut, before,
-+                 read(0x01));
-+  } catch (const std::exception &x) {
-+    std::fprintf(stderr, "usb3 phy: failed: %s\n", x.what());
-+  }
-+}
- 
  static ChannelWidth_t width_of(int bw) {
    switch (bw) {
-@@ -85,7 +136,7 @@ void Session::open(const OpenOpts &o) {
+@@ -85,7 +104,7 @@ void Session::open(const OpenOpts &o) {
    }
    _s.adopt_handle(h);
    _s.adopt_lock(lock);
@@ -399,7 +381,7 @@ index c876980..c79ec89 100644
  
    devourer::DeviceConfig cfg;
    cfg.tuning.thermal_track = o.thermal_track;
-@@ -94,6 +145,17 @@ void Session::open(const OpenOpts &o) {
+@@ -94,6 +113,17 @@ void Session::open(const OpenOpts &o) {
    // users own bulk-IN and want fixed gain. The switch (tuning.j3_runtime_thread, OpenIPC/devourer#498)
    // is required: the pinned devourer (external/devourer) has it, and a build without it must fail.
    cfg.tuning.j3_runtime_thread = false;
@@ -417,16 +399,8 @@ index c876980..c79ec89 100644
    WiFiDriver driver(_log);
    auto dev = driver.CreateRadio(h, ctx, lock, cfg);
    if (!dev)
-@@ -104,6 +166,7 @@ void Session::open(const OpenOpts &o) {
-                                      .ChannelOffset = static_cast<uint8_t>(o.bw > 20 ? 1 : 0),
-                                      .ChannelWidth = width_of(o.bw)});
-   _reg = std::make_unique<Reg>(h, _ss);
-+  usb3_phy_param(*_reg, _chip, _ss);
- }
- 
- void Session::tune(int channel, int bw) {
 diff --git a/src/stream88xx.cpp b/src/stream88xx.cpp
-index a663615..a886576 100644
+index a663615..757810c 100644
 --- a/src/stream88xx.cpp
 +++ b/src/stream88xx.cpp
 @@ -4,9 +4,12 @@
@@ -442,29 +416,21 @@ index a663615..a886576 100644
  
  #include "bulkin88xx.h"
  #include "c2h88xx.h"
-@@ -27,6 +30,21 @@ constexpr uint32_t kBankC2h[2] = {0x16000u, 0x06000u}; // TXFF 0x20000 / 0x30000
+@@ -27,6 +30,13 @@ constexpr uint32_t kBankC2h[2] = {0x16000u, 0x06000u}; // TXFF 0x20000 / 0x30000
  constexpr uint8_t kSentinel[8] = {0xE1, 0xF1, 0x47, 0x5E, 0xA5, 0xA5, 0xA5, 0xA5}; // stream8822b.S
  
  constexpr unsigned kStartRetries = 2;
 +constexpr uint32_t kStartGraceBanks = 4; // AnalogRX: late banks tolerated (dropped) at the start of a run
 +
-+// fpvDROID: how long after a bank is due (in fifths of a us) its part k may start, data packet 0..3, before the ADC
-+// comes back to it. The ADC is back at the bank's first byte (period - guard) after due and goes through it at one
-+// bank a period; a part starts with its descriptor, 104 + k * 16352 bytes in. The chip takes a packet faster than
-+// the ADC writes one (16376 bytes in 38..49 us against 51 at 40 MS/s), so a part that starts ahead of the ADC stays
-+// ahead. kPartMargin5 for what that leaves out (a packet taken unevenly).
++// fpvDROID: the slack in a bank's deadlines (adc_back5 in run()), in fifths of a us. kPartMargin5: for a packet taken
++// unevenly. kBankSend5: how long a whole bank takes to go out at USB 3, part 0's start to the trailer (a Pixel 8 Pro
++// at 40 MS/s: 168..181 us for 90 % of banks, median 173).
 +constexpr int32_t kPartMargin5 = 100; // 20 us
-+// fpvDROID: how long a whole bank takes to go out at USB 3 (fifths of a us), for the skip limit (see run()). MEASURED
-+// on a Pixel 8 Pro at 40 MS/s, part 0's start to the trailer: 168..181 us for 90 % of banks, median 173.
-+constexpr int32_t kBankSend5 = 825; // 165 us
-+int32_t part_deadline5(uint32_t period5, int32_t guard5, int k) {
-+  return static_cast<int32_t>(period5) - guard5 + static_cast<int32_t>((104.0 + k * 16352.0) * period5 / 65536.0) -
-+         kPartMargin5;
-+}
++constexpr int32_t kBankSend5 = 825;   // 165 us
  
  size_t chunk_off(int k) { return Stream8822b::kPrefix + static_cast<size_t>(k) * Stream8822b::kChunk; }
  
-@@ -53,21 +71,55 @@ uint8_t fill(int bank, size_t i) { // synthetic pattern
+@@ -53,21 +63,55 @@ uint8_t fill(int bank, size_t i) { // synthetic pattern
  }
  
  // Where the CPU program got to, for a missed first packet: its DMEM state block (magic, seq, state,
@@ -524,7 +490,32 @@ index a663615..a886576 100644
  } // namespace
  
  StreamStats Stream8822b::run(const std::function<bool(const uint8_t *, const BankInfo &)> &on_bank,
-@@ -89,6 +141,8 @@ StreamStats Stream8822b::run(const std::function<bool(const uint8_t *, const Ban
+@@ -84,11 +128,33 @@ StreamStats Stream8822b::run(const std::function<bool(const uint8_t *, const Ban
+   InOrderReader rd(_s.handle(), _s.context(), _c.depth);
+   const uint32_t period5 = 512u << _c.la.rate_sel;
+   const int32_t guard5 = _c.guard_us * 5;
++  // fpvDROID: when the ADC is back at byte `at` of a bank, in fifths of a us after the bank is due: it is back at the
++  // bank's first byte (period - guard) after due, and goes through the bank in one period. Each deadline is this
++  // less some slack:
++  //  - data packet k may start until the ADC is back at its descriptor, at chunk_off(k) - 24, less kPartMargin5.
++  //    The chip takes a packet faster than the ADC writes one (16376 bytes in 38..49 us against 51 at 40 MS/s), so
++  //    a part that starts ahead of the ADC stays ahead;
++  //  - the bank may end until the ADC is back at its end, less kPartMargin5: after that the sentinel written behind
++  //    it would land on the next revolution's samples;
++  //  - the onboard program skips a bank that would start too late to go out whole before the ADC is back at its
++  //    first byte: that time less kBankSend5 (skip5).
++  const auto adc_back5 = [&](size_t at) {
++    return static_cast<int32_t>(period5) - guard5 + static_cast<int32_t>(at * period5 / kBankBytes);
++  };
++  // fpvDROID: how late a bank may start before the onboard program skips it: 20 us at 40 MS/s, ~225 us at 20 MS/s
++  // (0: never; so in gapped mode, where every round starts afresh). A bank that starts later has parts going out
++  // after the ADC is back in it, and the chip often sends such a part short; a pause leaves several banks in a row
++  // late, and the short banks end the run on the burst rule. Skipped at once, it costs one bank and the next is on
++  // time. The measurements are in fpvDROID's patches/c2h-wedge.md.
++  const uint32_t skip5 =
++      _c.skip_late && !_c.gapped ? static_cast<uint32_t>(std::max(1, adc_back5(0) - kBankSend5)) : 0;
+ 
+   uint8_t data_desc[24], trl_desc[24];
    desc(data_desc, kChunk);
    desc(trl_desc, kTrailerPayload);
    std::vector<uint8_t> bank(kBankBytes);
@@ -533,37 +524,21 @@ index a663615..a886576 100644
    bool seen[2] = {false, false};
    const auto t0 = clk::now();
    // The whole start sequence; repeatable (load() halts and platform-resets the CPU first).
-@@ -108,8 +162,27 @@ StreamStats Stream8822b::run(const std::function<bool(const uint8_t *, const Ban
+@@ -108,8 +174,11 @@ StreamStats Stream8822b::run(const std::function<bool(const uint8_t *, const Ban
      std::memcpy(trl, trl_desc, 24);
      r.sram_write(kTrailerOcp, trl, sizeof trl);
  
 -    uint32_t state[10] = {0, 0, 0, 0, 0, _c.synthetic ? 0u : 1u, period5, static_cast<uint32_t>(guard5), 0,
 -                          _c.gapped ? 1u : 0u};
-+    // fpvDROID: three more words: the wait before an RX DMA pulse (unwedge_us; WSDR_WEDGE_US overrides it, 0 for
-+    // none), the program's own note of when a request was written, and its count of pulses
-+    uint32_t unwedge_us = _c.unwedge_us;
-+    if (const char *e = std::getenv("WSDR_WEDGE_US"))
-+      unwedge_us = static_cast<uint32_t>(std::max(0, std::atoi(e)));
-+    // fpvDROID: two more: how late a bank may start before the program skips it (0 in gapped mode, where every
-+    // round starts afresh, and when skip_late is off), and its count of banks skipped. The limit leaves the bank time
-+    // to go out whole before the ADC is back at its first byte: (period - guard) - kBankSend5, 20 us at 40 MS/s and
-+    // ~225 us at 20 MS/s. A bank that starts later is how a run breaks at 40 MS/s on a Pixel 8 Pro: a part the chip
-+    // sends after the ADC is back in its bank often goes out short (first bytes zero, the rest never sent; 75 % of
-+    // such parts were in broken banks against 4 % of those sent in time), a pause leaves several banks in a row
-+    // late, and the short banks end the run on the burst rule. Skipped at once, it costs one bank and the next one
-+    // is on time. MEASURED there, 40 MS/s stream test, two 2-minute spells per limit, alternating: this limit 3.6
-+    // new starts and 14 dropped banks a minute; part 0's deadline (165 us, the limit before) 7.4 and 42.
-+    bool skip = _c.skip_late && !_c.gapped;
-+    if (const char *e = std::getenv("WSDR_SKIP"))
-+      skip = skip && std::atoi(e) != 0;
-+    const uint32_t skip5 =
-+        skip ? static_cast<uint32_t>(std::max(1, static_cast<int32_t>(period5) - guard5 - kBankSend5)) : 0;
++    // fpvDROID: five more words: the wait before an RX DMA pulse (StreamCfg::unwedge_us, 0 for none), the
++    // program's own note of when a request was written, its count of pulses, how late a bank may start before the
++    // program skips it (skip5), and its count of banks skipped
 +    uint32_t state[15] = {0, 0, 0, 0, 0, _c.synthetic ? 0u : 1u, period5, static_cast<uint32_t>(guard5), 0,
-+                          _c.gapped ? 1u : 0u, unwedge_us, 0, 0, skip5, 0};
++                          _c.gapped ? 1u : 0u, _c.unwedge_us, 0, 0, skip5, 0};
      std::memcpy(&state[8], data_desc, 4);
      cpu.dmem_write(kStateOff, state, sizeof state);
      uint32_t rec[2][16] = {};
-@@ -124,7 +197,7 @@ StreamStats Stream8822b::run(const std::function<bool(const uint8_t *, const Ban
+@@ -124,7 +193,7 @@ StreamStats Stream8822b::run(const std::function<bool(const uint8_t *, const Ban
      cpu.dmem_write(kRecOff, rec, sizeof rec);
  
      rd.start();
@@ -572,7 +547,7 @@ index a663615..a886576 100644
      cpu.start();
      // Now and then (~1 start in 30, issue #2) the CPU stalls at its first MAC-register access (the LA
      // arm) until the host itself reads the MAC block; a read of 0x0003 or 0x0080 does not release it.
-@@ -155,12 +228,59 @@ StreamStats Stream8822b::run(const std::function<bool(const uint8_t *, const Ban
+@@ -155,12 +224,59 @@ StreamStats Stream8822b::run(const std::function<bool(const uint8_t *, const Ban
      la.snapshot(); // before cpu.load(): its SRAM writes move the debug window (0x0106 / 0x0140)
      start();
  
@@ -634,7 +609,7 @@ index a663615..a886576 100644
        BankInfo bi;
        bi.seq = seq;
        bi.bank = b;
-@@ -174,6 +294,13 @@ StreamStats Stream8822b::run(const std::function<bool(const uint8_t *, const Ban
+@@ -174,6 +290,13 @@ StreamStats Stream8822b::run(const std::function<bool(const uint8_t *, const Ban
              stopped = true;
              break;
            }
@@ -648,7 +623,7 @@ index a663615..a886576 100644
            const std::string why = first ? chip_state(r, cpu) : ""; // mid-stream the chip may not answer
            if (retry) {
              std::fprintf(stderr, "stream: no first packet in %u ms, starting again%s\n", first_ms, why.c_str());
-@@ -189,43 +316,180 @@ StreamStats Stream8822b::run(const std::function<bool(const uint8_t *, const Ban
+@@ -189,43 +312,178 @@ StreamStats Stream8822b::run(const std::function<bool(const uint8_t *, const Ban
          if (d.status != LIBUSB_TRANSFER_COMPLETED)
            throw std::runtime_error("bulk-IN status " + std::to_string(d.status));
          const bool c2h = d.len >= 24 && (d.data[11] & 0x10);
@@ -697,7 +672,7 @@ index a663615..a886576 100644
 +        //  - the packet before came short of its last 1016 bytes (the chip, no pulse about it), so nothing ended its
 +        //    transfer and the next packet ran on in it: K is 15360 and the bytes before K are not the packet's
 +        //    start. The bank cannot be completed and is dropped; the packet at K is the next one, whole. Cut so, a
-+        //    bank's last data packet has the trailer straight after it instead, in one 15532-byte transfer.
++        //    bank's last data packet has the trailer straight after it instead, in one 15552-byte transfer.
 +        // Before, only K = 8192 was put right, and each of the others cost a new start (2 to 10 a minute).
 +        bool trailer = part == 4;
 +        const uint8_t *pkt = d.data;
@@ -763,18 +738,23 @@ index a663615..a886576 100644
 -          std::memcpy(stamp, d.data + 24 + kPrefix, sizeof stamp);
 -          if (stamp[0] != seq)
 -            throw std::runtime_error("trailer seq " + std::to_string(stamp[0]) + " != " + std::to_string(seq));
+-          bi.late_us = static_cast<int32_t>(stamp[2] - stamp[1]) / 5.0;
+-          bi.ship_us = static_cast<int32_t>(stamp[3] - stamp[2]) / 5.0;
+-          bi.end_us = static_cast<int32_t>(stamp[3] - stamp[1]) / 5.0;
+-          if (!_c.gapped && bi.end_us * 5 > budget5) // gapped: the LA is stopped while a bank ships
+-            throw std::runtime_error("deadline: bank " + std::to_string(seq) + " ended " +
+-                                     std::to_string(bi.end_us) + " us after due");
 +          std::memcpy(bank.data(), pkt + 24, kPrefix);
-+          uint32_t stamp[10];
-+          std::memcpy(stamp, pkt + 24 + kPrefix, sizeof stamp);
-+          if (stamp[0] != seq) {
++          TrailerStamps ts;
++          std::memcpy(&ts, pkt + 24 + kPrefix, sizeof ts);
++          if (ts.seq != seq) {
 +            // fpvDROID: the onboard program skipped banks it was too late for, and counts them in the trailer: this is
 +            // the bank after them. Dropped banks to the caller, but not a burst: the stream is in step and on time
-+            // again, so the burst count starts afresh too. Without that the skip did not save the run: on a Pixel 8
-+            // Pro at 40 MS/s the pause that makes the chip late also breaks packets, 3 or 4 banks came short and were
-+            // dropped, and the first marginal bank after the skip was the fifth drop within 64 (16 skips of 17).
-+            const uint32_t jump = stamp[0] - seq;
-+            if (stamp[9] - st.skipped != jump || jump > 100000)
-+              throw std::runtime_error("trailer seq " + std::to_string(stamp[0]) + " != " + std::to_string(seq));
++            // again, so the burst count starts afresh too (the pause that made the chip late has usually cost a
++            // few short banks already, and the next marginal one would end the run).
++            const uint32_t jump = ts.seq - seq;
++            if (ts.skipped - st.skipped != jump || jump > 100000)
++              throw std::runtime_error("trailer seq " + std::to_string(ts.seq) + " != " + std::to_string(seq));
 +            drop_burst = 0;
 +            for (uint32_t i = 0; i < jump; i++) {
 +              st.mid_drops++;
@@ -784,41 +764,37 @@ index a663615..a886576 100644
 +            st.skipped += jump;
 +            if (st.skipped <= 8 || st.skipped % 500 < jump)
 +              std::fprintf(stderr, "stream: bank %u: the chip skipped %u bank(s) it was too late for (%u this run)\n",
-+                           stamp[0], jump, st.skipped);
-+            seq = stamp[0];
++                           ts.seq, jump, st.skipped);
++            seq = ts.seq;
 +            bi.seq = seq;
 +            b = _c.gapped ? 0 : static_cast<int>(seq & 1);
 +            bi.bank = b;
 +          }
-+          if (stamp[4] != st.rx_pulses) { // fpvDROID: the onboard program freed a stuck request (see SEND)
-+            if (stamp[4] <= 3 || stamp[4] % 200 == 0)
++          if (ts.pulses != st.rx_pulses) { // fpvDROID: the onboard program freed a stuck request (see SEND)
++            if (ts.pulses <= 3 || ts.pulses % 200 == 0)
 +              std::fprintf(stderr, "stream: bank %u: the chip pulsed its RX DMA to free a stuck packet (%u this run, "
 +                                   "%u packets put back together), the bank ended %.0f us after due\n",
-+                           seq, stamp[4], st.mended, static_cast<int32_t>(stamp[3] - stamp[1]) / 5.0);
++                           seq, ts.pulses, st.mended, static_cast<int32_t>(ts.end5 - ts.target5) / 5.0);
 +            if (_c.on_unwedge)
-+              for (uint32_t i = st.rx_pulses; i != stamp[4]; i++)
++              for (uint32_t i = st.rx_pulses; i != ts.pulses; i++)
 +                _c.on_unwedge();
-+            st.rx_pulses = stamp[4];
++            st.rx_pulses = ts.pulses;
 +          }
-           bi.late_us = static_cast<int32_t>(stamp[2] - stamp[1]) / 5.0;
-           bi.ship_us = static_cast<int32_t>(stamp[3] - stamp[2]) / 5.0;
-           bi.end_us = static_cast<int32_t>(stamp[3] - stamp[1]) / 5.0;
--          if (!_c.gapped && bi.end_us * 5 > budget5) // gapped: the LA is stopped while a bank ships
--            throw std::runtime_error("deadline: bank " + std::to_string(seq) + " ended " +
--                                     std::to_string(bi.end_us) + " us after due");
-+          // fpvDROID: late is a part that started after the ADC came back to it (part_deadline5), or a bank that ended
-+          // so late that the sentinel written after it would land on the next revolution's samples. Before, late was
-+          // a bank that ended after the ADC came back to its first byte: on an LG G7+ at 40 MS/s, whose banks all end
-+          // ~194 us after due where that allows 185, every bank was dropped and every run ended within ten banks;
-+          // MEASURED, per part, 127 s of stream test with one new start and 4 banks dropped. And at 40 MS/s a packet
-+          // put back together after a pulse no longer costs its bank.
++          const int32_t end5 = static_cast<int32_t>(ts.end5 - ts.target5);
++          bi.late_us = static_cast<int32_t>(ts.start5 - ts.target5) / 5.0;
++          bi.ship_us = static_cast<int32_t>(ts.end5 - ts.start5) / 5.0;
++          bi.end_us = end5 / 5.0;
++          // fpvDROID: late is a part that started after the ADC came back to it, or a bank that ended after the ADC
++          // came back to its end (adc_back5). Before, late was a bank that ended after the ADC came back to its
++          // first byte: that dropped every bank of a host whose banks take a little longer to go out (an LG G7+ at
++          // 40 MS/s), though each of their parts was read out ahead of the ADC.
 +          std::string late_why;
 +          for (int k = 0; k < 4 && late_why.empty(); k++) {
-+            const int32_t at5 = static_cast<int32_t>((k == 0 ? stamp[2] : stamp[4 + k]) - stamp[1]);
-+            if (at5 > part_deadline5(period5, guard5, k))
++            const int32_t at5 = static_cast<int32_t>((k == 0 ? ts.start5 : ts.taken5[k - 1]) - ts.target5);
++            if (at5 > adc_back5(chunk_off(k) - 24) - kPartMargin5)
 +              late_why = "part " + std::to_string(k) + " started " + std::to_string(at5 / 5) + " us after due";
 +          }
-+          if (late_why.empty() && bi.end_us * 5 > 2.0 * period5 - guard5 - kPartMargin5)
++          if (late_why.empty() && end5 > adc_back5(kBankBytes) - kPartMargin5)
 +            late_why = "ended " + std::to_string(static_cast<int>(bi.end_us)) + " us after due";
 +          if (!_c.gapped && !late_why.empty()) { // gapped: the LA is stopped while a bank ships
 +            // AnalogRX: behind a USB hub the first bank of a run ships ~190 us late every time (the hub's
@@ -850,7 +826,7 @@ index a663615..a886576 100644
        // CPU-written windows: descriptors ([104,128) and the 24 bytes before chunks 1..3) and the
        // sentinel in the last sample. In live data the ADC must have overwritten all of them.
        uint8_t *tail = bank.data() + kBankBytes - 8;
-@@ -260,6 +524,12 @@ StreamStats Stream8822b::run(const std::function<bool(const uint8_t *, const Ban
+@@ -260,6 +518,12 @@ StreamStats Stream8822b::run(const std::function<bool(const uint8_t *, const Ban
    } catch (...) {
    }
    rd.stop();
@@ -864,7 +840,7 @@ index a663615..a886576 100644
    if (rx)
      rx->restore();
 diff --git a/src/stream88xx.h b/src/stream88xx.h
-index 69c6cb3..c5b3632 100644
+index 69c6cb3..ad60cef 100644
 --- a/src/stream88xx.h
 +++ b/src/stream88xx.h
 @@ -33,6 +33,20 @@ struct StreamCfg {
@@ -873,13 +849,13 @@ index 69c6cb3..c5b3632 100644
    unsigned pkt_timeout_ms = 200;
 +  // fpvDROID: the onboard program switches the RX DMA enables off and on when the C2H engine has not taken a
 +  // request after this many us, which frees a wedged one (SEND in stream8822b.S; unwedge() in stream88xx.cpp). The
-+  // engine takes a 16 KiB packet in 38..46 us on USB 3 and in ~350 us on USB 2, where it never wedges: for USB 3
++  // engine takes a 16 KiB packet in 38..49 us on USB 3 and in ~350 us on USB 2, where it never wedges: for USB 3
 +  // only. 0: the program waits for ever, as upstream. on_unwedge: called on the stream thread for each such pulse.
 +  unsigned unwedge_us = 0;
 +  std::function<void()> on_unwedge;
 +  // fpvDROID: the onboard program does not ship a bank it would start too late to go out whole before the ADC comes
 +  // back to it, and the next one goes on time (counted in StreamStats::skipped and as dropped banks, not as a burst,
-+  // and the burst count starts afresh after it). WSDR_SKIP=0 turns it off.
++  // and the burst count starts afresh after it).
 +  bool skip_late = true;
 +  // fpvDROID: called on the stream thread each time run() drops a bank instead of handing it to on_bank (late or
 +  // overrun), as it happens: StreamStats only comes back when the run ends, and a run that keeps dropping an
@@ -888,7 +864,7 @@ index 69c6cb3..c5b3632 100644
  };
  
  struct BankInfo {
-@@ -47,13 +61,21 @@ struct BankInfo {
+@@ -47,22 +61,45 @@ struct BankInfo {
  
  struct StreamStats {
    uint64_t banks = 0;
@@ -910,14 +886,29 @@ index 69c6cb3..c5b3632 100644
 +  unsigned skipped = 0;    // fpvDROID: banks the onboard program did not ship, being too late for them (skip_late)
  };
  
++// fpvDROID: what the onboard program writes behind the trailer's prefix (stream8822b.S, "Trailer payload"). Times
++// are 5 x REG 0x568, fifths of a us; counts are since the run started.
++struct TrailerStamps {
++  uint32_t seq;       // the bank's number in the run
++  uint32_t target5;   // when the bank was due
++  uint32_t start5;    // when its first data packet started
++  uint32_t end5;      // when its last one had gone
++  uint32_t pulses;    // RX DMA pulses given (StreamCfg::unwedge_us)
++  uint32_t taken5[4]; // when each data packet had been taken: taken5[k] is when packet k + 1 starts (the last
++                      // one is not read by the stream)
++  uint32_t skipped;   // banks skipped (StreamCfg::skip_late)
++};
++static_assert(sizeof(TrailerStamps) == 40, "the onboard program writes ten words");
++
  class Stream8822b {
-@@ -62,7 +84,8 @@ public:
+ public:
+   static constexpr size_t kBankBytes = 0x10000;
    static constexpr size_t kBankSamples = kBankBytes / 8;
    static constexpr size_t kPrefix = 128;
    static constexpr size_t kChunk = 16352;
 -  static constexpr size_t kTrailerPayload = kPrefix + 16;
 +  // fpvDROID: + the pulse count, when each data packet was taken and the banks skipped (was kPrefix + 16)
-+  static constexpr size_t kTrailerPayload = kPrefix + 40;
++  static constexpr size_t kTrailerPayload = kPrefix + sizeof(TrailerStamps);
  
    Stream8822b(Session &s, const StreamCfg &c) : _s(s), _c(c) {}
    double fs() const { return 80e6 / (1u << _c.la.rate_sel); }

@@ -420,8 +420,10 @@ void Radio::dsp_loop() {
     }
     _busy_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     const int64_t t = now_ms();
-    if (t - _load_t0_ms >= 1000 && _rx) note_faults(_rx->status());
     if (t - _load_t0_ms >= 1000) {
+      // the receiver's status once a second, and once for all of this: each read takes its lock
+      const wsdr::RxStatus rs = _rx ? _rx->status() : wsdr::RxStatus{};
+      if (_rx) note_faults(rs);
       std::lock_guard<std::mutex> l(_m);
       _load = _busy_s / ((t - _load_t0_ms) / 1000.0);
       _busy_s = 0;
@@ -431,10 +433,9 @@ void Radio::dsp_loop() {
                 "restarts %llu, unwedged %llu, %s %s lock %.2f fps %.0f, acq %llu lost %llu rephase %llu, "
                 "torn frames hidden %llu",
                 _watch_hz / 1e6,
-                _load * 100, _dload * 100, (unsigned long long)(_rx ? _rx->status().mid_drops : 0),
+                _load * 100, _dload * 100, (unsigned long long)rs.mid_drops,
                 (unsigned long long)_dropped.load(), (unsigned long long)_decq.dropped(),
-                (unsigned long long)(_rx ? _rx->status().restarts : 0),
-                (unsigned long long)(_rx ? _rx->status().unwedged : 0), _vstats.std_name,
+                (unsigned long long)rs.restarts, (unsigned long long)rs.unwedged, _vstats.std_name,
                 _vstats.colour ? "colour" : "grey", _vstats.lock_recent, _fps,
                 (unsigned long long)_vstats.acquisitions, (unsigned long long)_vstats.losses,
                 (unsigned long long)_vstats.rephases, (unsigned long long)_gate.hidden());

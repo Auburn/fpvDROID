@@ -18,20 +18,15 @@ namespace kp {
 // Neither counts in the first kGraceMs of a watch. On some hosts a fresh stream starts badly for a while: a
 // Pixel 8 Pro loses the run at bank 51-55 for one to four seconds, a restart each time, before it keeps up for
 // good. A link that cannot carry 40 MS/s goes on restarting past the grace, and still falls back.
-// On that phone 20 MS/s is the better rate, now that the stream frees its USB path's wedge without stopping (the
-// wifi-sdr patch, patches/README.md; before, 20 MS/s wedged within ~0.2 s there and was far the worse). Measured:
-// one restart in ~15 minutes at 20 MS/s, two to four a minute at 40 MS/s. And what cost a restart at 40 MS/s
-// there now mostly costs one to four lost blocks instead, so it is the lost blocks that can take such a watch to
-// 20 MS/s (in one run of three, 20 s in), where the restarts seldom did.
 // And none at all once a stream that had fallen back wedged at 20 MS/s for good (the receiver stopped: the wedge
 // was back straight after being freed): on such a host 20 MS/s is worse than a 40 MS/s that restarts, so there is
 // no more falling back for as long as this object lives (adapter_opened() keeps that).
 // A third kind of evidence needs no grace: a 40 MS/s watch whose receiver gives up altogether (its stream failed
-// five starts in a row without a bank). The app opens the adapter again, and the fallback used to be cleared by
-// that and to come too late for the grace, so it went round for ever: an LG G7+, whose 40 MS/s runs all end
-// within ten banks, opened the adapter 13 times in 2.5 minutes. Such a stop falls back at once, and that
-// fallback holds over the reopens until the watch rate is set anew (watch_rate_set()). Not after a wedge, nor
-// once the falling back has been given up.
+// five starts in a row without a bank). The app then opens the adapter again, and a fallback that the open
+// cleared would never get past the grace, so the watch would go round for ever. Such a stop falls back at once,
+// and that fallback holds over the reopens until the watch rate is set anew (watch_rate_set()). Not after a
+// wedge, nor once the falling back has been given up.
+// What these rules were measured against on the phones is in patches/c2h-wedge.md ("The app's fallback").
 //
 // The lost blocks are counted at every sample rate, for late_recent(): how many the current watch has lost
 // lately, which is what tells the app that the host is not keeping up. Not the ones a stream loses in its first
