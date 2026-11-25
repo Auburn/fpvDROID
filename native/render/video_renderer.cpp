@@ -233,10 +233,26 @@ void VideoRenderer::quad(unsigned tex, int tex_w, int tex_h, float gain, float a
   glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 }
 
-void VideoRenderer::draw(unsigned target, int view_w, int view_h, const ViewOpts &o, const Scene &s, float band0,
-                         float band1) {
+void VideoRenderer::draw(unsigned target, int view_w, int view_h, const ViewOpts &o, const Scene &s) {
+  paint(target, view_w, view_h, o, s, nullptr);
+  _drawn = Drawn{true, _prog && _have && s.gain >= 1 && s.inset <= 0, target, view_w, view_h, o, s};
+}
+
+bool VideoRenderer::draw_band(unsigned target, int view_w, int view_h, const ViewOpts &o, const Scene &s, int y0,
+                              int y1) {
+  const Drawn &d = _drawn;
+  if (!d.any || !d.picture || d.target != target || d.w != view_w || d.h != view_h || !(d.view == o) || !(d.scene == s))
+    return false;
+  if (!_have || _tex_h <= 0 || y1 <= y0) return false;
+  const float h = static_cast<float>(_tex_h), band[2] = {static_cast<float>(y0) / h, static_cast<float>(y1) / h};
+  paint(target, view_w, view_h, o, s, band);
+  return true;
+}
+
+void VideoRenderer::paint(unsigned target, int view_w, int view_h, const ViewOpts &o, const Scene &s,
+                          const float *band) {
   if (view_w <= 0 || view_h <= 0) return;
-  const bool part = band0 > 0 || band1 < 1;
+  const bool part = band != nullptr;
   glDisable(GL_DEPTH_TEST);
   glDisable(GL_BLEND);
   glDisable(GL_SCISSOR_TEST);
@@ -283,10 +299,10 @@ void VideoRenderer::draw(unsigned target, int view_w, int view_h, const ViewOpts
     const long sx0 = std::lround(win.x), sx1 = std::lround(win.x + win.w);
     long sy0 = std::lround(vh - win.y - win.h), sy1 = std::lround(vh - win.y);
     if (part && _tex_h > 0) {
-      // the screen rows that show picture rows [band0, band1), and as many more as the bicubic filter reaches
-      // (2 texels either way) and a pixel for rounding
-      const float pad = 2.f * r.h / static_cast<float>(_tex_h) + 1, top = r.y + r.h * band0 - pad,
-                  bottom = r.y + r.h * band1 + pad;
+      // the screen rows that show the picture between band[0] and band[1], and as many more as the bicubic filter
+      // reaches (2 texels either way) and a pixel for rounding
+      const float pad = 2.f * r.h / static_cast<float>(_tex_h) + 1, top = r.y + r.h * band[0] - pad,
+                  bottom = r.y + r.h * band[1] + pad;
       sy0 = std::max(sy0, std::lround(vh - bottom));
       sy1 = std::min(sy1, std::lround(vh - top));
     }
@@ -306,23 +322,5 @@ void VideoRenderer::draw(unsigned target, int view_w, int view_h, const ViewOpts
   glDisable(GL_BLEND);
 }
 
-void VideoRenderer::blank(unsigned target, int view_w, int view_h) {
-  glDisable(GL_SCISSOR_TEST);
-  glBindFramebuffer(GL_FRAMEBUFFER, target);
-  glViewport(0, 0, std::max(view_w, 1), std::max(view_h, 1));
-  glClearColor(0, 0, 0, 1);
-  glClear(GL_COLOR_BUFFER_BIT);
-}
-
-bool VideoRenderer::wait_drawn(int timeout_ms) {
-  GLsync s = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-  if (!s) {
-    glFinish();
-    return true;
-  }
-  const GLenum r = glClientWaitSync(s, GL_SYNC_FLUSH_COMMANDS_BIT, static_cast<GLuint64>(timeout_ms) * 1000000);
-  glDeleteSync(s);
-  return r == GL_ALREADY_SIGNALED || r == GL_CONDITION_SATISFIED;
-}
 
 }  // namespace kp

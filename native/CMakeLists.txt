@@ -19,7 +19,9 @@ endif()
 
 # ---- the picture on screen: an OpenGL ES 3 renderer (the app's Surface; off screen in kp_render) ----
 if(ANDROID)
-  add_library(fpvdroid_render STATIC render/video_renderer.cpp render/no_signal.cpp render/latency.cpp)
+  # ... and what the app's screen (render/screen.h) has besides: the display's timing, front-buffer drawing
+  add_library(fpvdroid_render STATIC render/video_renderer.cpp render/no_signal.cpp render/latency.cpp
+              render/display_timing.cpp render/front_buffer.cpp)
   target_link_libraries(fpvdroid_render PUBLIC fpvdroid_dsp GLESv3 EGL)
 else()
   find_package(PkgConfig QUIET)
@@ -54,7 +56,7 @@ if(FPVDROID_RADIO)
   endif()
   # web/CMakeLists.txt lists the same sources
   set(FPVDROID_RADIO_SOURCES radio/radio.cpp radio/combine.cpp radio/decode_queue.cpp radio/fallback_policy.cpp
-      radio/frame_gate.cpp radio/sample_clock.cpp radio/steps.cpp radio/sweep.cpp radio/thread_placement.cpp)
+      radio/frame_gate.cpp radio/steps.cpp radio/sweep.cpp radio/thread_placement.cpp)
   add_library(fpvdroid_radio STATIC ${FPVDROID_RADIO_SOURCES})
   target_include_directories(fpvdroid_radio PUBLIC radio)
   target_link_libraries(fpvdroid_radio PUBLIC fpvdroid_dsp wsdrcore)
@@ -93,7 +95,7 @@ if(NOT ANDROID)
   enable_testing()
   # the radio's rules that need no adapter: the sources themselves, so this builds with FPVDROID_RADIO off too
   add_executable(kp_radio_tests tests/radio_tests.cpp radio/combine.cpp radio/decode_queue.cpp
-                 radio/fallback_policy.cpp radio/frame_gate.cpp radio/sample_clock.cpp radio/steps.cpp)
+                 radio/fallback_policy.cpp radio/frame_gate.cpp radio/steps.cpp)
   target_include_directories(kp_radio_tests PRIVATE radio tests)
   target_link_libraries(kp_radio_tests PRIVATE fpvdroid_dsp Threads::Threads)
   target_compile_options(kp_radio_tests PRIVATE -O2 -Wall -Wextra)
@@ -119,6 +121,6 @@ endif()
 # ---- Android JNI ----
 if(ANDROID)
   add_library(fpvdroid SHARED jni/fpvdroid_jni.cpp)
-  target_link_libraries(fpvdroid PRIVATE fpvdroid_radio fpvdroid_render android nativewindow log)
+  target_link_libraries(fpvdroid PRIVATE fpvdroid_radio fpvdroid_render android log)
   target_compile_options(fpvdroid PRIVATE -O2 -Wall)
 endif()

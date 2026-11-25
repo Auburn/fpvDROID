@@ -11,7 +11,6 @@
 #include "decode_queue.h"
 #include "fallback_policy.h"
 #include "frame_gate.h"
-#include "sample_clock.h"
 #include "steps.h"
 
 using namespace kp;
@@ -244,7 +243,7 @@ static void gate_hides_the_frames_after_a_gap() {
   int shown = 0;
   FrameGate g([&](const Frame &) { shown++; });
   const FrameSink in = g.sink();
-  const Frame f{nullptr, 0, 0, nullptr};
+  const Frame f{nullptr, 0, 0, nullptr, 0, 0};
   in(f);
   in(f);
   CHECK(shown == 2 && g.hidden() == 0);
@@ -258,7 +257,7 @@ static void gate_hides_the_frames_after_a_gap() {
 static void gate_hides_at_most_so_often() {
   int shown = 0;
   FrameGate g([&](const Frame &) { shown++; });
-  const Frame f{nullptr, 0, 0, nullptr};
+  const Frame f{nullptr, 0, 0, nullptr, 0, 0};
   g.gap(1000);
   g.frame(f);
   // more gaps close behind: the frames already marked go, no new ones are
@@ -275,7 +274,7 @@ static void gate_hides_at_most_so_often() {
 static void gate_switched_off_and_reset() {
   int shown = 0;
   FrameGate g([&](const Frame &) { shown++; });
-  const Frame f{nullptr, 0, 0, nullptr};
+  const Frame f{nullptr, 0, 0, nullptr, 0, 0};
   g.set_enabled(false);
   g.gap(1000);
   g.frame(f);
@@ -290,61 +289,25 @@ static void gate_switched_off_and_reset() {
   CHECK(shown == 2 && g.hidden() == 0);
 }
 
-// The strips of a frame that is hidden go nowhere either, from the gap on; those before it and after the hidden
-// frames are shown. A gate with nowhere to send strips has none to give.
+// A picture that comes in strips (low latency) is hidden from the gap on: the strips before the gap were shown, the
+// rest of that picture's and all of the next one's go nowhere, and the pictures count as hidden when they finish.
 static void gate_hides_the_strips_of_hidden_frames() {
-  int frames = 0, strips = 0;
-  FrameGate g([&](const Frame &) { frames++; }, [&](const Strip &) { strips++; });
-  CHECK(g.has_strips());
-  const FrameSink fin = g.sink();
-  const StripSink sin = g.strip_sink();
-  const Frame f{nullptr, 0, 0, nullptr, true};
-  const Strip s{nullptr, 0, 0, 0, 0, nullptr, false};
-  sin(s);
-  g.gap(1000);  // in the middle of a frame: the rest of its strips, and all of the next frame's, go
-  sin(s);
-  fin(f);
-  sin(s);
-  sin(s);
-  fin(f);
-  CHECK(strips == 1 && frames == 0 && g.hidden() == FrameGate::kFrames);
-  sin(s);
-  fin(f);
-  CHECK(strips == 2 && frames == 1);
-  FrameGate none([](const Frame &) {});
-  CHECK(!none.has_strips());
-  none.strip(s);  // nowhere to go: nothing happens
-}
-
-// ---------------------------------------------------------------------------------------- SampleClock
-
-// Blocks of 4096 at 20 MS/s, each taken ~205 us after the one before; one dropped on the way (the decoder never
-// had it, so its count does not step over it, but the time does).
-static void clock_dates_the_samples() {
-  constexpr double fs = 20e6, blk = 4096 / fs;
-  SampleClock c;
-  CHECK(c.sampled_at(100) == 0);  // nothing yet
-  c.reset(fs);
-  CHECK(c.sampled_at(100) == 0);
-  const double t0 = 1000.0;
-  c.block(0, 4096, t0 + blk);          // samples 0..4095, the last taken at t0 + blk
-  c.block(4096, 4096, t0 + 2 * blk);   // 4096..8191
-  c.block(8192, 4096, t0 + 4 * blk);   // 8192..12287: one block was lost before it
-  const auto near = [](double a, double b) { return std::fabs(a - b) < 1e-9; };
-  CHECK(c.sampled_at(0) == 0);                                        // no sample
-  CHECK(near(c.sampled_at(4096), t0 + blk));                          // the last of the first block
-  CHECK(near(c.sampled_at(1), t0 + blk - 4095 / fs));                 // its first
-  CHECK(near(c.sampled_at(8192 + 1), t0 + 4 * blk - 4095 / fs));      // the first after the loss: its own block's time
-  CHECK(near(c.sampled_at(8192), t0 + 2 * blk));                      // the last before it
-  CHECK(near(c.sampled_at(12288 + 100), t0 + 4 * blk + 100 / fs));    // past the newest block: ahead of it
-  // a block with no time: its samples have none either
-  c.block(12288, 4096, 0);
-  CHECK(c.sampled_at(12288 + 5) == 0);
-  // more blocks than are kept: the oldest is reckoned from the oldest kept
-  c.reset(fs);
-  for (uint64_t i = 0; i < SampleClock::kBlocks + 10; i++) c.block(i * 4096, 4096, t0 + (i + 1) * blk);
-  CHECK(near(c.sampled_at(4096), t0 + blk));  // block 0, gone: reckoned back from block 10
-  CHECK(near(c.sampled_at((SampleClock::kBlocks + 9) * 4096 + 1), t0 + (SampleClock::kBlocks + 10) * blk - 4095 / fs));
+  int strips = 0, finished = 0;
+  FrameGate g([&](const Frame &f) { (f.finished() ? finished : strips)++; });
+  const FrameSink in = g.sink();
+  const Frame top{nullptr, 720, 480, nullptr, 0, 64}, bottom{nullptr, 720, 480, nullptr, 448, 480};
+  in(top);
+  g.gap(1000);  // in the middle of a picture
+  in(top);
+  in(bottom);
+  CHECK(g.hidden() == 1);
+  in(top);
+  in(top);
+  in(bottom);
+  CHECK(strips == 1 && finished == 0 && g.hidden() == FrameGate::kFrames);
+  in(top);
+  in(bottom);
+  CHECK(strips == 2 && finished == 1);
 }
 
 // ---------------------------------------------------------------------------------------- DecodeQueue
@@ -622,7 +585,6 @@ int main() {
   gate_hides_at_most_so_often();
   gate_switched_off_and_reset();
   gate_hides_the_strips_of_hidden_frames();
-  clock_dates_the_samples();
   queue_in_order();
   queue_full_loses_the_oldest_and_keeps_its_gap();
   queue_buffers_go_round();

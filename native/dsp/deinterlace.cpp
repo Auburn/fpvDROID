@@ -25,7 +25,7 @@ void double_lines(const uint8_t *f, int W, int A, uint8_t *frame, int y0, int y1
 void Deinterlacer::smooth(const uint8_t *f, bool upper, int W, int A, uint8_t *out, int y0, int y1) {
   const size_t rowb = static_cast<size_t>(W) * 4;
   y0 = std::max(y0, 0);
-  y1 = y1 < 0 ? 2 * A : std::min(y1, 2 * A);
+  y1 = std::min(y1, 2 * A);
   if (y0 >= y1 || A <= 0) return;
   const int own = upper ? 0 : 1;  // the parity of the frame lines that are the field's own rows
   for (int y = y0 + ((y0 & 1) != own); y < y1; y += 2) std::memcpy(out + y * rowb, f + (y >> 1) * rowb, rowb);

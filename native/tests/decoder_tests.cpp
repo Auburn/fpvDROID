@@ -150,44 +150,40 @@ static Signal moving_stripes(double seconds) {
 
 struct Picture {
   std::vector<uint8_t> px;
-  LineTimes times;
+  LineTimes times;  // of the whole picture: its first line drawn, and its last
 };
 
-// The signal through a decoder with the switches p, in blocks of 4096: its frames (their pixels), and with strips its
-// strips put together. Checks as it goes that each field's strips run down the picture without gaps or overlaps,
-// come out a strip's worth at a time as the lines are decoded, and add up to the field's frame.
+constexpr double kT0 = 1000.0;  // when sample 0 was taken, as the decoder is told (sample i at kT0 + i / kFs)
+
+// The signal through a decoder with the switches p, in blocks of 4096, each with the time its last sample was
+// taken: its finished pictures. Checks as it goes that a picture's frames (several with strips) run down the picture
+// without gaps or overlaps, and come out a strip's worth at a time as the lines are decoded.
 static std::vector<Picture> frames_of(const Signal &s, PictureOpts p, int *strips_per_frame = nullptr) {
   std::vector<Picture> out;
-  std::vector<uint8_t> built;  // the strips so far, into a frame
   int next_y = 0, strips = 0, most = 0;
-  uint64_t fed = 0;  // samples the decoder had been given before the block it is decoding
+  double t_block = 0;  // when the first sample of the block being decoded was taken
+  double t_top = 0;    // when the top of the picture in hand was
   bool order_ok = true, early_ok = true;
   FrontEnd fe(kFs, 0, [&](const Frame &f) {
+    order_ok &= f.y0 == next_y && f.y1 > f.y0 && f.y1 <= f.height && (p.strips || f.finished());
+    next_y = f.finished() ? 0 : f.y1;
+    if (f.y0 == 0) t_top = f.times.t_first;
+    // drawn in order; out within a few lines of the newest of them being drawn (sparkle repair holds the last 3
+    // lines back, a field's last lines wait for the field to end)
+    early_ok &= f.times.t_first >= kT0 && f.times.t_first <= f.times.t_last && f.times.t_last + 10 * kT / kFs > t_block;
+    strips++;
+    if (!f.finished()) return;
     const size_t bytes = static_cast<size_t>(f.width) * f.height * 4;
-    out.push_back(Picture{std::vector<uint8_t>(f.data, f.data + bytes), f.times});
-    if (!p.strips) return;
-    if (!f.in_strips) return;  // a field begun before the switch was on, or the decoder's first
-    order_ok &= next_y == 0 && built.size() == bytes && std::memcmp(built.data(), f.data, bytes) == 0;
+    out.push_back(Picture{std::vector<uint8_t>(f.data, f.data + bytes), LineTimes{t_top, f.times.t_last}});
     most = std::max(most, strips);
     strips = 0;
   }, DecoderOpts{}, p);
-  fe.set_strip_sink([&](const Strip &st) {
-    const size_t rowb = static_cast<size_t>(st.width) * 4;
-    built.resize(rowb * st.height);
-    order_ok &= st.y0 == next_y && st.rows > 0 && st.y0 + st.rows <= st.height && st.last == (st.y0 + st.rows == st.height);
-    std::memcpy(built.data() + st.y0 * rowb, st.data, st.rows * rowb);
-    next_y = st.last ? 0 : st.y0 + st.rows;
-    // drawn in order; out within a few lines of the newest of them being drawn (the block being decoded began
-    // at fed: sparkle repair holds the last 3 lines back, the field's last strip waits for the field to end)
-    early_ok &= st.times.first_at > 0 && st.times.first_at <= st.times.last_at && st.times.last_at + 10 * kT > fed;
-    strips++;
-  });
   const std::vector<uint8_t> no_marks;
   std::vector<float> block;
   for (size_t at = 0; at < s.d.size(); at += 4096) {
     block.assign(s.d.begin() + at, s.d.begin() + std::min(s.d.size(), at + 4096));
-    fe.decode(block, no_marks);
-    fed += block.size();
+    t_block = kT0 + static_cast<double>(at) / kFs;
+    fe.decode(block, no_marks, kT0 + static_cast<double>(at + block.size() - 1) / kFs);
   }
   CHECK(order_ok);
   CHECK(early_ok);
@@ -195,8 +191,9 @@ static std::vector<Picture> frames_of(const Signal &s, PictureOpts p, int *strip
   return out;
 }
 
-// With strips on, the frames are the same as without them, and every field goes out in strips that add up to its
-// frame: whatever smooth lines, sparkle repair and the 3-line comb (which draws each line a line late) do.
+// With strips on, the pictures are the same as without them, lines and times, and every field goes out in strips
+// that add up to it: whatever smooth lines, sparkle repair and the 3-line comb (which draws each line a line late)
+// do.
 static void strips_add_up_to_the_frames() {
   const Signal s = moving_stripes(0.3);
   for (int combo = 0; combo < 8; combo++) {
@@ -209,9 +206,14 @@ static void strips_add_up_to_the_frames() {
     int per_frame = 0;
     const std::vector<Picture> in_strips = frames_of(s, p, &per_frame);
     CHECK(plain.size() >= 12 && plain.size() == in_strips.size());
-    bool same = plain.size() == in_strips.size();
-    for (size_t i = 0; same && i < plain.size(); i++) same = plain[i].px == in_strips[i].px;
+    bool same = plain.size() == in_strips.size(), same_times = same;
+    for (size_t i = 0; same && i < plain.size(); i++) {
+      same = plain[i].px == in_strips[i].px;
+      const LineTimes &a = plain[i].times, &b = in_strips[i].times;
+      same_times &= a.t_first == b.t_first && a.t_last == b.t_last;
+    }
     CHECK(same);
+    CHECK(same_times);
     // NTSC: 240 field lines, 32 to a strip (a strip may wait 3 lines for sparkle repair, one for smooth lines)
     CHECK(per_frame >= 7 && per_frame <= 9);
     if (!same || per_frame < 7 || per_frame > 9)
@@ -220,15 +222,24 @@ static void strips_add_up_to_the_frames() {
   }
 }
 
-// A frame's times: its first line was drawn about a field (262.5 lines) before its last.
-static void frames_say_when_their_lines_were_drawn() {
-  const std::vector<Picture> f = frames_of(moving_stripes(0.3), PictureOpts{});
+// A frame's times: its first line was taken about a field (262.5 lines) before its last, and after the frame
+// before's last. A decoder that is not told when its samples were taken says nothing.
+static void frames_say_when_their_lines_were_taken() {
+  const Signal s = moving_stripes(0.3);
+  const std::vector<Picture> f = frames_of(s, PictureOpts{});
   CHECK(f.size() >= 8);
   for (size_t i = 2; i < f.size(); i++) {
-    const double lines = static_cast<double>(f[i].times.last_at - f[i].times.first_at) / kT;
+    const double lines = (f[i].times.t_last - f[i].times.t_first) * kFs / kT;
     CHECK(lines > 235 && lines < 245);  // first row to last row: 239 lines apart
-    if (i > 2) CHECK(f[i].times.first_at > f[i - 1].times.last_at);
+    if (i > 2) CHECK(f[i].times.t_first > f[i - 1].times.t_last);
   }
+  int frames = 0, timed = 0;
+  FrontEnd fe(kFs, 0, [&](const Frame &fr) {
+    frames++;
+    timed += fr.times.t_first != 0 || fr.times.t_last != 0;
+  });
+  fe.decode(s.d, {});
+  CHECK(frames >= 8 && timed == 0);
 }
 
 int main() {
@@ -237,7 +248,7 @@ int main() {
   a_gap_in_the_hsync();
   a_step_in_the_line_timing();
   strips_add_up_to_the_frames();
-  frames_say_when_their_lines_were_drawn();
+  frames_say_when_their_lines_were_taken();
   std::printf("%d checks, %d failed\n", g_checks, g_failed);
   return g_failed ? 1 : 0;
 }

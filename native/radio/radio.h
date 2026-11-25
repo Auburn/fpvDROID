@@ -22,7 +22,6 @@
 #include "decode_queue.h"
 #include "fallback_policy.h"
 #include "frame_gate.h"
-#include "sample_clock.h"
 #include "spectrum.h"
 #include "steps.h"
 #include "sweep.h"
@@ -47,9 +46,9 @@ struct Pilot {
 
 class Radio {
 public:
-  // frames: the watched channel's pictures. strips (optional): its strips while PictureOpts::strips is on (low
-  // latency). Both on the decode thread, past the FrameGate, their LineTimes with the times the adapter took them.
-  explicit Radio(FrameSink frames, StripSink strips = {});
+  // frames: the watched channel's pictures, on the decode thread, past the FrameGate; in strips while
+  // PictureOpts::strips is on (low latency: Frame::y0, y1). Their LineTimes say when the adapter took them.
+  explicit Radio(FrameSink frames);
   ~Radio();
   Radio(const Radio &) = delete;
   Radio &operator=(const Radio &) = delete;
@@ -151,7 +150,7 @@ private:
   void end_recording();
   void combine_antennas(const Bank &b, bool gap, int64_t t_ms);
   void demod_for_decoder(bool gap, double t_sampled);
-  void stamp(LineTimes &t) const;  // decode thread: t_first, t_last from the decoder's counts (_clock)
+
   // the steps of a scan or a sweep (_steps), each a retune
   void start_steps(std::vector<double> plan);
   bool next_step();
@@ -211,7 +210,7 @@ private:
   FrameGate _gate;  // between the decoders and the frame sink: the frames torn by a hole in the stream stop here
   std::thread _decoder;
   DecodeQueue _decq;
-  SampleClock _clock;  // decode thread: when the samples it decodes were taken (stamp)
+
   double _dload = 0;
 
   // DSP-thread state

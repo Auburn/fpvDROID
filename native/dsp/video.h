@@ -26,39 +26,30 @@ struct VideoStd {
 };
 extern const VideoStd kNtsc, kPal;
 
-// When the lines of a picture, or of a part of one, were drawn and taken: for telling how old they are on screen.
-// at: how many samples the decoder had taken when a line was drawn (the sample that completed it is the one before
-// that). t: when the adapter took that sample, on the steady clock in seconds, if whoever passes the picture on knows
-// (the Radio fills it in; 0: not known). first: the first line drawn of those in the picture, last: the last.
+// When the lines of a picture, or of a part of one, were taken: for telling how old they are on screen. On the
+// steady clock, in seconds: when the adapter took the sample that was the decoder's newest as a line was drawn,
+// reckoned from the time given with each block (FrontEnd::decode). 0: not known (no time was given, or none of the
+// lines is drawn). first: the first line drawn of those in the part, last: the last.
 struct LineTimes {
-  uint64_t first_at = 0, last_at = 0;  // 0: not from the decoder
   double t_first = 0, t_last = 0;
 };
 
-// A finished picture, 4 bytes per pixel (R, G, B, 0xff). Valid only during the callback.
+// The picture, 4 bytes per pixel (R, G, B, 0xff), with its lines [y0, y1) new since the frame before. Valid only
+// during the callback.
+// Normally every frame is a finished picture with all of its lines new: [0, height). With low latency
+// (PictureOpts::strips) a field goes out as several frames instead, each as soon as its lines are drawn: in order
+// down the picture without gaps or overlaps, from line 0 to the bottom. The one that reaches the bottom finishes
+// the picture (finished()); until then the lines from y1 down are still the picture before's.
 struct Frame {
-  const uint8_t *data;
-  int width, height;  // 720 x 480 (NTSC) / 720 x 576 (PAL)
+  const uint8_t *data;  // the whole picture, line 0 first
+  int width, height;    // 720 x 480 (NTSC) / 720 x 576 (PAL)
   const VideoStd *std;
-  // Its lines have all gone out already, as strips (PictureOpts::strips): a screen that showed those has it.
-  bool in_strips = false;
-  LineTimes times{};
+  int y0, y1;           // the lines that are new with this frame ...
+  LineTimes times{};    // ... and when they were taken
+  bool finished() const { return y1 >= height; }
 };
 using FrameSink = std::function<void(const Frame &)>;
 
-// Low latency (PictureOpts::strips): a part of the picture the decoder is building, handed out as soon as the lines
-// in it are drawn instead of at the end of the field: lines [y0, y0 + rows) of the width x height frame, line y0
-// first, 4 bytes per pixel (R, G, B, 0xff), as they will be in the field's Frame. Valid only during the callback.
-// A field's strips come in order down the picture without gaps or overlaps, from line 0 to the bottom; the last one
-// (last) comes just before the field's Frame, which then has in_strips set.
-struct Strip {
-  const uint8_t *data;
-  int width, height, y0, rows;
-  const VideoStd *std;
-  bool last;
-  LineTimes times{};
-};
-using StripSink = std::function<void(const Strip &)>;
 
 struct DecoderStats {
   bool acquiring = true;
@@ -113,10 +104,11 @@ struct PictureOpts {
   // Chroma comb (NTSC): an adaptive 3-line comb for the colour: fewer rainbows on fine detail and OSD text, for
   // ~15 % more decode CPU. Each line is then drawn one line late, combed with the lines above and below it.
   bool chroma_comb : 1 = false;
-  // Low latency (DecoderOpts::fields): each field also goes out in strips (FrontEnd::set_strip_sink) of about
-  // kStripRows of its lines, each as soon as they are drawn, instead of only as a whole picture once the field has
-  // ended: the top of the picture reaches the screen a field earlier. Lines sparkle repair may still redraw, and
-  // with smooth lines the line below the newest one, wait for the next strip. Takes effect at the next field.
+  // Low latency (DecoderOpts::fields): each field goes out in strips, frames with about kStripRows of its lines new
+  // (Frame::y0, y1), each as soon as those are drawn, instead of as one frame once the field has ended: the top of
+  // the picture reaches the screen a field earlier. Lines sparkle repair may still redraw, and with smooth lines the
+  // line below the newest one, wait for the next strip. Takes effect at the next field. Only for a sink that takes
+  // a picture in parts (one that wants whole pictures would have to wait for Frame::finished()).
   // From the Play RX fork's line sink (github.com/scerstt/PlayRX).
   bool strips : 1 = false;
 };
@@ -137,16 +129,14 @@ public:
   double shift() const { return _shift; }
   // Any thread. demod() takes the new set at its next call, decode() at the next line of video.
   void set_picture(const PictureOpts &p) { _picture.store(p, std::memory_order_relaxed); }
-  // Where the strips go while PictureOpts::strips is on (on the decode() thread). Before the first decode(); without
-  // one, strips is ignored.
-  void set_strip_sink(StripSink s);
   void feed(const cf *x, size_t n);  // demod + decode
   // The two halves, for running them on two threads: demod() -> discriminator output (MHz at fs_demod),
   // decode() -> frames. Each half is single-threaded.
   // bad (sparkle repair): per output sample, 1 = the carrier collapsed there (a click). demod() leaves it empty
   // while sparkle repair is off, and decode() takes an empty one as no marks.
+  // t_end: when the adapter took the last sample of d (steady clock, s; 0: not known), for the frames' LineTimes.
   void demod(const cf *x, size_t n, std::vector<float> &out, std::vector<uint8_t> &bad);
-  void decode(const std::vector<float> &d, const std::vector<uint8_t> &bad);
+  void decode(const std::vector<float> &d, const std::vector<uint8_t> &bad, double t_end = 0);
   DecoderStats stats() const;
   double fs_demod() const { return _fs_out; }
 

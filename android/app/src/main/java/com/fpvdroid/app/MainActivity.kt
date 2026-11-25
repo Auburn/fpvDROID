@@ -74,10 +74,16 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     private var noVideoFound = false       // the last scan came back empty
     private var lastDropped = 0L
     private var overloadedUntil = 0L
-    private var frameRateFor = ""
+    /** Which refresh rate the display is asked for ([matchDisplayTo]). [word]: its name in the "refresh" debug extra. */
+    private enum class RefreshAsk(val word: String) {
+        FIELD("field"),   // the camera's field rate, so that frames do not beat against the refresh
+        MAX("max"),       // the fastest the display has
+        NONE("none"),     // none of its own: whatever the display runs at
+    }
+    private var asked: Pair<RefreshAsk, String>? = null   // what the display was last asked for, and for which picture
     private var displayStd = ""            // the camera's standard the display was last asked to fit ("" none yet)
-    /** Debug ("refresh" extra): "field", "max" or "none" in place of what [matchDisplayTo] would ask for. */
-    private var refreshOverride: String? = null
+    /** Debug ("refresh" extra: "field", "max" or "none"): in place of what [matchDisplayTo] would ask for. */
+    private var refreshOverride: RefreshAsk? = null
     private var toldRefresh = 0f           // the display's refresh rate as last told to the engine ([tellRefresh])
     private val displayWatch = object : DisplayManager.DisplayListener {
         override fun onDisplayAdded(displayId: Int) {}
@@ -168,9 +174,9 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
             if (open) openMenu() else closeMenu()
         }
         i.getStringExtra("refresh")?.let {
-            refreshOverride = it.takeIf { r -> r == "field" || r == "max" || r == "none" }
-            engine.log("debug: display refresh ${refreshOverride ?: "as the settings say"}")
-            frameRateFor = ""
+            refreshOverride = RefreshAsk.entries.firstOrNull { ask -> ask.word == it }
+            engine.log("debug: display refresh ${refreshOverride?.word ?: "as the settings say"}")
+            asked = null
             if (displayStd.isNotEmpty()) matchDisplayTo(displayStd)
         }
         if (i.hasExtra("record")) {
@@ -620,26 +626,30 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         displayStd = std
         if (Build.VERSION.SDK_INT < 30) return
         val field = when (std) { "PAL" -> 50f; "NTSC" -> 59.94f; else -> return }
-        val how = refreshOverride ?: if (settings.lowLatency) "max" else "field"
-        if ("$how $std" == frameRateFor) return
+        val ask = refreshOverride ?: if (settings.lowLatency) RefreshAsk.MAX else RefreshAsk.FIELD
+        if (ask to std == asked) return
         val surface = video.holder.surface ?: return
         if (!surface.isValid) return
-        frameRateFor = "$how $std"
-        val max = display?.let { d ->
-            val now = d.mode
-            d.supportedModes.filter { it.physicalWidth == now.physicalWidth && it.physicalHeight == now.physicalHeight }
-                .maxOfOrNull { it.refreshRate }
-        } ?: 0f
+        asked = ask to std
+        val (hz, how) = when (ask) {
+            RefreshAsk.FIELD -> field to Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE
+            RefreshAsk.MAX -> fastestRefresh() to Surface.FRAME_RATE_COMPATIBILITY_DEFAULT
+            RefreshAsk.NONE -> 0f to Surface.FRAME_RATE_COMPATIBILITY_DEFAULT
+        }
         try {
-            when (how) {
-                "max" -> surface.setFrameRate(max, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT)
-                "none" -> surface.setFrameRate(0f, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT)
-                else -> surface.setFrameRate(field, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)
-            }
-            engine.log("display: asked for ${if (how == "max") "$max Hz" else if (how == "none") "no rate" else "$field Hz"} ($std picture)")
+            surface.setFrameRate(hz, how)
+            engine.log("display: asked for ${if (ask == RefreshAsk.NONE) "no rate" else "$hz Hz"} ($std picture)")
         } catch (e: Exception) {
             engine.log("setFrameRate: $e")
         }
+    }
+
+    /** The fastest refresh rate the display has at the resolution it is in (0: not known). */
+    private fun fastestRefresh(): Float {
+        val d = shownOn() ?: return 0f
+        val now = d.mode
+        return d.supportedModes.filter { it.physicalWidth == now.physicalWidth && it.physicalHeight == now.physicalHeight }
+            .maxOfOrNull { it.refreshRate } ?: 0f
     }
 
     /** The display the activity is on. */
@@ -674,21 +684,14 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
      * to it. null: nothing measured.
      */
     private fun pictureDelay(): String? {
-        val o = try { org.json.JSONObject(engine.latency()) } catch (e: org.json.JSONException) { return null }
-        fun ms(k: String) = o.optDouble(k, 0.0).takeIf { it.isFinite() && it > 0 }
-        val hz = o.optDouble("refresh_hz", 0.0).takeIf { it.isFinite() && it > 0 }?.let { " · %.0f Hz display".format(it) } ?: ""
-        ms("shown_top_ms")?.let { top ->
-            return "Picture delay %.0f ms at the top, %.0f at the bottom$hz".format(top, ms("shown_bottom_ms") ?: 0.0)
-        }
-        ms("expected_top_ms")?.let { top ->   // the display gives no time for each frame: as the compositor expects
-            // front-buffer drawing (a debug switch): drawn straight into what the display shows, half a refresh added
-            val how = if (o.optBoolean("front")) ", drawn straight to the screen" else ""
-            return "Picture delay %.0f ms at the top, %.0f at the bottom$how$hz".format(top, ms("expected_bottom_ms") ?: 0.0)
-        }
-        ms("queued_top_ms")?.let { top ->
-            return "Picture delay %.0f ms at the top, %.0f at the bottom, before the display$hz".format(top, ms("queued_bottom_ms") ?: 0.0)
-        }
-        return null
+        val d = try { PictureDelay.parse(engine.latency()) } catch (e: org.json.JSONException) { return null }
+        // as far along as the display lets it be measured
+        val (ends, how) = d.shown?.let { it to "" }
+            ?: d.expected?.let { it to if (d.front) ", drawn straight to the screen" else "" }
+            ?: d.queued?.let { it to ", before the display" }
+            ?: return null
+        val hz = if (d.refreshHz > 0) " · %.0f Hz display".format(d.refreshHz) else ""
+        return "Picture delay %.0f ms at the top, %.0f at the bottom".format(ends.topMs, ends.bottomMs) + how + hz
     }
 
     // ---------------------------------------------------------------------------------------- UI
@@ -700,7 +703,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         video = SurfaceView(this)
         video.holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(h: SurfaceHolder) {
-                frameRateFor = ""
+                asked = null
                 surfaceOwner = surfaceToken
                 engine.setSurface(h.surface)
             }

@@ -49,25 +49,7 @@ std::vector<float> spectrum_db(const std::vector<cf> &x) {
 }
 }  // namespace
 
-Radio::Radio(FrameSink frames, StripSink strips)
-    : _band(Sweep::kBandLo, Sweep::kBandHi, Sweep::kBandBin),
-      _gate(
-          [this, out = std::move(frames)](const Frame &f) {
-            Frame g = f;
-            stamp(g.times);
-            out(g);
-          },
-          strips ? StripSink([this, out = std::move(strips)](const Strip &s) {
-            Strip g = s;
-            stamp(g.times);
-            out(g);
-          })
-                 : StripSink{}) {}
-
-void Radio::stamp(LineTimes &t) const {
-  t.t_first = _clock.sampled_at(t.first_at);
-  t.t_last = _clock.sampled_at(t.last_at);
-}
+Radio::Radio(FrameSink frames) : _band(Sweep::kBandLo, Sweep::kBandHi, Sweep::kBandBin), _gate(std::move(frames)) {}
 
 Radio::~Radio() { close(); }
 
@@ -517,7 +499,6 @@ void Radio::note_faults(const wsdr::RxStatus &st) {
 // time offset is measured again (it is a number of samples, so it depends on the rate).
 void Radio::new_front_end(const Bank &b) {
   _fe = std::make_shared<FrontEnd>(b.fs, b.shift_hz, _gate.sink(), DecoderOpts{}, _picture.load());
-  if (_gate.has_strips()) _fe->set_strip_sink(_gate.strip_sink());
   _fe_fs = b.fs;
   _fe_shift = b.shift_hz;
   _combiner.reset(b.fs);
@@ -716,7 +697,6 @@ void Radio::decode_loop() {
   boost_thread("decode");
   keep_off_slow_cores("decode", _fast_cores);
   std::shared_ptr<FrontEnd> cur;
-  uint64_t fed = 0;  // samples cur's decoder has had (its count, as in LineTimes)
   double busy = 0;
   int64_t t0 = now_ms();
   while (!_stop) {
@@ -725,15 +705,11 @@ void Radio::decode_loop() {
     const auto ta = std::chrono::steady_clock::now();
     if (blk.fe != cur) {
       cur = blk.fe;
-      fed = 0;
-      _clock.reset(cur->fs_demod());
       _frames_at_last = 0;
       _fps_t0_ms = now_ms();
     }
     if (blk.gap) _gate.gap(now_ms());  // the frame this block is in is torn, and the next while the decoder re-phases
-    _clock.block(fed, blk.d.size(), blk.t_sampled);
-    fed += blk.d.size();
-    cur->decode(blk.d, blk.bad);
+    cur->decode(blk.d, blk.bad, blk.t_sampled);
     busy += std::chrono::duration<double>(std::chrono::steady_clock::now() - ta).count();
     _decq.recycle(std::move(blk));
     const int64_t t = now_ms();

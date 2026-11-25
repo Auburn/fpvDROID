@@ -30,7 +30,7 @@ set(LIBUSB_PREFIX "" CACHE PATH "where web/libusb installed libusb-1.0.a")
 # usb_abort.cpp: WebUSB cannot cancel a transfer; a stopped stream's reads are aborted instead (--wrap)
 add_executable(fpvdroid fpvdroid_web.cpp usb_abort.cpp ${ROOT}/native/radio/radio.cpp ${ROOT}/native/radio/combine.cpp
   ${ROOT}/native/radio/decode_queue.cpp ${ROOT}/native/radio/fallback_policy.cpp
-  ${ROOT}/native/radio/frame_gate.cpp ${ROOT}/native/radio/sample_clock.cpp ${ROOT}/native/radio/steps.cpp ${ROOT}/native/radio/sweep.cpp
+  ${ROOT}/native/radio/frame_gate.cpp ${ROOT}/native/radio/steps.cpp ${ROOT}/native/radio/sweep.cpp
   ${ROOT}/native/radio/thread_placement.cpp)
 target_include_directories(fpvdroid PRIVATE ${ROOT}/native/radio)
 target_compile_options(fpvdroid PRIVATE -O2 -Wall)

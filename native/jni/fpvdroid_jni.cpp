@@ -74,7 +74,7 @@ void card_start() {
     std::vector<uint8_t> px;
     for (int tick = 1; g_card_on; tick++) {
       test_card(px, 720, 480, tick);
-      if (g_screen) g_screen->post(Frame{px.data(), 720, 480, &kNtsc});
+      if (g_screen) g_screen->post(Frame{px.data(), 720, 480, &kNtsc, 0, 480});
       std::this_thread::sleep_for(std::chrono::milliseconds(33));
     }
   });
@@ -150,10 +150,7 @@ JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_init(JNIEnv *env, jclass, js
   std::call_once(made, [] {
     forward_stderr();
     g_screen = std::make_unique<Screen>();
-    // low latency (PictureOpts::strips): the strips are drawn as they come, and the frame they add up to is then
-    // in already (Screen::post skips it)
-    g_radio = std::make_unique<Radio>([](const Frame &f) { g_screen->post(f); },
-                                      [](const Strip &s) { g_screen->post_rows(s); });
+    g_radio = std::make_unique<Radio>([](const Frame &f) { g_screen->post(f); });
   });
   KP_LOGI("fpvDROID native ready");
 }
@@ -340,12 +337,10 @@ JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_setDebugEnv(JNIEnv *env, jcl
     if (g_radio) g_radio->set_fast_cores(on);
   } else if (k == "KP_FRONT_BUFFER") {  // front-buffer drawing (a prototype: Screen::set_front_buffer)
     if (g_screen) g_screen->set_front_buffer(on);
-  } else if (k == "KP_PRESENT_ALIGN" || k == "KP_PRESENT_MARGIN_US") {  // how strips go up (Screen::set_present)
-    static bool align = true;
-    static int margin = 2500;
-    if (k == "KP_PRESENT_ALIGN") align = on;
-    else margin = std::atoi(v.c_str());
-    if (g_screen) g_screen->set_present(align, margin);
+  } else if (k == "KP_PRESENT_ALIGN") {  // how strips go up (Screen::set_present_align, set_present_margin_us)
+    if (g_screen) g_screen->set_present_align(on);
+  } else if (k == "KP_PRESENT_MARGIN_US") {
+    if (g_screen) g_screen->set_present_margin_us(std::atoi(v.c_str()));
   } else {
     std::lock_guard<std::mutex> l(g_env_m);
     g_env_wanted.emplace_back(k, v);

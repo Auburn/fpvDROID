@@ -273,6 +273,9 @@ class FakeEngine : Engine {
     @Synchronized override fun setSurface(surface: Surface?) = rec("setSurface", surface != null)
     @Synchronized override fun redraw() = rec("redraw")
     @Synchronized override fun setDisplayRefresh(hz: Float) = rec("setDisplayRefresh", hz)
+    /** What [latency] says: the screen's picture-delay JSON (native/render/latency.cpp). */
+    @Volatile var latencyJson = "{}"
+    override fun latency(): String = latencyJson
     @Synchronized override fun testCard(on: Boolean) = rec("testCard", on)
     @Synchronized override fun log(msg: String) = rec("log", msg)
     @Synchronized override fun holdPicture(ms: Int) = rec("holdPicture", ms)

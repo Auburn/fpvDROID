@@ -34,6 +34,39 @@ class KeepingUpScenariosTest : MenuScenarioSteps() {
         assertTrue("the numbers count the USB link's drops too: ${statsText()}", statsText().contains(" 7 dropped"))
     }
 
+    /** The picture's delay, while a picture is locked: as far along the way to the screen as it was measured. */
+    @Test
+    fun thePicturesDelayIsOnTheSignalTab() {
+        running()
+        advance(500)
+        assertTrue("nothing measured, nothing said: ${statsText()}", !statsText().contains("Picture delay"))
+
+        fun measured(json: String): String {
+            fake.latencyJson = json
+            advance(500)
+            return statsText().lines().firstOrNull { it.startsWith("Picture delay") } ?: ""
+        }
+        fake.locked = true
+        // the display says when it showed each frame
+        assertEquals("Picture delay 46 ms at the top, 31 at the bottom · 120 Hz display", measured(
+            """{"queued_top_ms":24.0,"queued_bottom_ms":9.0,"shown_top_ms":46.2,"shown_bottom_ms":31.0,""" +
+                """"expected_top_ms":45.0,"expected_bottom_ms":30.0,"refresh_hz":120.0,"front":false}"""))
+        // it does not: as the compositor expected to
+        assertEquals("Picture delay 37 ms at the top, 33 at the bottom · 60 Hz display", measured(
+            """{"queued_top_ms":4.0,"queued_bottom_ms":2.5,"shown_top_ms":0.0,"shown_bottom_ms":0.0,""" +
+                """"expected_top_ms":37.0,"expected_bottom_ms":33.0,"refresh_hz":60.0,"front":false}"""))
+        // front-buffer drawing
+        assertEquals("Picture delay 9 ms at the top, 7 at the bottom, drawn straight to the screen · 120 Hz display", measured(
+            """{"queued_top_ms":4.7,"queued_bottom_ms":2.8,"expected_top_ms":8.9,"expected_bottom_ms":7.0,""" +
+                """"refresh_hz":120.0,"front":true}"""))
+        // only up to the hand-over, and the display's rate not known
+        assertEquals("Picture delay 24 ms at the top, 9 at the bottom, before the display",
+            measured("""{"queued_top_ms":24.0,"queued_bottom_ms":9.0,"refresh_hz":0.0}"""))
+        assertEquals("not JSON: nothing said", "", measured("{"))
+        fake.locked = false
+        assertEquals("no picture: nothing said", "", measured("""{"shown_top_ms":46.0,"shown_bottom_ms":31.0}"""))
+    }
+
     @Test
     fun aBlockLostInTheQueueSaysThePhoneIsNotKeepingUpForFiveSeconds() {
         running()

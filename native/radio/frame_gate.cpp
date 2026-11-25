@@ -3,17 +3,14 @@
 namespace kp {
 
 void FrameGate::frame(const Frame &f) {
-  if (_left.load(std::memory_order_relaxed) > 0) {
-    _left--;
-    _hidden++;
+  if (_left.load(std::memory_order_relaxed) > 0) {  // in a picture that is hidden: counted once it has finished
+    if (f.finished()) {
+      _left--;
+      _hidden++;
+    }
     return;
   }
   _out(f);
-}
-
-void FrameGate::strip(const Strip &s) {
-  if (_left.load(std::memory_order_relaxed) > 0 || !_strips) return;  // in a frame that is to be hidden
-  _strips(s);
 }
 
 void FrameGate::gap(int64_t now_ms) {
