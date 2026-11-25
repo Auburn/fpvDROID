@@ -119,6 +119,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         showChannel()
         engine.setBackdrop(true, true)
         buildUi()
+        matchDisplayTo(displayStd)   // Max screen Hz holds the display's fastest mode with or without a picture
         link = UsbLink(this, engine, this)
         handleIntent(intent)
         link.start()
@@ -177,7 +178,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
             refreshOverride = RefreshAsk.entries.firstOrNull { ask -> ask.word == it }
             engine.log("debug: display refresh ${refreshOverride?.word ?: "as the settings say"}")
             asked = null
-            if (displayStd.isNotEmpty()) matchDisplayTo(displayStd)
+            if (::video.isInitialized) matchDisplayTo(displayStd)
         }
         if (i.hasExtra("record")) {
             val secs = i.getFloatExtra("record", 3f).toDouble()
@@ -259,7 +260,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         engine.setPicture(settings.lumaComb, settings.lumaComb && settings.cleanOsd, settings.smoothLines,
             settings.sparkleRepair, settings.colourComb, !settings.vsync)
         // Max screen Hz asks the display for another refresh rate
-        if (::video.isInitialized && displayStd.isNotEmpty()) matchDisplayTo(displayStd)
+        if (::video.isInitialized) matchDisplayTo(displayStd)
     }
 
     /**
@@ -618,19 +619,23 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
 
     /**
      * Ask for a display mode that suits the picture. Max screen Hz: the fastest the display has, at its resolution,
-     * which shows each picture, or each strip of it, sooner. Without it: the camera's field rate, so that frames do
+     * which shows each picture, or each strip of it, sooner. That one is held ([holdMode]) from the start, with or
+     * without a picture. Without Max screen Hz: the camera's field rate once there is a picture, so that frames do
      * not beat against the refresh. That only works on a display with such a mode: a panel with only 60 and 120 Hz
      * asked for 59.94 goes to 60, which neither matches nor is fast.
      */
     private fun matchDisplayTo(std: String) {
         displayStd = std
-        if (Build.VERSION.SDK_INT < 30) return
-        val field = when (std) { "PAL" -> 50f; "NTSC" -> 59.94f; else -> return }
         val ask = refreshOverride ?: if (settings.maxScreenHz) RefreshAsk.MAX else RefreshAsk.FIELD
-        if (ask to std == asked) return
+        holdMode(if (ask == RefreshAsk.MAX) fastestMode() else null)
+        if (Build.VERSION.SDK_INT < 30) return
+        val field = when (std) { "PAL" -> 50f; "NTSC" -> 59.94f; else -> 0f }
+        if (ask == RefreshAsk.FIELD && field == 0f) return   // no picture yet whose rate to match
+        val key = ask to if (ask == RefreshAsk.FIELD) std else ""
+        if (key == asked) return
         val surface = video.holder.surface ?: return
         if (!surface.isValid) return
-        asked = ask to std
+        asked = key
         val (hz, how) = when (ask) {
             RefreshAsk.FIELD -> field to Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE
             RefreshAsk.MAX -> fastestRefresh() to Surface.FRAME_RATE_COMPATIBILITY_DEFAULT
@@ -638,7 +643,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         }
         try {
             surface.setFrameRate(hz, how)
-            engine.log("display: asked for ${if (ask == RefreshAsk.NONE) "no rate" else "$hz Hz"} ($std picture)")
+            engine.log("display: asked for ${if (ask == RefreshAsk.NONE) "no rate" else "$hz Hz"} (${std.ifEmpty { "no" }} picture)")
         } catch (e: Exception) {
             engine.log("setFrameRate: $e")
         }
@@ -646,12 +651,30 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         tellRefresh()
     }
 
-    /** The fastest refresh rate the display has at the resolution it is in (0: not known). */
-    private fun fastestRefresh(): Float {
-        val d = shownOn() ?: return 0f
+    /** The display's fastest mode at the resolution it is in (null: not known). */
+    private fun fastestMode(): Display.Mode? {
+        val d = shownOn() ?: return null
         val now = d.mode
         return d.supportedModes.filter { it.physicalWidth == now.physicalWidth && it.physicalHeight == now.physicalHeight }
-            .maxOfOrNull { it.refreshRate } ?: 0f
+            .maxByOrNull { it.refreshRate }
+    }
+
+    /** The fastest refresh rate the display has at the resolution it is in (0: not known). */
+    private fun fastestRefresh(): Float = fastestMode()?.refreshRate ?: 0f
+
+    /**
+     * Max screen Hz: the window asks for the display mode itself ([m]; null: none). That is firmer than the
+     * Surface's rate alone (setFrameRate), which the system weighs against what else is on screen, and it holds
+     * whether or not the picture is coming. Battery Saver, heat and the phone's own refresh-rate setting still
+     * come first.
+     */
+    private fun holdMode(m: Display.Mode?) {
+        val id = m?.modeId ?: 0
+        val lp = window.attributes
+        if (lp.preferredDisplayModeId == id) return
+        lp.preferredDisplayModeId = id
+        window.attributes = lp
+        engine.log(if (m == null) "display: no mode held" else "display: holding mode $id (${m.refreshRate} Hz)")
     }
 
     /** The display the activity is on. */
@@ -713,6 +736,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
                 asked = null
                 surfaceOwner = surfaceToken
                 engine.setSurface(h.surface)
+                matchDisplayTo(displayStd)   // a new Surface has no rate of its own yet
             }
             override fun surfaceChanged(h: SurfaceHolder, f: Int, w: Int, ht: Int) = engine.redraw()
             override fun surfaceDestroyed(h: SurfaceHolder) {

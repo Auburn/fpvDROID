@@ -342,6 +342,27 @@ class MainActivityScenariosTest : AppHarness() {
     }
 
     @Test
+    fun maxScreenHzHoldsTheDisplaysFastestModeAtItsSize() {
+        val dm = app.getSystemService(android.hardware.display.DisplayManager::class.java)
+        val now = dm.getDisplay(android.view.Display.DEFAULT_DISPLAY).mode
+        fun mode(id: Int, w: Int, h: Int, hz: Float) =
+            org.robolectric.shadows.ShadowDisplayManager.ModeBuilder.modeBuilder(id).setWidth(w).setHeight(h).setRefreshRate(hz).build()
+        val w = now.physicalWidth
+        val h = now.physicalHeight
+        val fast = now.modeId + 1
+        org.robolectric.shadows.ShadowDisplayManager.setSupportedModes(android.view.Display.DEFAULT_DISPLAY,
+            mode(now.modeId, w, h, 60f), mode(fast, w, h, 120f), mode(fast + 1, w / 2, h / 2, 144f))
+        val held = { activity.window.attributes.preferredDisplayModeId }
+        running()
+        assertEquals("before any picture: the fastest at the screen's own size", fast, held())
+        showTab("Picture")
+        click(control("Max screen Hz"))
+        assertEquals("none without Max screen Hz", 0, held())
+        click(control("Max screen Hz"))
+        assertEquals(fast, held())
+    }
+
+    @Test
     fun theDisplaysRefreshRateReachesTheEngine() {
         // (Robolectric cannot change a display's mode, so a change of refresh rate itself is not tried here)
         running()

@@ -52,12 +52,14 @@ it, a picture that has stopped), full size or in the preview, colour bars show t
   smooth lines (no stair steps, no shimmer), sparkle repair (for a weak signal), colour comb (fewer rainbows
   on fine detail). The first three are on by default. Smooth lines and sparkle repair work on every camera;
   the other three only change an NTSC picture. None adds delay. Two more are about the delay itself. **Max screen
-  Hz** (on by default) asks the display for its fastest refresh rate, and says under it what rate the screen runs
-  at; off, the display is asked for the camera's field rate, which suits a screen that has such a mode. **Vsync**
-  (off by default) shows each picture whole, once its field has ended; off, each part of the picture goes up as
-  soon as its lines are decoded, a strip of 32 lines at a time, and the top of the picture reaches the compositor
-  a field (~17 ms) sooner. How much of that reaches the screen depends on the phone's compositor; the Signal tab's
-  numbers include the picture's delay, from the adapter taking its top and bottom lines to the display.
+  Hz** (on by default) holds the display in its fastest mode while the app is in front, with or without a picture
+  (Battery Saver, heat and the phone's own refresh-rate setting can still cap it), and says under it what rate
+  the screen runs at; off, the display is asked for the camera's field rate, which suits a screen that has such a
+  mode. **Vsync** (off by default) shows each picture whole, once its field has ended; off, each part of the
+  picture goes up as soon as its lines are decoded, a strip of 32 lines at a time, and the top of the picture
+  reaches the compositor a field (~17 ms) sooner. How much of that reaches the screen depends on the phone's
+  compositor; the Signal tab's numbers include the picture's delay, from the adapter taking its top and bottom
+  lines to the display.
 - **Signal** — sample rate (40 MS/s, or 20 for a USB link that cannot carry 40; the app also falls back by
   itself when 40 keeps restarting or losing blocks past the first 10 s of watching, and stops doing so for the
   session once 20 has locked up on that phone, where 20 is the worse of the two), diversity (both antennas combined: fit two; it adds
