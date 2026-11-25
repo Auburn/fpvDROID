@@ -57,7 +57,11 @@ class Settings(private val prefs: SharedPreferences) {
     var fit by pref("fit", FIT)
     var scale by pref("scale", 1f)                           // SCALE_MIN..SCALE_MAX
     var goggles by pref("goggles", false)
-    var eyeSpacing by pref("eye_spacing", 0f)                // -1..1: pictures apart .. together
+    // goggles: their own size, in place of scale, and the pictures lined up with their lenses (-1..1, 0 in the middle)
+    var gogglesScale by pref("goggles_scale", 1f)            // SCALE_MIN..SCALE_MAX
+    var eyeSpacing by pref("eye_spacing", 0f)                // pictures apart .. together: ±EYE_SHIFT_MAX of the width
+    var eyeOffsetX by pref("eye_offset_x", 0f)               // both left .. right: ±EYE_OFFSET_X_MAX of the width
+    var eyeOffsetY by pref("eye_offset_y", 0f)               // both down .. up: ±EYE_OFFSET_Y_MAX of the height
     // picture
     var lumaComb by pref("luma_comb", true)
     var cleanOsd by pref("clean_osd", true)
@@ -83,8 +87,12 @@ class Settings(private val prefs: SharedPreferences) {
     }
 
     val aspect get() = if (wide) 16f / 9f else 4f / 3f
-    /** Fraction of the screen width each eye's picture moves toward the middle. */
-    val eyeShift get() = eyeSpacing * EYE_SHIFT_MAX
+    /** How the picture is laid out ([Engine.setView]): with goggles, at their own size and lined up with their lenses. */
+    val view: ViewOpts get() {
+        if (!goggles) return ViewOpts(aspect, fit, scale)
+        val lenses = Goggles(eyeSpacing * EYE_SHIFT_MAX, eyeOffsetX * EYE_OFFSET_X_MAX, eyeOffsetY * EYE_OFFSET_Y_MAX)
+        return ViewOpts(aspect, fit, gogglesScale, lenses)
+    }
 
     /** One setting: its value, and how it is written back when it is set. */
     private inner class Pref<T>(private var value: T, private val put: SharedPreferences.Editor.(T) -> Unit) {
@@ -112,6 +120,8 @@ class Settings(private val prefs: SharedPreferences) {
         const val SCALE_MIN = 0.5f
         const val SCALE_MAX = 1.5f
         const val EYE_SHIFT_MAX = 0.08f
+        const val EYE_OFFSET_X_MAX = 0.1f
+        const val EYE_OFFSET_Y_MAX = 0.2f
         const val GAIN_MAX = 45f
     }
 }

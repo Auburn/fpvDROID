@@ -52,8 +52,8 @@ interface Engine {
      * date (front-buffer drawing).
      */
     fun setDisplayRefresh(hz: Float) {}
-    /** How the picture is laid out on the Surface. [fit]: 0 fit, 1 stretch, 2 crop. [eyeShift]: fraction of the width. */
-    fun setView(aspect: Float, fit: Int, scale: Float, stereo: Boolean, eyeShift: Float)
+    /** How the picture is laid out on the Surface. At once. */
+    fun setView(view: ViewOpts)
     /**
      * The menu's backdrop: black, with the picture moved into the menu's preview ([setPreview]). The picture moves
      * there and back over a moment, unless [now]. Where there is no picture, NO SIGNAL takes its place.
@@ -90,6 +90,20 @@ interface Engine {
     }
 }
 
+/**
+ * How the picture is laid out on the Surface (ViewOpts in native/render/video_renderer.h): [aspect] the shape it is
+ * shown at, [fit] Settings.FIT, STRETCH or CROP, [scale] its size against what [fit] gives. With [goggles], twice,
+ * side by side; without, once.
+ */
+data class ViewOpts(val aspect: Float, val fit: Int, val scale: Float, val goggles: Goggles? = null)
+
+/** The two pictures lined up with the goggles' lenses, in fractions of the screen's width (offsetY: of its height). */
+data class Goggles(
+    val eyeShift: Float,   // each picture moved toward the middle (+) or away (-)
+    val offsetX: Float,    // both moved right (+) or left (-)
+    val offsetY: Float,    // both moved up (+) or down (-)
+)
+
 /** The native radio and screen (native/jni/fpvdroid_jni.cpp). */
 object Native : Engine {
     init { System.loadLibrary("fpvdroid") }
@@ -113,7 +127,13 @@ object Native : Engine {
                                      strips: Boolean)
     external override fun latency(): String
     external override fun setDisplayRefresh(hz: Float)
-    external override fun setView(aspect: Float, fit: Int, scale: Float, stereo: Boolean, eyeShift: Float)
+    override fun setView(view: ViewOpts) {
+        val g = view.goggles
+        setView(view.aspect, view.fit, view.scale, g != null, g?.eyeShift ?: 0f, g?.offsetX ?: 0f, g?.offsetY ?: 0f)
+    }
+    /** [setView] as JNI takes it: [stereo] for goggles, the rest of them 0 without. */
+    private external fun setView(aspect: Float, fit: Int, scale: Float, stereo: Boolean, eyeShift: Float, offsetX: Float,
+                                 offsetY: Float)
     external override fun setBackdrop(on: Boolean, now: Boolean)
     external override fun setPreview(left: Int, top: Int, right: Int, bottom: Int, radius: Float)
     external override fun setCardLabel(label: String)

@@ -1,9 +1,9 @@
 package com.fpvdroid.app
 
 import android.os.SystemClock
-import android.view.View
 import com.fpvdroid.app.UsbLink.State
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -112,7 +112,7 @@ class UsbLinkScenariosTest : AppHarness() {
         running()
         click(preview())
         advance(500)
-        assertEquals(View.GONE, menu.visibility)
+        assertFalse(menu.isOpen)
         fake.wedged = true
         val at = SystemClock.elapsedRealtime()
         // no wait as after a failure: closed and opened again within a status poll or two
@@ -127,7 +127,7 @@ class UsbLinkScenariosTest : AppHarness() {
         assertEquals(State.RUNNING, link.state)
         assertEquals(List(2) { FakeEngine.Call("watch", listOf(f2, true)) }, fake.calls("watch"))
         // a gap that fixes itself: the menu stayed closed
-        assertEquals(View.GONE, menu.visibility)
+        assertFalse(menu.isOpen)
     }
 
     /** The radio wedges with the next open held: one status poll later the worker sits inside that open. */

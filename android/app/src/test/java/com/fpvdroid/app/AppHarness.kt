@@ -237,12 +237,16 @@ abstract class AppHarness {
     private fun shown(v: TextView) = if (v.visibility == View.VISIBLE) v.text.toString() else ""
 
     val headline: String get() = shown(menu.statusTitle)
-    val detail: String get() = shown(menu.statusDetail)
-    val action: String get() = shown(menu.statusAction)
+    val detail: String get() = shown(menu.statusLine.detail)
+    val action: String get() = shown(menu.statusLine.action)
+
+    /** The words of the status line along the top, as it shows now (closed, the menu keeps it over the picture). */
+    val line: String get() = if (menu.statusLine.visibility != View.VISIBLE || menu.statusLine.alpha < 1f) ""
+        else listOf(detail, action).filter { it.isNotEmpty() }.joinToString(" ")
 
     /** A tap on the status, as the user does to retry. */
     fun tapStatus() {
-        menu.statusRow.performClick()
+        menu.statusLine.performClick()
         settle()
     }
 
@@ -263,6 +267,17 @@ abstract class AppHarness {
     fun control(title: String): View = views(menu).filterIsInstance<SettingRow>().first { row ->
         views(row).any { it is TextView && it.text.toString() == title }
     }.control
+
+    /** What the view call [c] asked for. */
+    fun viewOf(c: FakeEngine.Call?): ViewOpts {
+        if (c == null || c.name != "setView") fail("expected setView, got $c")
+        return c!!.args[0] as ViewOpts
+    }
+
+    /** The row titled [title] that is showing: with goggles on, theirs stands in for the screen's Size row. */
+    fun shownRow(title: String): SettingRow = views(menu).filterIsInstance<SettingRow>().first { row ->
+        row.visibility == View.VISIBLE && views(row).any { it is TextView && it.text.toString() == title }
+    }
 
     fun tile(name: String): ChannelTile = views(menu).filterIsInstance<ChannelTile>().first { it.channel?.name == name }
 

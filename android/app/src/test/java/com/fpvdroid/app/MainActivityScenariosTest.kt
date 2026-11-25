@@ -7,6 +7,7 @@ import com.fpvdroid.app.UsbLink.State
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -42,14 +43,14 @@ class MainActivityScenariosTest : AppHarness() {
     fun launchWithNoAdapterShowsTheMenuAndAppliesTheDefaults() {
         launch()
         advance(300)
-        assertEquals(View.VISIBLE, menu.visibility)
+        assertTrue(menu.isOpen)
         assertEquals("No adapter", headline)
         assertEquals(State.NO_ADAPTER, link.state)
         val c = changes()
         assertTrue(c.toString(), call("setBackdrop", true, true) in c)
         // luma comb, clean OSD, smooth lines; no repair, no colour comb
         assertTrue(c.toString(), call("setPicture", true, true, true, false, false, true) in c)
-        assertTrue(c.toString(), call("setView", 4f / 3f, Settings.FIT, 1f, false, 0f) in c)
+        assertTrue(c.toString(), call("setView", ViewOpts(4f / 3f, Settings.FIT, 1f)) in c)
         assertTrue(c.toString(), call("setWatchRate", 1) in c)
         assertTrue(c.toString(), call("setDiversity", false) in c)
         assertTrue(c.toString(), call("setOffsetTuning", true) in c)
@@ -115,7 +116,7 @@ class MainActivityScenariosTest : AppHarness() {
         click(preview())
         assertTrue(changes().toString(), call("setBackdrop", false, false) in changes())
         looper.idleFor(Duration.ofMillis(300))
-        assertEquals(View.GONE, menu.visibility)
+        assertFalse(menu.isOpen)
 
         tap(root, 300f, 300f)
         assertEquals(View.VISIBLE, hint.visibility)
@@ -130,17 +131,17 @@ class MainActivityScenariosTest : AppHarness() {
         fake.clearCalls()
         click(hint)
         assertTrue(changes().toString(), call("setBackdrop", true, false) in changes())
-        assertEquals(View.VISIBLE, menu.visibility)
+        assertTrue(menu.isOpen)
         assertEquals(View.GONE, hint.visibility)
         looper.idleFor(Duration.ofMillis(300))
-        assertEquals(1f, menu.alpha, 0.01f)
+        assertEquals(1f, menu.body.alpha, 0.01f)
 
         // Back from the picture: the menu
         click(preview())
         looper.idleFor(Duration.ofMillis(300))
         @Suppress("DEPRECATION") activity.onBackPressed()
         settle()
-        assertEquals(View.VISIBLE, menu.visibility)
+        assertTrue(menu.isOpen)
         assertFalse(activity.isFinishing)
         // Back from the menu: out of the app
         @Suppress("DEPRECATION") activity.onBackPressed()
@@ -155,8 +156,8 @@ class MainActivityScenariosTest : AppHarness() {
         looper.idleFor(Duration.ofMillis(50))   // the 200 ms fade is under way
         @Suppress("DEPRECATION") activity.onBackPressed()
         looper.idleFor(Duration.ofMillis(600))
-        assertEquals(View.VISIBLE, menu.visibility)
-        assertEquals(1f, menu.alpha, 0.01f)
+        assertTrue(menu.isOpen)
+        assertEquals(1f, menu.body.alpha, 0.01f)
     }
 
     /** The picture goes where the preview is: its place on the Surface, told to the native screen as it is laid out. */
@@ -196,6 +197,74 @@ class MainActivityScenariosTest : AppHarness() {
         fake.locked = false
         advance(500)
         assertTrue("the picture lost: the headline is back ($headline)", headline.contains("F2"))
+    }
+
+    /**
+     * With the menu closed its status line stays where it was, over the picture, while it has something to say: not
+     * the figures of a picture that is fine. A tap on it is a tap on the picture.
+     */
+    @Test
+    fun theStatusLineStaysInItsPlaceOverThePictureWithTheMenuClosed() {
+        running()
+        layOut()
+        val row = menu.statusLine
+        fun where() = IntArray(2).also { row.getLocationInWindow(it) }.toList()
+        val open = where()
+        assertEquals("Looking for a picture…", line)
+
+        click(preview())
+        looper.idleFor(Duration.ofMillis(300))
+        assertFalse(menu.isOpen)
+        assertEquals(View.INVISIBLE, menu.body.visibility)
+        assertEquals("Looking for a picture…", line)
+        layOut()
+        assertEquals("in the same place", open, where())
+
+        // a locked picture that is fine: nothing over it
+        fake.locked = true
+        advance(500)
+        assertEquals("", line)
+        assertEquals(View.INVISIBLE, row.visibility)
+        // the phone falling behind: said over it
+        fake.lateRecent = MainActivity.LATE_BLOCKS.toLong()
+        advance(500)
+        assertEquals(MainActivity.OVERLOAD_ADVICE, line)
+
+        // a tap on the line is a tap on the picture: the MENU button
+        layOut()
+        val r = IntArray(2).also { root.getLocationInWindow(it) }
+        val at = where()
+        tap(root, at[0] - r[0] + row.width / 2f, at[1] - r[1] + row.height / 2f)
+        assertEquals(View.VISIBLE, hint.visibility)
+        assertFalse(menu.isOpen)
+
+        // open again: the menu's figures are back on the line
+        fake.lateRecent = 0
+        click(hint)
+        advance(500)
+        assertTrue(menu.isOpen)
+        assertTrue(line, line.contains("fps"))
+    }
+
+    /** Closed with something to do ("Ask again"), the line's action still does it. */
+    @Test
+    fun theLinesActionWorksWithTheMenuClosed() {
+        plug(adapter(), permission = false, broadcast = false)
+        launch()
+        answerPermission(false)
+        advance(300)
+        assertEquals("Ask again", action)
+        click(preview())
+        looper.idleFor(Duration.ofMillis(300))
+        assertFalse(menu.isOpen)
+        assertEquals("fpvDROID can't use the adapter without it. Ask again", line)
+        layOut()
+        val r = IntArray(2).also { root.getLocationInWindow(it) }
+        val a = IntArray(2).also { menu.statusLine.action.getLocationInWindow(it) }
+        tap(root, a[0] - r[0] + menu.statusLine.action.width / 2f, a[1] - r[1] + menu.statusLine.action.height / 2f)
+        assertEquals(State.PERMISSION, link.state)
+        assertEquals(2, permissionRequests.size)
+        assertEquals("a tap on the action is not a tap on the picture", View.GONE, hint.visibility)
     }
 
     @Test
@@ -398,14 +467,17 @@ class MainActivityScenariosTest : AppHarness() {
         assertTrue(fake.calls.drop(opened).contains(call("setGain", 20.0)))
     }
 
-    private fun assertView(c: Call?, aspect: Float, fit: Int, scale: Float, stereo: Boolean, eyeShift: Float) {
-        if (c == null || c.name != "setView") fail("expected setView, got $c")
-        val a = c!!.args
-        assertEquals("aspect", aspect, a[0] as Float, 0.001f)
-        assertEquals("fit", fit, a[1])
-        assertEquals("scale", scale, a[2] as Float, 0.02f)
-        assertEquals("stereo", stereo, a[3])
-        assertEquals("eyeShift", eyeShift, a[4] as Float, 0.003f)
+    /** [c] is a view call for about this view (sliders land near a value, not on it); [goggles] null: none. */
+    private fun assertView(c: Call?, aspect: Float, fit: Int, scale: Float, goggles: Goggles? = null) {
+        val v = viewOf(c)
+        assertEquals("aspect", aspect, v.aspect, 0.001f)
+        assertEquals("fit", fit, v.fit)
+        assertEquals("scale", scale, v.scale, 0.02f)
+        if (goggles == null) return assertNull("goggles", v.goggles)
+        val g = v.goggles ?: return fail("expected goggles: $v")
+        assertEquals("eyeShift", goggles.eyeShift, g.eyeShift, 0.003f)
+        assertEquals("offsetX", goggles.offsetX, g.offsetX, 0.003f)
+        assertEquals("offsetY", goggles.offsetY, g.offsetY, 0.003f)
     }
 
     @Test
@@ -416,33 +488,63 @@ class MainActivityScenariosTest : AppHarness() {
         fake.clearCalls()
         pick(control("Aspect ratio") as Segmented, 1, 2)   // 16:9
         assertEquals(1, changes().size)
-        assertView(fake.last("setView"), 16f / 9f, Settings.FIT, 1f, false, 0f)
+        assertView(fake.last("setView"), 16f / 9f, Settings.FIT, 1f)
         assertTrue(savedSettings().wide)
 
         fake.clearCalls()
         pick(control("Scaling") as Segmented, 2, 3)   // crop
-        assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 1f, false, 0f)
+        assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 1f)
         assertEquals(Settings.CROP, savedSettings().fit)
 
         fake.clearCalls()
         slide(control("Size") as Slider, Settings.SCALE_MIN, Settings.SCALE_MAX, 0.75f)
-        assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 0.75f, false, 0f)
+        assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 0.75f)
         // the picture is shown sharp while the slider is held, the backdrop back when it is let go
         val backdrops = fake.calls("setBackdrop")
         assertEquals(listOf(call("setBackdrop", false, false), call("setBackdrop", true, false)), backdrops)
         assertTrue(abs(savedSettings().scale - 0.75f) < 0.02f)
         assertEquals(0, fake.count("watch"))
 
+        // goggles have their own size (100 % at first), and their own Size row in place of the screen's
+        val screenSize = shownRow("Size")
         fake.clearCalls()
         click(control("Goggles"))
-        assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 0.75f, true, 0f)
+        assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 1f, Goggles(0f, 0f, 0f))
         assertTrue(savedSettings().goggles)
+        assertEquals(View.GONE, screenSize.visibility)
 
         layOut()
         fake.clearCalls()
+        slide(shownRow("Size").control as Slider, Settings.SCALE_MIN, Settings.SCALE_MAX, 0.9f)
+        assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 0.9f, Goggles(0f, 0f, 0f))
+        assertEquals(0.9f, savedSettings().gogglesScale, 0.02f)
+        assertEquals(0.75f, savedSettings().scale, 0.02f)
+
+        // the three that line the pictures up with the lenses: each -1..1, a fraction of the screen as far as its max
+        fake.clearCalls()
         slide(control("Eye spacing") as Slider, -1f, 1f, 0.5f)
-        assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 0.75f, true, 0.5f * Settings.EYE_SHIFT_MAX)
-        assertTrue(abs(savedSettings().eyeSpacing - 0.5f) < 0.03f)
+        val shift = 0.5f * Settings.EYE_SHIFT_MAX
+        assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 0.9f, Goggles(shift, 0f, 0f))
+        assertEquals(0.5f, savedSettings().eyeSpacing, 0.03f)
+
+        fake.clearCalls()
+        slide(control("Horizontal offset") as Slider, -1f, 1f, 0.5f)
+        val x = 0.5f * Settings.EYE_OFFSET_X_MAX
+        assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 0.9f, Goggles(shift, x, 0f))
+        assertEquals(0.5f, savedSettings().eyeOffsetX, 0.03f)
+
+        fake.clearCalls()
+        slide(control("Vertical offset") as Slider, -1f, 1f, -0.5f)
+        val y = -0.5f * Settings.EYE_OFFSET_Y_MAX
+        assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 0.9f, Goggles(shift, x, y))
+        assertEquals(-0.5f, savedSettings().eyeOffsetY, 0.03f)
+
+        // goggles off: the screen's own size, the picture once, and the screen's Size row back
+        fake.clearCalls()
+        click(control("Goggles"))
+        assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 0.75f)
+        assertEquals(View.VISIBLE, screenSize.visibility)
+        assertTrue(shownRow("Size") === screenSize)
     }
 
     @Test

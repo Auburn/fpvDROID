@@ -60,13 +60,13 @@ class MenuScreenshotTest {
      * A sky over a field where the picture is, so that it can be told from the panels: in the preview, or the whole
      * screen while a slider is held (a peek).
      */
-    private fun standIn(c: Canvas, at: Quiet) {
-        val where = if (at.peeking) RectF(0f, 0f, c.width.toFloat(), c.height.toFloat()) else at.preview
+    private fun standIn(c: Canvas, at: Quiet, whole: Boolean) {
+        val where = if (whole) RectF(0f, 0f, c.width.toFloat(), c.height.toFloat()) else at.preview
         if (where.isEmpty) return
         val p = Paint(Paint.ANTI_ALIAS_FLAG)
         p.shader = LinearGradient(0f, where.top, 0f, where.bottom, Color.rgb(70, 140, 200), Color.rgb(150, 110, 60),
             Shader.TileMode.CLAMP)
-        val r = if (at.peeking) 0f else at.radius
+        val r = if (whole) 0f else at.radius
         c.drawRoundRect(where, r, r, p)
     }
 
@@ -101,7 +101,7 @@ class MenuScreenshotTest {
         val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         bitmap.eraseColor(Color.BLACK)
         val canvas = Canvas(bitmap)
-        standIn(canvas, quiet)
+        standIn(canvas, quiet, whole = quiet.peeking || !menu.isOpen)   // closed: the picture fills the screen
         canvas.drawBitmap(window, 0f, 0f, null)
         File(outDir, "$name.png").outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
     }
@@ -149,6 +149,16 @@ class MenuScreenshotTest {
     @Test @Config(qualifiers = PHONE)
     fun viewPeek() = shoot("view_peek", Tab.VIEW, live, 2400, 1080, { tuned(); scale = 0.8f }) { it.peekSizeRow(true) }
 
+    /** The menu closed, the phone falling behind: its status line stays, over the picture. */
+    @Test @Config(qualifiers = PHONE)
+    fun closedOverloaded() = shoot("closed_overloaded", Tab.CHANNEL, live.copy(tone = Tone.WARN,
+        detail = MainActivity.OVERLOAD_ADVICE), 2400, 1080, tuned) { it.close() }
+
+    /** The menu closed with something to do: the action is there too. */
+    @Test @Config(qualifiers = PHONE)
+    fun closedError() = shoot("closed_error", Tab.CHANNEL, MenuState(tone = Tone.ERROR, headline = "Adapter problem",
+        detail = "The radio didn't start. ${UsbLink.REPLUG}", action = "Try again"), 2400, 1080, tuned) { it.close() }
+
     /** The one thing on screen when the picture is tapped. */
     @Test @Config(qualifiers = PHONE)
     fun hint() {
@@ -164,7 +174,7 @@ class MenuScreenshotTest {
 
     @Test @Config(qualifiers = PHONE)
     fun viewGoggles() = shoot("view_goggles", Tab.VIEW, live, 2400, 1080, {
-        tuned(); goggles = true; wide = true; fit = Settings.CROP; scale = 0.85f; eyeSpacing = 0.3f
+        tuned(); goggles = true; wide = true; fit = Settings.CROP; gogglesScale = 0.85f; eyeSpacing = 0.3f; eyeOffsetY = 0.2f
     })
 
     @Test @Config(qualifiers = PHONE)
