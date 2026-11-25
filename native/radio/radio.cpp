@@ -47,6 +47,16 @@ std::vector<float> spectrum_db(const std::vector<cf> &x) {
   psd.add(x.data(), x.size());
   return psd.db();
 }
+
+// The receiver's reason for stopping, as the fallback rules know it (they build without wifi-sdr).
+FallbackPolicy::Stopped stopped_of(wsdr::RxGaveUp g) {
+  switch (g) {
+    case wsdr::RxGaveUp::Wedged: return FallbackPolicy::Stopped::Wedged;
+    case wsdr::RxGaveUp::StreamFailing: return FallbackPolicy::Stopped::StreamFailing;
+    case wsdr::RxGaveUp::No: break;
+  }
+  return FallbackPolicy::Stopped::Other;
+}
 }  // namespace
 
 Radio::Radio(FrameSink frames) : _band(Sweep::kBandLo, Sweep::kBandHi, Sweep::kBandBin), _gate(std::move(frames)) {}
@@ -96,7 +106,7 @@ void Radio::open(int fd) {
     _mode_epoch++;
     _req_hz = s.freq;
     _req_rate = s.rate_sel;
-    _fb.clear();
+    _fb.adapter_opened();
     _dead = false;
     _wedged = false;
   }
@@ -281,7 +291,7 @@ bool Radio::set_watch_rate(int rate_sel) {
   std::lock_guard<std::mutex> l(_m);
   if (_watch_rate == rate_sel) return false;
   _watch_rate = rate_sel;
-  _fb.clear();
+  _fb.watch_rate_set();
   return true;
 }
 
@@ -363,12 +373,13 @@ void Radio::dsp_loop() {
         if (_stop) break;  // close() got in between: it stopped the receiver itself
         note_faults(st);
         if (!st.running) {
-          KP_LOGE("radio: receiver stopped%s: %s", st.wedged ? " (C2H wedged)" : "", st.error.c_str());
+          const bool wedged = st.gave_up == wsdr::RxGaveUp::Wedged;
+          KP_LOGE("radio: receiver stopped%s: %s", wedged ? " (C2H wedged)" : "", st.error.c_str());
           // nothing restarts it from here: say so, so the app can reopen the adapter (at once, if it wedged)
           std::lock_guard<std::mutex> m(_m);
           _dead = true;
-          _wedged = st.wedged;
-          if (st.wedged) _fb.receiver_wedged(_mode == Mode::Watch);
+          _wedged = wedged;
+          _fb.receiver_stopped(stopped_of(st.gave_up), _mode == Mode::Watch, wsdr::Receiver::rate_of(_req_rate));
           break;
         }
       }
@@ -410,19 +421,22 @@ void Radio::dsp_loop() {
     }
     _busy_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     const int64_t t = now_ms();
-    if (t - _load_t0_ms >= 1000 && _rx) note_faults(_rx->status());
     if (t - _load_t0_ms >= 1000) {
+      // the receiver's status once a second, and once for all of this: each read takes its lock
+      const wsdr::RxStatus rs = _rx ? _rx->status() : wsdr::RxStatus{};
+      if (_rx) note_faults(rs);
       std::lock_guard<std::mutex> l(_m);
       _load = _busy_s / ((t - _load_t0_ms) / 1000.0);
       _busy_s = 0;
       _load_t0_ms = t;
       if (++_status_ticks % 5 == 0 && _mode == Mode::Watch)
         KP_LOGI("status: watch %.1f MHz, cpu demod %.0f%% decode %.0f%%, dropped stream %llu usb %llu decode %llu, "
-                "restarts %llu, %s %s lock %.2f fps %.0f, acq %llu lost %llu rephase %llu, torn frames hidden %llu",
+                "restarts %llu, unwedged %llu, %s %s lock %.2f fps %.0f, acq %llu lost %llu rephase %llu, "
+                "torn frames hidden %llu",
                 _watch_hz / 1e6,
-                _load * 100, _dload * 100, (unsigned long long)(_rx ? _rx->status().mid_drops : 0),
+                _load * 100, _dload * 100, (unsigned long long)rs.mid_drops,
                 (unsigned long long)_dropped.load(), (unsigned long long)_decq.dropped(),
-                (unsigned long long)(_rx ? _rx->status().restarts : 0), _vstats.std_name,
+                (unsigned long long)rs.restarts, (unsigned long long)rs.unwedged, _vstats.std_name,
                 _vstats.colour ? "colour" : "grey", _vstats.lock_recent, _fps,
                 (unsigned long long)_vstats.acquisitions, (unsigned long long)_vstats.losses,
                 (unsigned long long)_vstats.rephases, (unsigned long long)_gate.hidden());
@@ -917,7 +931,8 @@ std::string Radio::status_json() {
     << ",\"watch_hz\":" << num(_watch_hz) << ",\"fs\":" << num(rs.fs) << ",\"banks\":" << _banks.load()
     << ",\"dropped\":" << _dropped.load() << ",\"decode_dropped\":" << _decq.dropped()
     << ",\"stream_dropped\":" << rs.mid_drops << ",\"late_recent\":" << late_recent
-    << ",\"restarts\":" << rs.restarts << ",\"dsp_load\":" << num(_load) << ",\"decode_load\":" << num(_dload)
+    << ",\"restarts\":" << rs.restarts << ",\"unwedged\":" << rs.unwedged << ",\"dsp_load\":" << num(_load)
+    << ",\"decode_load\":" << num(_dload)
     << ",\"watch_msps\":" << (_mode == Mode::Watch ? wsdr::Receiver::rate_of(_req_rate) / 1e6 : 0)
     << ",\"fallback\":" << (_fb.active() ? "true" : "false") << ",\"dead\":" << (_dead ? "true" : "false")
     << ",\"wedged\":" << (_wedged ? "true" : "false")
