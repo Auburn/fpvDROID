@@ -655,7 +655,8 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         maxHzRow = toggle("Max screen Hz", MAX_HZ_WORDS, s.maxScreenHz) { s.maxScreenHz = it }
         p.addView(maxHzRow)
         p.addView(divider(context))
-        vsyncRow = toggle("Vsync", "Shows each picture whole. Off: each part goes up as soon as it arrives, for less delay", s.vsync) { s.vsync = it }
+        vsyncRow = toggle("Vsync", "Shows each picture only when it is complete. Turned off, each part shows as soon as it is decoded, for less delay",
+            s.vsync) { s.vsync = it }
         p.addView(vsyncRow)
         return p
     }
@@ -740,8 +741,8 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
 
     companion object {
         /** What Max screen Hz says of itself; the screen's rate now goes under it ([showScreenHz]). */
-        const val MAX_HZ_WORDS = "Runs the screen at its fastest rate, so the picture shows sooner. Uses more battery. " +
-            "Off: the screen is asked for the camera's rate"
+        const val MAX_HZ_WORDS = "Runs the screen at its fastest rate so the picture shows sooner, at the cost of more battery. " +
+            "Turned off, it requests the camera's rate from the screen"
         const val RAIL_DP = 204f
         /** A screen lower than this is short: most phones held sideways are, by a little. */
         const val SHORT_DP = 400f
