@@ -17,10 +17,16 @@ namespace kp {
 //    minute, at most four at one go: left alone. kDrops in the window is two a second kept up.
 // Neither counts in the first kGraceMs of a watch. On some hosts a fresh stream starts badly for a while: a
 // Pixel 8 Pro loses the run at bank 51-55 for one to four seconds, a restart each time, before it keeps up for
-// good, and on that phone 20 MS/s is far worse (its USB path wedges within ~0.2 s, where 40 MS/s runs for many
-// seconds). A link that cannot carry 40 MS/s goes on restarting past the grace, and still falls back.
-// And none at all once a stream that had fallen back wedged at 20 MS/s: on such a host 20 MS/s is worse than a
-// 40 MS/s that restarts, so there is no more falling back for as long as this object lives (clear() keeps that).
+// good. A link that cannot carry 40 MS/s goes on restarting past the grace, and still falls back.
+// And none at all once a stream that had fallen back wedged at 20 MS/s for good (the receiver stopped: the wedge
+// was back straight after being freed): on such a host 20 MS/s is worse than a 40 MS/s that restarts, so there is
+// no more falling back for as long as this object lives (adapter_opened() keeps that).
+// A third kind of evidence needs no grace: a 40 MS/s watch whose receiver gives up altogether (its stream failed
+// five starts in a row without a bank). The app then opens the adapter again, and a fallback that the open
+// cleared would never get past the grace, so the watch would go round for ever. Such a stop falls back at once,
+// and that fallback holds over the reopens until the watch rate is set anew (watch_rate_set()). Not after a
+// wedge, nor once the falling back has been given up.
+// What these rules were measured against on the phones is in patches/c2h-wedge.md ("The app's fallback").
 //
 // The lost blocks are counted at every sample rate, for late_recent(): how many the current watch has lost
 // lately, which is what tells the app that the host is not keeping up. Not the ones a stream loses in its first
@@ -38,13 +44,22 @@ public:
   static constexpr int64_t kPollMs = 200;  // how often the receiver's count of lost blocks is wanted
   static constexpr int64_t kSettleMs = 250;
 
+  // Why the receiver stopped by itself (wifi-sdr's RxGaveUp, without its header: this builds with no radio).
+  enum class Stopped {
+    Other,          // the adapter lost, a retune that kept failing: says nothing about either rate
+    Wedged,         // its C2H path wedged, and the pulse that frees it did not help
+    StreamFailing,  // its stream failed start after start
+  };
+
   // ---- any thread
   bool active() const;    // watches asked for at 40 MS/s run at 20 MS/s
   bool disabled() const;  // 20 MS/s wedged after a fallback: no more falling back
   // The rate_sel a watch runs at, asked for at `asked` (1 = 40 MS/s, 2 = 20 MS/s).
   int rate_for(int asked) const;
-  // Watches run at the rate asked for again (the radio opened anew, or the watch rate set anew).
-  void clear();
+  // The radio was opened anew: watches run at the rate asked for again, unless 40 MS/s never streamed (Held).
+  void adapter_opened();
+  // The watch rate was set anew: watches run at the rate asked for again, whatever the fallback came from.
+  void watch_rate_set();
   // Blocks the current watch's stream lost in the last kWindowMs, as of the last poll: counted from kSettleMs
   // after that watch's first block (nothing from before its retune, nor the stream's first moments), and again
   // so after the retune of a fallback. 0 outside a watch, and once the polls stop for kWindowMs (a stream that
@@ -60,15 +75,23 @@ public:
   bool poll_due(int64_t now_ms);
   // lost_total: the receiver's count, which only ever rises. True: fall back now (active() from here on).
   bool blocks_lost(int64_t now_ms, double fs, uint64_t lost_total);
-  // The receiver stopped with its C2H path wedged; watching: the radio was in a watch.
-  void receiver_wedged(bool watching);
+  // The receiver stopped by itself; watching: the radio was in a watch, asked for at fs.
+  //  - Wedged after a fallback on evidence: 20 MS/s is the worse rate on this host, so no more falling back
+  //    (disabled()). Not after a held fallback: there 20 MS/s is all the host has.
+  //  - StreamFailing in a 40 MS/s watch with no fallback yet: it falls back now, and that holds over reopens.
+  void receiver_stopped(Stopped why, bool watching, double fs);
 
 private:
+  // Evidence: restarts or lost blocks took the watch to 20 MS/s; opening the adapter again clears it.
+  // Held: 40 MS/s never streamed (the receiver gave up); kept when the adapter is opened again.
+  enum class Fallback { None, Evidence, Held };
+
   bool counts(int64_t now_ms, double fs) const;
-  void fall_back();
+  void fall_back(Fallback to);
 
   mutable std::mutex _m;
-  bool _active = false, _disabled = false, _watching = false;
+  Fallback _fb = Fallback::None;
+  bool _disabled = false, _watching = false;
   int64_t _t0_ms = 0;                                 // when the watch began
   int64_t _next_poll_ms = 0;
   int64_t _first_ms = -1;                             // the first poll of this watch's stream (-1: none yet)

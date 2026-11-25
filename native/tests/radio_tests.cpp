@@ -27,6 +27,7 @@ static int g_checks = 0, g_failed = 0;
 
 using FP = FallbackPolicy;
 static constexpr double k40 = 40e6, k20 = 20e6;
+static constexpr FP::Stopped kWedged = FP::Stopped::Wedged, kFailing = FP::Stopped::StreamFailing;
 
 // A watch from t0 to t1 with the receiver's count read whenever the policy asks: `total` at every poll. True
 // when a poll said to fall back.
@@ -110,9 +111,16 @@ static void fallback_cleared() {
   p.watch_started(0);
   for (int i = 0; i < FP::kFaults; i++) p.stream_restarted(FP::kGraceMs + i, k40);
   CHECK(p.active());
-  // Radio::open() and a changed Radio::set_watch_rate(): 40 MS/s is tried again ...
-  p.clear();
+  // Radio::open(): 40 MS/s is tried again ...
+  p.adapter_opened();
   CHECK(!p.active() && !p.disabled() && p.rate_for(1) == 1);
+  // ... and so it is after a changed Radio::set_watch_rate()
+  FP r;
+  r.watch_started(0);
+  for (int i = 0; i < FP::kFaults; i++) r.stream_restarted(FP::kGraceMs + i, k40);
+  CHECK(r.active());
+  r.watch_rate_set();
+  CHECK(!r.active() && !r.disabled() && r.rate_for(1) == 1);
   // ... and can fall back again
   p.watch_started(100000);
   bool fell = false;
@@ -124,17 +132,20 @@ static void fallback_disabled_by_a_wedge_at_20() {
   FP p;
   p.watch_started(0);
   // a wedge at 40 MS/s, or outside a watch, says nothing about 20 MS/s
-  p.receiver_wedged(true);
-  CHECK(!p.disabled());
+  p.receiver_stopped(kWedged, true, k40);
+  CHECK(!p.disabled() && !p.active());
   for (int i = 0; i < FP::kFaults; i++) p.stream_restarted(FP::kGraceMs + i, k40);
   CHECK(p.active());
-  p.receiver_wedged(false);
+  p.receiver_stopped(kWedged, false, k20);
   CHECK(!p.disabled());
+  // nor does a stop of another kind (the adapter lost, a retune that kept failing)
+  p.receiver_stopped(FP::Stopped::Other, true, k20);
+  CHECK(!p.disabled() && p.active());
   // fallen back, watching, wedged: 20 MS/s is the worse of the two here
-  p.receiver_wedged(true);
+  p.receiver_stopped(kWedged, true, k20);
   CHECK(p.disabled() && p.active());
   // the reopen clears the fallback and keeps the lesson: no evidence of either kind counts from now on
-  p.clear();
+  p.adapter_opened();
   CHECK(p.disabled() && !p.active() && p.rate_for(1) == 1);
   p.watch_started(100000);
   const int64_t g = 100000 + FP::kGraceMs;
@@ -142,6 +153,58 @@ static void fallback_disabled_by_a_wedge_at_20() {
   CHECK(!poll(p, g + 2000, g + 3000, k40, 0));
   CHECK(!poll(p, g + 3050, g + 6000, k40, 1000));
   CHECK(!p.active());
+}
+
+static void fallback_when_40_never_streams() {
+  FP p;
+  p.watch_started(0);
+  // the receiver gives up at 20 MS/s, or outside a watch, or for another reason: that says nothing about 40 MS/s
+  p.receiver_stopped(kFailing, true, k20);
+  p.receiver_stopped(kFailing, false, k40);
+  p.receiver_stopped(FP::Stopped::Other, true, k40);
+  CHECK(!p.active());
+  // in a 40 MS/s watch it falls back at once, inside the grace
+  p.receiver_stopped(kFailing, true, k40);
+  CHECK(p.active() && p.rate_for(1) == 2);
+  // the reopen that follows keeps it, and so does the next
+  p.adapter_opened();
+  CHECK(p.active() && p.rate_for(1) == 2);
+  p.watch_started(5000);
+  p.adapter_opened();
+  CHECK(p.active() && p.rate_for(1) == 2);
+  // a wedge at 20 MS/s then does not end the falling back: 20 MS/s is all this host has
+  p.watch_started(9000);
+  p.receiver_stopped(kWedged, true, k20);
+  CHECK(!p.disabled() && p.active());
+  // the watch rate set anew tries 40 MS/s again, and the next reopen does not bring the fallback back
+  p.watch_rate_set();
+  CHECK(!p.active() && p.rate_for(1) == 1);
+  p.adapter_opened();
+  CHECK(!p.active() && p.rate_for(1) == 1);
+  // ... and it can fall back the same way again
+  p.watch_started(20000);
+  p.receiver_stopped(kFailing, true, k40);
+  CHECK(p.active());
+}
+
+static void fallback_not_held_after_giving_up() {
+  FP p;
+  p.watch_started(0);
+  for (int i = 0; i < FP::kFaults; i++) p.stream_restarted(FP::kGraceMs + i, k40);
+  p.receiver_stopped(kWedged, true, k20);  // fallen back by restarts, then wedged at 20 MS/s: no more falling back
+  CHECK(p.disabled());
+  p.adapter_opened();
+  p.watch_started(100000);
+  p.receiver_stopped(kFailing, true, k40);
+  CHECK(!p.active() && p.rate_for(1) == 1);
+  // a fallback already running is not made to hold over reopens either
+  FP q;
+  q.watch_started(0);
+  for (int i = 0; i < FP::kFaults; i++) q.stream_restarted(FP::kGraceMs + i, k40);
+  q.receiver_stopped(kFailing, true, k40);
+  CHECK(q.active());
+  q.adapter_opened();
+  CHECK(!q.active());
 }
 
 static void late_recent_counts_the_current_watch() {
@@ -556,6 +619,8 @@ int main() {
   fallback_poll_cadence();
   fallback_cleared();
   fallback_disabled_by_a_wedge_at_20();
+  fallback_when_40_never_streams();
+  fallback_not_held_after_giving_up();
   late_recent_counts_the_current_watch();
   late_recent_leaves_out_a_streams_first_moments();
   late_recent_goes_when_the_stream_stops();
