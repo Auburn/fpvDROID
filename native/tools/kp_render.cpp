@@ -2,9 +2,11 @@
 // without a phone. Needs EGL + OpenGL ES 3 (Mesa's software renderer will do).
 //
 //   kp_render OUT.ppm [--in FRAME.rgbx --size 720x480] [--view 2400x1080] [--aspect 4:3|16:9]
-//             [--fit fit|stretch|crop] [--scale 1.0] [--stereo] [--eye 0.0] [--gain 1] [--nofeed] [--label R8]
-//             [--inset 0..1 --box X,Y,W,H --radius R]
+//             [--fit fit|stretch|crop] [--scale 1.0] [--stereo [--eye 0.0] [--offset 0.0,0.0]] [--gain 1]
+//             [--nofeed] [--label R8] [--inset 0..1 --box X,Y,W,H --radius R]
 //
+// --stereo: the picture twice, side by side (goggles), each moved toward the middle by --eye (a fraction of the
+// view's width; away from it below 0), both moved right and up by --offset (fractions of its width and height).
 // FRAME.rgbx is one frame as kp_replay --frames writes them (the last 720 x H x 4 bytes of its output);
 // without --in the test card is drawn (test_card.h: a circle shows the aspect ratio, a border what is cut off).
 // --nofeed: no frame at all, what the screen shows then (NO SIGNAL, or with --label R8 the chosen channel);
@@ -40,7 +42,8 @@ bool pair_of(const char *s, char sep, double &a, double &b) {
 int main(int argc, char **argv) {
   if (argc < 2) {
     std::fprintf(stderr, "usage: kp_render OUT.ppm [--in F.rgbx --size WxH] [--view WxH] [--aspect 4:3] "
-                         "[--fit fit|stretch|crop] [--scale S] [--stereo] [--eye E] [--gain G] [--nofeed] [--label L] "
+                         "[--fit fit|stretch|crop] [--scale S] [--stereo [--eye E] [--offset X,Y]] [--gain G] "
+                         "[--nofeed] [--label L] "
                          "[--inset T --box X,Y,W,H --radius R]\n");
     return 2;
   }
@@ -64,6 +67,9 @@ int main(int argc, char **argv) {
     } else if (k == "--scale") o.scale = static_cast<float>(std::atof(v()));
     else if (k == "--stereo") o.stereo = true;
     else if (k == "--eye") o.eye_shift = static_cast<float>(std::atof(v()));
+    else if (k == "--offset") {
+      if (std::sscanf(v(), "%f,%f", &o.offset_x, &o.offset_y) != 2) return std::fprintf(stderr, "--offset takes X,Y\n"), 2;
+    }
     else if (k == "--gain") sc.gain = static_cast<float>(std::atof(v()));
     else if (k == "--nofeed") feed = false;
     else if (k == "--label") sc.label = v();

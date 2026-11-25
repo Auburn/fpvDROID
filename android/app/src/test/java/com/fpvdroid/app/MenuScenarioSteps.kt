@@ -102,12 +102,8 @@ abstract class MenuScenarioSteps : AppHarness() {
         layOut()
     }
 
-    protected fun sizeSlider() = control("Size") as Slider
-
-    protected fun scaleOf(c: Call?): Float {
-        if (c == null || c.name != "setView") fail("expected setView, got $c")
-        return c!!.args[2] as Float
-    }
+    /** The Size slider showing: the screen's, or with goggles on, theirs. */
+    protected fun sizeSlider() = shownRow("Size").control as Slider
 
     protected fun lastBackdrop(): Call? = fake.last("setBackdrop")
 

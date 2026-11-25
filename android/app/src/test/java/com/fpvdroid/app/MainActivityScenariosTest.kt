@@ -7,6 +7,7 @@ import com.fpvdroid.app.UsbLink.State
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -49,7 +50,7 @@ class MainActivityScenariosTest : AppHarness() {
         assertTrue(c.toString(), call("setBackdrop", true, true) in c)
         // luma comb, clean OSD, smooth lines; no repair, no colour comb
         assertTrue(c.toString(), call("setPicture", true, true, true, false, false) in c)
-        assertTrue(c.toString(), call("setView", 4f / 3f, Settings.FIT, 1f, false, 0f) in c)
+        assertTrue(c.toString(), call("setView", ViewOpts(4f / 3f, Settings.FIT, 1f)) in c)
         assertTrue(c.toString(), call("setWatchRate", 1) in c)
         assertTrue(c.toString(), call("setDiversity", false) in c)
         assertTrue(c.toString(), call("setOffsetTuning", true) in c)
@@ -351,14 +352,17 @@ class MainActivityScenariosTest : AppHarness() {
         assertTrue(fake.calls.drop(opened).contains(call("setGain", 20.0)))
     }
 
-    private fun assertView(c: Call?, aspect: Float, fit: Int, scale: Float, stereo: Boolean, eyeShift: Float) {
-        if (c == null || c.name != "setView") fail("expected setView, got $c")
-        val a = c!!.args
-        assertEquals("aspect", aspect, a[0] as Float, 0.001f)
-        assertEquals("fit", fit, a[1])
-        assertEquals("scale", scale, a[2] as Float, 0.02f)
-        assertEquals("stereo", stereo, a[3])
-        assertEquals("eyeShift", eyeShift, a[4] as Float, 0.003f)
+    /** [c] is a view call for about this view (sliders land near a value, not on it); [goggles] null: none. */
+    private fun assertView(c: Call?, aspect: Float, fit: Int, scale: Float, goggles: Goggles? = null) {
+        val v = viewOf(c)
+        assertEquals("aspect", aspect, v.aspect, 0.001f)
+        assertEquals("fit", fit, v.fit)
+        assertEquals("scale", scale, v.scale, 0.02f)
+        if (goggles == null) return assertNull("goggles", v.goggles)
+        val g = v.goggles ?: return fail("expected goggles: $v")
+        assertEquals("eyeShift", goggles.eyeShift, g.eyeShift, 0.003f)
+        assertEquals("offsetX", goggles.offsetX, g.offsetX, 0.003f)
+        assertEquals("offsetY", goggles.offsetY, g.offsetY, 0.003f)
     }
 
     @Test
@@ -369,33 +373,63 @@ class MainActivityScenariosTest : AppHarness() {
         fake.clearCalls()
         pick(control("Aspect ratio") as Segmented, 1, 2)   // 16:9
         assertEquals(1, changes().size)
-        assertView(fake.last("setView"), 16f / 9f, Settings.FIT, 1f, false, 0f)
+        assertView(fake.last("setView"), 16f / 9f, Settings.FIT, 1f)
         assertTrue(savedSettings().wide)
 
         fake.clearCalls()
         pick(control("Scaling") as Segmented, 2, 3)   // crop
-        assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 1f, false, 0f)
+        assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 1f)
         assertEquals(Settings.CROP, savedSettings().fit)
 
         fake.clearCalls()
         slide(control("Size") as Slider, Settings.SCALE_MIN, Settings.SCALE_MAX, 0.75f)
-        assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 0.75f, false, 0f)
+        assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 0.75f)
         // the picture is shown sharp while the slider is held, the backdrop back when it is let go
         val backdrops = fake.calls("setBackdrop")
         assertEquals(listOf(call("setBackdrop", false, false), call("setBackdrop", true, false)), backdrops)
         assertTrue(abs(savedSettings().scale - 0.75f) < 0.02f)
         assertEquals(0, fake.count("watch"))
 
+        // goggles have their own size (100 % at first), and their own Size row in place of the screen's
+        val screenSize = shownRow("Size")
         fake.clearCalls()
         click(control("Goggles"))
-        assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 0.75f, true, 0f)
+        assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 1f, Goggles(0f, 0f, 0f))
         assertTrue(savedSettings().goggles)
+        assertEquals(View.GONE, screenSize.visibility)
 
         layOut()
         fake.clearCalls()
+        slide(shownRow("Size").control as Slider, Settings.SCALE_MIN, Settings.SCALE_MAX, 0.9f)
+        assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 0.9f, Goggles(0f, 0f, 0f))
+        assertEquals(0.9f, savedSettings().gogglesScale, 0.02f)
+        assertEquals(0.75f, savedSettings().scale, 0.02f)
+
+        // the three that line the pictures up with the lenses: each -1..1, a fraction of the screen as far as its max
+        fake.clearCalls()
         slide(control("Eye spacing") as Slider, -1f, 1f, 0.5f)
-        assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 0.75f, true, 0.5f * Settings.EYE_SHIFT_MAX)
-        assertTrue(abs(savedSettings().eyeSpacing - 0.5f) < 0.03f)
+        val shift = 0.5f * Settings.EYE_SHIFT_MAX
+        assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 0.9f, Goggles(shift, 0f, 0f))
+        assertEquals(0.5f, savedSettings().eyeSpacing, 0.03f)
+
+        fake.clearCalls()
+        slide(control("Horizontal offset") as Slider, -1f, 1f, 0.5f)
+        val x = 0.5f * Settings.EYE_OFFSET_X_MAX
+        assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 0.9f, Goggles(shift, x, 0f))
+        assertEquals(0.5f, savedSettings().eyeOffsetX, 0.03f)
+
+        fake.clearCalls()
+        slide(control("Vertical offset") as Slider, -1f, 1f, -0.5f)
+        val y = -0.5f * Settings.EYE_OFFSET_Y_MAX
+        assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 0.9f, Goggles(shift, x, y))
+        assertEquals(-0.5f, savedSettings().eyeOffsetY, 0.03f)
+
+        // goggles off: the screen's own size, the picture once, and the screen's Size row back
+        fake.clearCalls()
+        click(control("Goggles"))
+        assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 0.75f)
+        assertEquals(View.VISIBLE, screenSize.visibility)
+        assertTrue(shownRow("Size") === screenSize)
     }
 
     @Test

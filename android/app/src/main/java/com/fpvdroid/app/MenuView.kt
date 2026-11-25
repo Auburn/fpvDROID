@@ -160,8 +160,8 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     // view page
     private lateinit var fitRow: SettingRow
     private lateinit var sizeRow: SettingRow
-    private lateinit var eyeRow: SettingRow
-    private lateinit var eyeDivider: View
+    private lateinit var sizeDivider: View          // the line above it: both give way to the goggles rows
+    private val eyeViews = mutableListOf<View>()   // goggles only: their rows, each after the line above it
 
     // picture page
     private lateinit var cleanOsdRow: SettingRow
@@ -385,6 +385,17 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         }
     }
 
+    /**
+     * Rows that come and go with a setting, each after the line above it: [views] in that order, so the last is a
+     * row, brought into view as they appear. (Kept on the page itself, not in a group of their own: [peek] fades
+     * the page's children one by one, all but the row being dragged.)
+     */
+    private fun showRows(on: Boolean, views: List<View>) {
+        val appearing = on && views.last().visibility != View.VISIBLE
+        for (v in views) v.visibility = if (on) View.VISIBLE else View.GONE
+        if (appearing) reveal(views.last())
+    }
+
     private fun View.isDescendantOf(group: ViewGroup): Boolean {
         var p = parent
         while (p != null) {
@@ -528,42 +539,60 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
                 on.onView()
             }.sized(dpi(216f)))
         p.addView(fitRow)
-        p.addView(divider(context))
-        sizeRow = SettingRow(context, "Size", sizeWords(),
-            Slider(context, Settings.SCALE_MIN, Settings.SCALE_MAX, s.scale, 1f) { v, done ->
-                s.scale = v
-                sizeRow.detailView.text = sizeWords()
-                peek(if (done) null else sizeRow)
-                on.onView()
-            }.sized(dpi(216f)))
+        /** A slider for the picture's place or size: the picture is shown sharp while it is dragged (peek). */
+        fun sliderRow(title: String, words: () -> String, min: Float, max: Float, value: Float, detent: Float,
+                      fromDetent: Boolean = false, set: (Float) -> Unit): SettingRow {
+            lateinit var row: SettingRow
+            row = SettingRow(context, title, words(),
+                Slider(context, min, max, value, detent, fromDetent) { v, done ->
+                    set(v)
+                    row.detailView.text = words()
+                    peek(if (done) null else row)
+                    on.onView()
+                }.sized(dpi(216f)))
+            return row
+        }
+        sizeDivider = divider(context)
+        p.addView(sizeDivider)
+        sizeRow = sliderRow("Size", { "${percent(s.scale)}% of the screen" }, Settings.SCALE_MIN, Settings.SCALE_MAX,
+            s.scale, 1f) { s.scale = it }
         p.addView(sizeRow)
         p.addView(divider(context))
         p.addView(SettingRow(context, "Goggles", "The picture twice, side by side, for goggles that hold a phone",
             Toggle(context, s.goggles) { v ->
                 s.goggles = v
-                showEyeRow()
+                showEyeRows()
                 on.onView()
             }))
-        eyeDivider = divider(context)
-        p.addView(eyeDivider)
-        eyeRow = SettingRow(context, "Eye spacing", "Slide until the two pictures become one",
-            Slider(context, -1f, 1f, s.eyeSpacing, 0f, fromDetent = true) { v, done ->
-                s.eyeSpacing = v
-                peek(if (done) null else eyeRow)
-                on.onView()
-            }.sized(dpi(216f)))
-        p.addView(eyeRow)
-        showEyeRow()
+        // with goggles on, these take the place of Size
+        fun eyeRow(row: SettingRow) {
+            val line = divider(context)
+            p.addView(line)
+            p.addView(row)
+            eyeViews += line
+            eyeViews += row
+        }
+        eyeRow(sliderRow("Size", { "${percent(s.gogglesScale)}% of each half of the screen" }, Settings.SCALE_MIN,
+            Settings.SCALE_MAX, s.gogglesScale, 1f) { s.gogglesScale = it })
+        eyeRow(sliderRow("Eye spacing", { "Slide until the two pictures become one" }, -1f, 1f, s.eyeSpacing, 0f,
+            fromDetent = true) { s.eyeSpacing = it })
+        eyeRow(sliderRow("Horizontal offset", { "Moves both pictures left or right" }, -1f, 1f, s.eyeOffsetX, 0f,
+            fromDetent = true) { s.eyeOffsetX = it })
+        eyeRow(sliderRow("Vertical offset", { "Moves both pictures down or up" }, -1f, 1f, s.eyeOffsetY, 0f,
+            fromDetent = true) { s.eyeOffsetY = it })
+        showEyeRows()
         return p
     }
 
-    private fun sizeWords() = "${(s.scale * 100).roundToInt()}% of the screen"
+    private fun percent(scale: Float) = (scale * 100).roundToInt()
 
-    private fun showEyeRow() {
-        val was = eyeRow.visibility
-        eyeRow.visibility = if (s.goggles) View.VISIBLE else View.GONE
-        eyeDivider.visibility = eyeRow.visibility
-        if (s.goggles && was != View.VISIBLE) reveal(eyeRow)
+    /**
+     * With goggles on, their rows show (the last brought into view as they appear) and the screen's own Size row
+     * gives way to theirs.
+     */
+    private fun showEyeRows() {
+        showRows(s.goggles, eyeViews)
+        showRows(!s.goggles, listOf(sizeDivider, sizeRow))
     }
 
     // ------------------------------------------------------------------------------------------ picture
@@ -648,12 +677,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         showGainRow()
     }
 
-    private fun showGainRow() {
-        val was = gainRow.visibility
-        gainRow.visibility = if (s.gainAuto) View.GONE else View.VISIBLE
-        gainDivider.visibility = gainRow.visibility
-        if (!s.gainAuto && was != View.VISIBLE) reveal(gainRow)
-    }
+    private fun showGainRow() = showRows(!s.gainAuto, listOf(gainDivider, gainRow))
 
     private fun <T : View> T.sized(width: Int): T = apply { layoutParams = LinearLayout.LayoutParams(width, dpi(38f)) }
 

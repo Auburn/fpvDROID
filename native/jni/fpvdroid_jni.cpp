@@ -247,7 +247,8 @@ JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_setPicture(JNIEnv *, jclass,
 }
 
 JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_setView(JNIEnv *, jclass, jfloat aspect, jint fit, jfloat scale,
-                                                          jboolean stereo, jfloat eye_shift) {
+                                                          jboolean stereo, jfloat eye_shift, jfloat offset_x,
+                                                          jfloat offset_y) {
   if (!g_screen) return;
   ViewOpts v;
   v.aspect = aspect > 0 ? aspect : 4.f / 3;
@@ -255,6 +256,8 @@ JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_setView(JNIEnv *, jclass, jf
   v.scale = std::clamp(scale, 0.2f, 3.f);
   v.stereo = stereo;
   v.eye_shift = std::clamp(eye_shift, -0.25f, 0.25f);
+  v.offset_x = std::clamp(offset_x, -0.5f, 0.5f);
+  v.offset_y = std::clamp(offset_y, -0.5f, 0.5f);
   g_screen->set_view(v);
 }
 

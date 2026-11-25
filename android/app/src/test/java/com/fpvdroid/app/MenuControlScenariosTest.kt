@@ -32,7 +32,7 @@ class MenuControlScenariosTest : MenuScenarioSteps() {
         finger(MotionEvent.ACTION_UP, x, y, t)
         settle()
         assertEquals(0.75f, s.value, 0.02f)
-        assertEquals(0.75f, scaleOf(fake.last("setView")), 0.02f)
+        assertEquals(0.75f, viewOf(fake.last("setView")).scale, 0.02f)
         assertEquals(0.75f, savedSettings().scale, 0.02f)
     }
 
@@ -52,7 +52,7 @@ class MenuControlScenariosTest : MenuScenarioSteps() {
         settle()
         assertEquals(before, s.value, 0.0001f)
         assertEquals(before, savedSettings().scale, 0.0001f)
-        for (c in fake.calls("setView")) assertEquals("setView with another scale: $c", before, scaleOf(c), 0.0001f)
+        for (c in fake.calls("setView")) assertEquals("setView with another scale: $c", before, viewOf(c).scale, 0.0001f)
     }
 
     @Test
@@ -76,7 +76,7 @@ class MenuControlScenariosTest : MenuScenarioSteps() {
         finger(MotionEvent.ACTION_UP, x1, y, t)
         settle()
         assertEquals(1.3f, s.value, 0.02f)
-        assertEquals(1.3f, scaleOf(fake.last("setView")), 0.02f)
+        assertEquals(1.3f, viewOf(fake.last("setView")).scale, 0.02f)
         assertEquals(1.3f, savedSettings().scale, 0.02f)
         assertEquals(listOf(call("setBackdrop", false, false), call("setBackdrop", true, false)), fake.calls("setBackdrop"))
     }
@@ -228,7 +228,7 @@ class MenuControlScenariosTest : MenuScenarioSteps() {
         tapOn(title)
         assertTrue(goggles.isOn)
         assertTrue(savedSettings().goggles)
-        assertEquals(true, fake.last("setView")?.args?.get(3))
+        assertNotNull("goggles", viewOf(fake.last("setView")).goggles)
     }
 
     @Test
@@ -255,7 +255,7 @@ class MenuControlScenariosTest : MenuScenarioSteps() {
         settle()
         assertEquals(Settings.CROP, seg.selected)
         assertEquals(1, fake.count("setView"))
-        assertEquals(Settings.CROP, fake.last("setView")?.args?.get(1))
+        assertEquals(Settings.CROP, viewOf(fake.last("setView")).fit)
         assertEquals(Settings.CROP, savedSettings().fit)
     }
 
@@ -272,7 +272,7 @@ class MenuControlScenariosTest : MenuScenarioSteps() {
             seen += seg.selected
         }
         assertEquals(listOf(Settings.STRETCH, Settings.CROP, Settings.FIT), seen)
-        assertEquals(listOf(Settings.STRETCH, Settings.CROP, Settings.FIT), fake.calls("setView").map { it.args[1] })
+        assertEquals(listOf(Settings.STRETCH, Settings.CROP, Settings.FIT), fake.calls("setView").map { viewOf(it).fit })
     }
 
     // ------------------------------------------------------------------------------------------ accessibility
@@ -307,7 +307,7 @@ class MenuControlScenariosTest : MenuScenarioSteps() {
         assertTrue(s.performAccessibilityAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD, null))
         settle()
         assertTrue("raised: ${s.value}", s.value > 1f)
-        assertEquals(s.value, scaleOf(fake.last("setView")), 0.0001f)
+        assertEquals(s.value, viewOf(fake.last("setView")).scale, 0.0001f)
         assertEquals(s.value, s.createAccessibilityNodeInfo().rangeInfo.current, 0.0001f)
     }
 }

@@ -262,8 +262,7 @@ class FakeEngine : Engine {
                                           colourComb: Boolean) =
         rec("setPicture", lumaComb, adaptiveComb, smoothLines, repair, colourComb)
 
-    @Synchronized override fun setView(aspect: Float, fit: Int, scale: Float, stereo: Boolean, eyeShift: Float) =
-        rec("setView", aspect, fit, scale, stereo, eyeShift)
+    @Synchronized override fun setView(view: ViewOpts) = rec("setView", view)
 
     @Synchronized override fun setBackdrop(on: Boolean, now: Boolean) = rec("setBackdrop", on, now)
     @Synchronized override fun setCardLabel(label: String) = rec("setCardLabel", label)
