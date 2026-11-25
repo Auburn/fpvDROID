@@ -117,7 +117,7 @@ index 57c5d0d..4503263 100644
          LI32    $2, 0xfff8
          addu    $6, $6, $2              # a2 = last sample of the bank
 diff --git a/src/receiver.cpp b/src/receiver.cpp
-index 72e29c5..4d5fc42 100644
+index 72e29c5..425fd6f 100644
 --- a/src/receiver.cpp
 +++ b/src/receiver.cpp
 @@ -3,6 +3,7 @@
@@ -218,7 +218,12 @@ index 72e29c5..4d5fc42 100644
        meta.seq = seq++;
        {
          std::lock_guard<std::mutex> l(_m);
-@@ -323,6 +357,17 @@ void Receiver::worker() {
+@@ -319,12 +353,26 @@ void Receiver::worker() {
+     // The count and the reason change together: a status() read between them would show a new
+     // restart with the old (or no) text, and the reason is the only record of why.
+     RxState next = RxState::Starting;
++    RxGaveUp gave_up = RxGaveUp::No;
+     std::string why = "stream fault (restarting): " + ss.error;
      if (!_s->reg().alive()) {
        next = RxState::Lost;
        why = "adapter lost: " + ss.error;
@@ -232,15 +237,19 @@ index 72e29c5..4d5fc42 100644
 +      // fpvDROID: wedged again before a bank came: stop now, and say why, so that the owner opens the adapter
 +      // again instead of waiting out five more failed starts
 +      next = RxState::Error;
++      gave_up = RxGaveUp::Wedged;
 +      why = "stream wedged, open the adapter again: " + ss.error;
      } else if (++consecutive_faults >= 5) {
        next = RxState::Error;
++      gave_up = RxGaveUp::StreamFailing;
        why = "stream keeps failing: " + ss.error;
-@@ -333,10 +378,17 @@ void Receiver::worker() {
+     }
+     {
+@@ -333,10 +381,17 @@ void Receiver::worker() {
        _st.state = next;
        _st.error = why;
        _st.last_fault = why;
-+      _st.wedged = ss.wedged && next == RxState::Error;
++      _st.gave_up = gave_up;
 +      if (ss.wedged && next == RxState::Starting)
 +        _st.unwedged++;
      }
@@ -256,7 +265,7 @@ index 72e29c5..4d5fc42 100644
  }
  
 diff --git a/src/receiver.h b/src/receiver.h
-index f107565..da187fb 100644
+index f107565..aadf279 100644
 --- a/src/receiver.h
 +++ b/src/receiver.h
 @@ -47,6 +47,9 @@ inline uint16_t model_pid(uint16_t vid, uint16_t pid) {
@@ -279,7 +288,23 @@ index f107565..da187fb 100644
    uint32_t gen = 0;      // stream run (changes on every restart: reset DSP state when it does)
    uint32_t cfg = 0;      // settings generation (changes only when the caller changed settings)
    double fs = 0;         // sample rate
-@@ -102,6 +106,17 @@ struct RxStatus {
+@@ -89,6 +93,15 @@ struct BankMeta {
+ 
+ using BankSink = std::function<void(const uint8_t *bank, size_t bytes, const BankMeta &)>;
+ 
++// fpvDROID: why the worker ended by itself with state Error, for an owner that acts on it (the text in
++// RxStatus::error is for people, and its wording may change).
++enum class RxGaveUp : uint8_t {
++  No,            // it has not, or it ended another way (the adapter lost, a retune that kept failing)
++  Wedged,        // the 8822B's C2H engine wedged (stream88xx.cpp, c2h_wedged) and the RX DMA pulse that frees it
++                 // did not bring a bank: opening the adapter again recovers it
++  StreamFailing, // the stream failed five starts in a row
++};
++
+ struct RxStatus {
+   RxState state = RxState::Closed;
+   uint64_t banks = 0, restarts = 0;
+@@ -102,6 +115,15 @@ struct RxStatus {
    bool settling = false; // a settings change is waiting to be applied (the run above is about to end)
    bool gapped = false;   // the current run is gapped (BankMeta::gapped)
    unsigned start_retries = 0; // stream starts repeated because the first packet never came (issue #2)
@@ -287,10 +312,8 @@ index f107565..da187fb 100644
 +  // first few of a run / late or overrun mid-run (the run goes on; before, each of these ended it and showed in
 +  // restarts). Since open().
 +  uint64_t start_late_skips = 0, mid_drops = 0;
-+  // fpvDROID: the worker ended (state Error) because the 8822B's C2H engine wedged (stream88xx.cpp, c2h_wedged)
-+  // and the RX DMA pulse that frees it did not bring a bank. Opening the adapter again recovers it; until open(),
-+  // this stays set.
-+  bool wedged = false;
++  // fpvDROID: set when the worker ends by itself (see RxGaveUp); it stays until open().
++  RxGaveUp gave_up = RxGaveUp::No;
 +  // fpvDROID: wedges freed without that, since open(): by the onboard program inside the bank (nothing lost, or a
 +  // bank), and by the pulse and new start after a wedge that got past it (a restart, counted there too).
 +  uint64_t unwedged = 0;

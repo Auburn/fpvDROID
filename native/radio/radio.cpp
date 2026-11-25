@@ -47,6 +47,16 @@ std::vector<float> spectrum_db(const std::vector<cf> &x) {
   psd.add(x.data(), x.size());
   return psd.db();
 }
+
+// The receiver's reason for stopping, as the fallback rules know it (they build without wifi-sdr).
+FallbackPolicy::Stopped stopped_of(wsdr::RxGaveUp g) {
+  switch (g) {
+    case wsdr::RxGaveUp::Wedged: return FallbackPolicy::Stopped::Wedged;
+    case wsdr::RxGaveUp::StreamFailing: return FallbackPolicy::Stopped::StreamFailing;
+    case wsdr::RxGaveUp::No: break;
+  }
+  return FallbackPolicy::Stopped::Other;
+}
 }  // namespace
 
 Radio::Radio(FrameSink frames) : _band(Sweep::kBandLo, Sweep::kBandHi, Sweep::kBandBin), _gate(std::move(frames)) {}
@@ -96,7 +106,7 @@ void Radio::open(int fd) {
     _mode_epoch++;
     _req_hz = s.freq;
     _req_rate = s.rate_sel;
-    _fb.clear();
+    _fb.adapter_opened();
     _dead = false;
     _wedged = false;
   }
@@ -280,7 +290,7 @@ bool Radio::set_watch_rate(int rate_sel) {
   std::lock_guard<std::mutex> l(_m);
   if (_watch_rate == rate_sel) return false;
   _watch_rate = rate_sel;
-  _fb.clear(true);
+  _fb.watch_rate_set();
   return true;
 }
 
@@ -362,15 +372,13 @@ void Radio::dsp_loop() {
         if (_stop) break;  // close() got in between: it stopped the receiver itself
         note_faults(st);
         if (!st.running) {
-          KP_LOGE("radio: receiver stopped%s: %s", st.wedged ? " (C2H wedged)" : "", st.error.c_str());
+          const bool wedged = st.gave_up == wsdr::RxGaveUp::Wedged;
+          KP_LOGE("radio: receiver stopped%s: %s", wedged ? " (C2H wedged)" : "", st.error.c_str());
           // nothing restarts it from here: say so, so the app can reopen the adapter (at once, if it wedged)
           std::lock_guard<std::mutex> m(_m);
           _dead = true;
-          _wedged = st.wedged;
-          if (st.wedged)
-            _fb.receiver_wedged(_mode == Mode::Watch);
-          else if (st.error.rfind("stream keeps failing", 0) == 0)  // wifi-sdr Receiver: five failed starts in a row
-            _fb.receiver_failed(_mode == Mode::Watch, wsdr::Receiver::rate_of(_req_rate));
+          _wedged = wedged;
+          _fb.receiver_stopped(stopped_of(st.gave_up), _mode == Mode::Watch, wsdr::Receiver::rate_of(_req_rate));
           break;
         }
       }
