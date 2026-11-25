@@ -2,6 +2,7 @@ package com.fpvdroid.app
 
 import android.view.SurfaceView
 import android.view.View
+import android.view.WindowManager
 import com.fpvdroid.app.FakeEngine.Call
 import com.fpvdroid.app.UsbLink.State
 import org.junit.Assert.assertEquals
@@ -468,7 +469,7 @@ class MainActivityScenariosTest : AppHarness() {
         assertTrue(gainRow.isShown)
 
         fake.clearCalls()
-        slide(gainRow as Slider, 0f, Settings.GAIN_MAX, 40f)
+        slide(gainRow as Slider, 40f)
         assertChanges(call("setWatchRate", 1), call("setGain", 40.0), call("setDiversity", false), call("setOffsetTuning", true), call("watch", f2, false))
         assertEquals(40f, savedSettings().gainDb, 0.01f)
 
@@ -518,7 +519,7 @@ class MainActivityScenariosTest : AppHarness() {
         assertEquals(Settings.CROP, savedSettings().fit)
 
         fake.clearCalls()
-        slide(control("Size") as Slider, Settings.SCALE_MIN, Settings.SCALE_MAX, 0.75f)
+        slide(control("Size") as Slider, 0.75f)
         assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 0.75f)
         // the picture is shown sharp while the slider is held, the backdrop back when it is let go
         val backdrops = fake.calls("setBackdrop")
@@ -536,26 +537,26 @@ class MainActivityScenariosTest : AppHarness() {
 
         layOut()
         fake.clearCalls()
-        slide(shownRow("Size").control as Slider, Settings.SCALE_MIN, Settings.SCALE_MAX, 0.9f)
+        slide(shownRow("Size").control as Slider, 0.9f)
         assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 0.9f, Goggles(0f, 0f, 0f))
         assertEquals(0.9f, savedSettings().gogglesScale, 0.02f)
         assertEquals(0.75f, savedSettings().scale, 0.02f)
 
         // the three that line the pictures up with the lenses: each -1..1, a fraction of the screen as far as its max
         fake.clearCalls()
-        slide(control("Eye spacing") as Slider, -1f, 1f, 0.5f)
+        slide(control("Eye spacing") as Slider, 0.5f)
         val shift = 0.5f * Settings.EYE_SHIFT_MAX
         assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 0.9f, Goggles(shift, 0f, 0f))
         assertEquals(0.5f, savedSettings().eyeSpacing, 0.03f)
 
         fake.clearCalls()
-        slide(control("Horizontal offset") as Slider, -1f, 1f, 0.5f)
+        slide(control("Horizontal offset") as Slider, 0.5f)
         val x = 0.5f * Settings.EYE_OFFSET_X_MAX
         assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 0.9f, Goggles(shift, x, 0f))
         assertEquals(0.5f, savedSettings().eyeOffsetX, 0.03f)
 
         fake.clearCalls()
-        slide(control("Vertical offset") as Slider, -1f, 1f, -0.5f)
+        slide(control("Vertical offset") as Slider, -0.5f)
         val y = -0.5f * Settings.EYE_OFFSET_Y_MAX
         assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 0.9f, Goggles(shift, x, y))
         assertEquals(-0.5f, savedSettings().eyeOffsetY, 0.03f)
@@ -566,6 +567,61 @@ class MainActivityScenariosTest : AppHarness() {
         assertView(fake.last("setView"), 16f / 9f, Settings.CROP, 0.75f)
         assertEquals(View.VISIBLE, screenSize.visibility)
         assertTrue(shownRow("Size") === screenSize)
+    }
+
+    @Test
+    fun pictureBrightnessIsTheScreensOnlyWhileThePictureFillsIt() {
+        val phones = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+        fun screen() = activity.window.attributes.screenBrightness
+        running()
+        showTab("View")
+        val slider = control("Brightness value") as Slider
+        assertFalse("no slider while the phone's own is chosen", slider.isShown)
+
+        pick(control("Screen brightness") as Segmented, 1, 2)   // Set
+        assertTrue(savedSettings().brightnessSet)
+        assertEquals("the menu keeps the phone's", phones, screen(), 0f)
+        layOut()
+        assertTrue(slider.isShown)
+
+        // held, the menu steps aside and the screen shows it; let go, the menu is back and so is the phone's
+        val lift = hold(slider, 0.9f, 0.6f)
+        assertEquals(0.6f, savedSettings().brightness, 0.02f)
+        assertEquals("while held", savedSettings().pictureBrightness, screen(), 0.0001f)
+        lift()
+        assertEquals("let go", phones, screen(), 0f)
+
+        click(preview())   // the menu closed: the picture's
+        assertEquals(Settings.screenBrightness(0.6f), screen(), 0.005f)
+        @Suppress("DEPRECATION") activity.onBackPressed()   // open again: the phone's
+        settle()
+        assertEquals(phones, screen(), 0f)
+
+        showTab("View")
+        pick(control("Screen brightness") as Segmented, 0, 2)   // Auto
+        assertFalse(savedSettings().brightnessSet)
+        click(preview())
+        assertEquals("the phone's, menu or not", phones, screen(), 0f)
+    }
+
+    /** A setting saved earlier is the screen's from the first time the menu closes. */
+    @Test
+    fun savedPictureBrightnessIsTheScreensWhenTheMenuFirstCloses() {
+        Settings(app).apply { brightnessSet = true; brightness = 1f }
+        running()
+        assertEquals(WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE, activity.window.attributes.screenBrightness, 0f)
+        click(preview())
+        assertEquals(1f, activity.window.attributes.screenBrightness, 0.001f)
+    }
+
+    /** Android's own slider curve: the ends are off and full, the middle a twelfth of the light. */
+    @Test
+    fun brightnessSliderFollowsAndroidsCurve() {
+        assertEquals(0f, Settings.screenBrightness(0f), 0f)
+        assertEquals(1f / 12, Settings.screenBrightness(0.5f), 0.001f)
+        assertEquals(1f, Settings.screenBrightness(1f), 0.001f)
+        var last = -1f
+        for (i in 0..100) Settings.screenBrightness(i / 100f).let { assertTrue("rises at ${i}%", it > last); last = it }
     }
 
     @Test

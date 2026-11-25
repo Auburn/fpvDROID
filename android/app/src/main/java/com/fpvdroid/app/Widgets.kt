@@ -369,7 +369,8 @@ class Slider(
     override fun onMeasure(w: Int, h: Int) = setMeasuredDimension(resolveSize(dpi(220f), w), resolveSize(dpi(38f), h))
 
     private val edge get() = dp(12f)
-    private fun xOf(v: Float) = edge + (v - min) / (max - min) * (width - 2 * edge)
+    /** Where [v] sits along the track, px from the left (a test's finger goes there). */
+    internal fun xOf(v: Float) = edge + (v - min) / (max - min) * (width - 2 * edge)
 
     override fun onDraw(c: Canvas) {
         val cy = height / 2f

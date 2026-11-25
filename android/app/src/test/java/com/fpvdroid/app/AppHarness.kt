@@ -318,16 +318,29 @@ abstract class AppHarness {
         tap(seg, seg.width * (index + 0.5f) / count)
     }
 
-    /** Drag a laid-out [Slider] (range [min]..[max]) to [value] and lift. */
-    fun slide(s: Slider, min: Float, max: Float, value: Float) {
+    /** A tap on a laid-out [Slider] where [value] sits: it takes that value. */
+    fun slide(s: Slider, value: Float) {
         if (s.width == 0) fail("the Slider is not laid out (is its tab shown?)")
-        val edge = s.dp(12f)
-        val x = edge + (value - min) / (max - min) * (s.width - 2 * edge)
+        val x = s.xOf(value)
         val t = SystemClock.uptimeMillis()
         touch(s, MotionEvent.ACTION_DOWN, x, s.height / 2f, t)
         settle()
         touch(s, MotionEvent.ACTION_UP, x, s.height / 2f, t)
         settle()
+    }
+
+    /** A finger down on a laid-out [Slider] where [from] sits, dragged to [to] and held there: lift it with what this returns. */
+    fun hold(s: Slider, from: Float, to: Float): () -> Unit {
+        if (s.width == 0) fail("the Slider is not laid out (is its tab shown?)")
+        val y = s.height / 2f
+        val t = SystemClock.uptimeMillis()
+        touch(s, MotionEvent.ACTION_DOWN, s.xOf(from), y, t)
+        for (i in 1..8) touch(s, MotionEvent.ACTION_MOVE, s.xOf(from + (to - from) * i / 8), y, t)
+        settle()
+        return {
+            touch(s, MotionEvent.ACTION_UP, s.xOf(to), y, t)
+            settle()
+        }
     }
 
     companion object {

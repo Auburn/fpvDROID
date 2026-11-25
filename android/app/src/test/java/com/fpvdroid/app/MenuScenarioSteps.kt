@@ -70,11 +70,8 @@ abstract class MenuScenarioSteps : AppHarness() {
         settle()
     }
 
-    /** The window x of [value] on a laid-out slider whose range is [min]..[max]. */
-    protected fun xOf(s: Slider, min: Float, max: Float, value: Float): Float {
-        val edge = s.dp(12f)
-        return at(s, 0f, 0f)[0] + edge + (value - min) / (max - min) * (s.width - 2 * edge)
-    }
+    /** The window x of [value] on a laid-out slider. */
+    protected fun xOf(s: Slider, value: Float) = at(s, 0f, 0f)[0] + s.xOf(value)
 
     protected fun midY(v: View) = at(v)[1]
 
