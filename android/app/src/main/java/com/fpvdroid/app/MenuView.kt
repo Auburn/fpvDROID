@@ -38,7 +38,7 @@ data class MenuState(
     val tone: Tone = Tone.IDLE,
     /** Over the preview's top left, beside the dot; not while the picture is [locked]. */
     val headline: String = "",
-    /** Along the top of the menu, its whole width; with this and [action] both empty, the app's name instead. */
+    /** Along the top of the menu ([StatusLine]); with this and [action] both empty ([quiet]), the app's name instead. */
     val detail: String = "",
     /** What tapping the status does ("Try again"); null: nothing. */
     val action: String? = null,
@@ -58,7 +58,16 @@ data class MenuState(
     val sweeping: Boolean = false,
     /** What the Spectrum tab draws; null: nothing (it is not on screen, or there is no radio). */
     val spectrum: Spectrum? = null,
-)
+) {
+    /** No words for the status line: the app's name stands in their place. */
+    val quiet: Boolean get() = detail.isEmpty() && action == null
+
+    /**
+     * The status line has something to say over the picture, with the menu closed: about the picture or the adapter,
+     * but not the figures of a picture that is fine ([Tone.LIVE]), which would sit over it for good.
+     */
+    val sayOverPicture: Boolean get() = !quiet && tone != Tone.LIVE
+}
 
 /**
  * The menu: everything the app has to offer, over a black screen. A rail on the left (the five tabs, and at its
@@ -68,7 +77,7 @@ data class MenuState(
  * preview is a hole: it tells the [Listener] where it is, and the native screen draws the picture there.
  *
  * Closed ([close]), the status line is all that is left of it: in its place, over the picture, while it has
- * something to say (see [lineWanted]). Touches then go through it to the picture, but for the line's action.
+ * something to say ([MenuState.sayOverPicture]). Touches then go through it to the picture, but for the line's action.
  */
 @SuppressLint("ViewConstructor")
 class MenuView(ctx: Context, private val s: Settings, private val on: Listener) : FrameLayout(ctx) {
@@ -112,7 +121,8 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     /** Open: the whole menu. Closed: the status line alone, while it has something to say. */
     var isOpen = true
         private set
-    private var lineShown = true   // the status line is showing, or coming
+    /** The Spectrum tab is on screen: only then is the spectrum worth reading for it. */
+    val showsSpectrum get() = isOpen && tab == Tab.SPECTRUM
     private val group = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }   // status line, rail + card
     internal val body = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }   // the rail and the card
     private lateinit var rail: View
@@ -130,29 +140,13 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     private var cutLeft = 0    // a camera cutout's share of either end of the screen, px
     private var cutRight = 0
 
-    // status: the dot and the headline over the preview, the detail and the action along the top (the wordmark
-    // when there are none)
+    // status: the dot and the headline over the preview; the words along the top
     private val dot = View(ctx)
-    private val wordmark = label(ctx, "fpvDROID", 11f, Skin.TEXT_3, medium = true).apply { letterSpacing = 0.32f }
-    internal val statusTitle = label(ctx, "", 13.5f, Skin.TEXT, medium = true).apply {
+    internal val statusTitle = label(ctx, "", 13.5f, Skin.TEXT, medium = true).overPicture().apply {
         maxLines = 1
         ellipsize = TextUtils.TruncateAt.END
-        setShadowLayer(dp(3f), 0f, dp(1f), Color.argb(200, 0, 0, 0))   // over the picture, whatever it shows
     }
-    // the line's words have a shadow too: with the menu closed they are over the picture
-    internal val statusDetail = label(ctx, "", 12.5f, Skin.TEXT_2).apply {
-        maxLines = 1   // a long message in full: the Signal tab
-        ellipsize = TextUtils.TruncateAt.END
-        setShadowLayer(dp(3f), 0f, dp(1f), Color.argb(200, 0, 0, 0))
-    }
-    internal val statusAction = label(ctx, "", 12.5f, Skin.ACCENT, medium = true).apply {
-        setShadowLayer(dp(3f), 0f, dp(1f), Color.argb(200, 0, 0, 0))
-    }
-    internal val statusRow = LinearLayout(ctx).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.TOP
-        setOnClickListener { if (state.action != null) on.onStatusAction() }
-    }
+    internal val statusLine = StatusLine(ctx) { on.onStatusAction() }
 
     // rail
     private val tabViews = ArrayList<TextView>()
@@ -215,11 +209,8 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         for (p in pages) card.addView(p, LayoutParams(-1, -1))
         // along the top, the whole width: a line of the status's words, in from either end as far as the tabs' and
         // the card's words are; under it the rail and the card
-        statusRow.setPadding(dpi(22f), 0, dpi(22f), 0)
-        statusRow.addView(wordmark, LinearLayout.LayoutParams(-2, -2))
-        statusRow.addView(statusDetail, LinearLayout.LayoutParams(0, -2, 1f))
-        statusRow.addView(statusAction, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dpi(14f) })
-        group.addView(statusRow, LinearLayout.LayoutParams(-1, dpi(STATUS_ROW_DP)))
+        statusLine.setPadding(dpi(22f), 0, dpi(22f), 0)
+        group.addView(statusLine, LinearLayout.LayoutParams(-1, dpi(STATUS_ROW_DP)))
         body.addView(rail, LinearLayout.LayoutParams(dpi(RAIL_DP), -1))
         body.addView(card, LinearLayout.LayoutParams(0, -1, 1f).apply { marginStart = dpi(12f) })
         group.addView(body, LinearLayout.LayoutParams(-1, 0, 1f))
@@ -303,29 +294,13 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     /** The rail and the card go; the status line stays in its place while it has something to say. */
     fun close() {
         if (!isOpen) return
+        isOpen = false        // before the peek ends: the listener hears of that with the menu already closed
         endPeek()
-        isOpen = false
         isClickable = false   // a tap anywhere but on the line's action is a tap on the picture
         render(state)
         body.animate().cancel()
         body.animate().alpha(0f).translationY(dp(10f)).setDuration(CLOSE_MS).setInterpolator(DecelerateInterpolator(1.5f))
             .withEndAction { body.visibility = View.INVISIBLE }.start()   // not GONE: the preview keeps its place
-    }
-
-    /**
-     * The status line shows while the menu is open; closed, while it has something to say about the picture or
-     * the adapter: not the app's name, nor the figures of a picture that is fine (they would sit over it for good).
-     */
-    private fun lineWanted(st: MenuState) =
-        isOpen || (st.detail.isNotEmpty() || st.action != null) && st.tone != Tone.LIVE
-
-    private fun showLine(want: Boolean) {
-        if (want == lineShown) return
-        lineShown = want
-        statusRow.animate().cancel()
-        if (want) statusRow.visibility = View.VISIBLE
-        statusRow.animate().alpha(if (want) 1f else 0f).setDuration(CLOSE_MS)
-            .withEndAction(if (want) null else Runnable { statusRow.visibility = View.INVISIBLE }).start()
     }
 
     // ------------------------------------------------------------------------------------------ rail
@@ -468,7 +443,9 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         peeking = row
         val to = if (row == null) 1f else 0f
         rail.animate().alpha(to).setDuration(PEEK_MS).start()
-        statusRow.animate().alpha(to).setDuration(PEEK_MS).start()
+        // a peek comes only with the menu open, where the line always shows: its own fade (StatusLine.show) runs
+        // only between open and closed
+        statusLine.animate().alpha(to).setDuration(PEEK_MS).start()
         // the page that is faded is the one the row is on, whatever tab is showing by the time it comes back
         val body = (if (row != null) pageBodies[tab.ordinal] else peekBody) ?: pageBodies[tab.ordinal]
         peekBody = if (row != null) body else null
@@ -498,7 +475,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     }
 
     /** Whatever was being dragged, the menu is whole again (the menu is closing, or another tab is wanted). */
-    fun endPeek() = peek(null)
+    private fun endPeek() = peek(null)
 
     /** For a picture of the peek (the screenshot test): as if the size slider were held. */
     internal fun peekSizeRow(on: Boolean) = peek(if (on) sizeRow else null)
@@ -732,23 +709,13 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
 
     // ------------------------------------------------------------------------------------------ state
     fun render(new: MenuState) {
-        val st = new.copy(found = new.found.filter { it.mhz.isFinite() && it.mhz > 0 })   // nothing to tune otherwise
-        state = st
-        // the line along the top; while it is not wanted its words are left as they were (they may be fading)
-        val want = lineWanted(st)
-        if (want) {
-            // nothing to say: the name of the app in its place (an action alone keeps its place at the end)
-            val quiet = st.detail.isEmpty() && st.action == null
-            wordmark.visibility = if (quiet) View.VISIBLE else View.GONE
-            if (statusDetail.text.toString() != st.detail) statusDetail.text = st.detail
-            statusDetail.visibility = if (quiet) View.GONE else if (st.detail.isEmpty()) View.INVISIBLE else View.VISIBLE
-            statusAction.text = st.action ?: ""
-            statusAction.visibility = if (st.action == null) View.GONE else View.VISIBLE
-        }
-        statusRow.isClickable = want && st.action != null   // else a tap there is the menu's, or the picture's
-        showLine(want)
-        if (!isOpen) return   // the rest is not on screen: open() catches it up
+        state = new.copy(found = new.found.filter { it.mhz.isFinite() && it.mhz > 0 })   // nothing to tune otherwise
+        statusLine.render(state, isOpen)
+        if (isOpen) renderBody(state)   // closed, the rest is not on screen: open() catches it up
+    }
 
+    /** The rail (the dot and the headline over the preview) and the card's pages. */
+    private fun renderBody(st: MenuState) {
         (dot.background as GradientDrawable).setColor(when (st.tone) {
             Tone.LIVE -> Skin.ACCENT
             Tone.BUSY -> Color.WHITE

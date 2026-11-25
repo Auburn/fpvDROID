@@ -206,7 +206,7 @@ class MainActivityScenariosTest : AppHarness() {
     fun theStatusLineStaysInItsPlaceOverThePictureWithTheMenuClosed() {
         running()
         layOut()
-        val row = menu.statusRow
+        val row = menu.statusLine
         fun where() = IntArray(2).also { row.getLocationInWindow(it) }.toList()
         val open = where()
         assertEquals("Looking for a picture…", line)
@@ -259,8 +259,8 @@ class MainActivityScenariosTest : AppHarness() {
         assertEquals("fpvDROID can't use the adapter without it. Ask again", line)
         layOut()
         val r = IntArray(2).also { root.getLocationInWindow(it) }
-        val a = IntArray(2).also { menu.statusAction.getLocationInWindow(it) }
-        tap(root, a[0] - r[0] + menu.statusAction.width / 2f, a[1] - r[1] + menu.statusAction.height / 2f)
+        val a = IntArray(2).also { menu.statusLine.action.getLocationInWindow(it) }
+        tap(root, a[0] - r[0] + menu.statusLine.action.width / 2f, a[1] - r[1] + menu.statusLine.action.height / 2f)
         assertEquals(State.PERMISSION, link.state)
         assertEquals(2, permissionRequests.size)
         assertEquals("a tap on the action is not a tap on the picture", View.GONE, hint.visibility)

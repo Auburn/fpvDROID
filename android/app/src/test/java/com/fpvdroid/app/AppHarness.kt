@@ -237,16 +237,16 @@ abstract class AppHarness {
     private fun shown(v: TextView) = if (v.visibility == View.VISIBLE) v.text.toString() else ""
 
     val headline: String get() = shown(menu.statusTitle)
-    val detail: String get() = shown(menu.statusDetail)
-    val action: String get() = shown(menu.statusAction)
+    val detail: String get() = shown(menu.statusLine.detail)
+    val action: String get() = shown(menu.statusLine.action)
 
     /** The words of the status line along the top, as it shows now (closed, the menu keeps it over the picture). */
-    val line: String get() = if (menu.statusRow.visibility != View.VISIBLE || menu.statusRow.alpha < 1f) ""
+    val line: String get() = if (menu.statusLine.visibility != View.VISIBLE || menu.statusLine.alpha < 1f) ""
         else listOf(detail, action).filter { it.isNotEmpty() }.joinToString(" ")
 
     /** A tap on the status, as the user does to retry. */
     fun tapStatus() {
-        menu.statusRow.performClick()
+        menu.statusLine.performClick()
         settle()
     }
 
