@@ -40,8 +40,12 @@ interface Engine {
      * chroma comb (fewer rainbows on fine detail, more decode CPU).
      */
     fun setPicture(lumaComb: Boolean, adaptiveComb: Boolean, smoothLines: Boolean, repair: Boolean, colourComb: Boolean)
-    /** How the picture is laid out on the Surface. [fit]: 0 fit, 1 stretch, 2 crop. [eyeShift]: fraction of the width. */
-    fun setView(aspect: Float, fit: Int, scale: Float, stereo: Boolean, eyeShift: Float)
+    /**
+     * How the picture is laid out on the Surface. [fit]: 0 fit, 1 stretch, 2 crop. [stereo] (goggles): the picture
+     * twice, each moved [eyeShift] toward the middle, both moved right by [offsetX] and up by [offsetY]: fractions of
+     * the width (offsetY: of the height).
+     */
+    fun setView(aspect: Float, fit: Int, scale: Float, stereo: Boolean, eyeShift: Float, offsetX: Float, offsetY: Float)
     /**
      * The menu's backdrop: black, with the picture moved into the menu's preview ([setPreview]). The picture moves
      * there and back over a moment, unless [now]. Where there is no picture, NO SIGNAL takes its place.
@@ -96,7 +100,7 @@ object Native : Engine {
     external override fun setDiversity(on: Boolean)
     external override fun setOffsetTuning(on: Boolean): Boolean
     external override fun setPicture(lumaComb: Boolean, adaptiveComb: Boolean, smoothLines: Boolean, repair: Boolean, colourComb: Boolean)
-    external override fun setView(aspect: Float, fit: Int, scale: Float, stereo: Boolean, eyeShift: Float)
+    external override fun setView(aspect: Float, fit: Int, scale: Float, stereo: Boolean, eyeShift: Float, offsetX: Float, offsetY: Float)
     external override fun setBackdrop(on: Boolean, now: Boolean)
     external override fun setPreview(left: Int, top: Int, right: Int, bottom: Int, radius: Float)
     external override fun setCardLabel(label: String)

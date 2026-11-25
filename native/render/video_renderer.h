@@ -27,8 +27,11 @@ struct ViewOpts {
   Fit fit = Fit::Fit;
   float scale = 1;         // the picture's size against what `fit` gives, about its window's centre
   bool stereo = false;     // two windows, the left and right halves of the viewport, the same picture in both
-  float eye_shift = 0;     // stereo: each picture moved toward the middle of the viewport (+) or away (-), as a
-                           // fraction of the viewport's width (lens spacing differs between goggles)
+  // stereo only (lens spacing, and where the phone sits, differ between goggles):
+  float eye_shift = 0;     // each picture moved toward the middle of the viewport (+) or away (-), as a fraction of
+                           // the viewport's width
+  float offset_x = 0;      // both windows and their pictures moved right (+) or left (-), a fraction of the width
+  float offset_y = 0;      // both moved up (+) or down (-), a fraction of the viewport's height
 };
 
 // The menu's preview: where it is on the viewport, and its corners' radius (pixels).

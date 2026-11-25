@@ -164,7 +164,7 @@ class MenuScreenshotTest {
 
     @Test @Config(qualifiers = PHONE)
     fun viewGoggles() = shoot("view_goggles", Tab.VIEW, live, 2400, 1080, {
-        tuned(); goggles = true; wide = true; fit = Settings.CROP; scale = 0.85f; eyeSpacing = 0.3f
+        tuned(); goggles = true; wide = true; fit = Settings.CROP; gogglesScale = 0.85f; eyeSpacing = 0.3f; eyeOffsetY = 0.04f
     })
 
     @Test @Config(qualifiers = PHONE)

@@ -45,8 +45,9 @@ it, a picture that has stopped), full size or in the preview, colour bars show t
   channel. Only analog video can be watched, so picking a digital channel tunes nothing.
 - **View** — aspect ratio (4:3, or 16:9 for a widescreen camera), scaling (**Fit** the whole picture,
   **Stretch** it to the screen, or **Crop** it to fill the screen), size (50–150 %), and **Goggles**: the
-  picture twice, side by side, for goggles that hold a phone, with an eye spacing slider to line the two
-  pictures up with the lenses.
+  picture twice, side by side, for goggles that hold a phone. Goggles have a size of their own (in place of
+  the screen's), and to line the two pictures up with the lenses an eye spacing slider and a horizontal and
+  vertical offset that move both together.
 - **Picture** — comb filter (sharper, no echo after edges), clean OSD edges (no rainbow fringe around text),
   smooth lines (no stair steps, no shimmer), sparkle repair (for a weak signal), colour comb (fewer rainbows
   on fine detail). The first three are on by default. Smooth lines and sparkle repair work on every camera;
@@ -74,7 +75,7 @@ unplugged, the radio being started again), the menu opens by itself to say so, a
 picture is back unless it was touched meanwhile. After 30 s in the background the adapter is let go; it is
 opened and tuned again when the app returns.
 
-Dragging the Size or Eye spacing slider makes the menu step aside and shows the picture sharp, so the
+Dragging the Size slider or a goggles slider makes the menu step aside and shows the picture sharp, so the
 change can be judged as it is made.
 
 ## Web version
@@ -177,6 +178,7 @@ KP_SIM_FILE=rec/r4.cs16 KP_SIM_DROP_EVERY=700 build/desktop/kp_sim --watch 5769 
 KP_SIM_FILE=rec/r4.cs16 KP_SIM_RESTART_EVERY_MS=1500 build/desktop/kp_sim --watch 5769   # a stream that restarts every 1.5 s: torn frames hidden, then 20 MS/s
 KP_SIM_FILE=rec/r4.cs16 build/desktop/kp_sim --watch 5769 --msps 20               # watch at 20 MS/s (kp_live takes --msps too)
 build/desktop/kp_render out.ppm --view 2400x1080 --aspect 16:9 --fit crop --stereo   # what a view setting draws
+build/desktop/kp_render out.ppm --scale 0.8 --stereo --eye -0.02 --offset 0,0.04   # goggles: each picture 2 % of the width further out, both raised 4 % of the height
 build/desktop/kp_render out.ppm --nofeed --label R8 --inset 1 --box 68,722,493,289 --radius 37   # no picture on R8, in the menu's preview
 build/desktop/kp_replay ../vtx-spike/rec/demo.cs16            # lock numbers
 build/desktop/kp_replay ../vtx-spike/rec/r4.cs16 --cnr 8      # with noise added (CNR in an 18 MHz channel)

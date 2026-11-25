@@ -57,7 +57,12 @@ class Settings(private val prefs: SharedPreferences) {
     var fit by pref("fit", FIT)
     var scale by pref("scale", 1f)                           // SCALE_MIN..SCALE_MAX
     var goggles by pref("goggles", false)
+    // goggles: their own size, in place of scale
+    var gogglesScale by pref("goggles_scale", 1f)            // SCALE_MIN..SCALE_MAX
     var eyeSpacing by pref("eye_spacing", 0f)                // -1..1: pictures apart .. together
+    // fractions of the screen's width (up or down: of its height)
+    var eyeOffsetX by pref("eye_offset_x", 0f)               // both moved right (+) or left (-): ±EYE_OFFSET_X_MAX
+    var eyeOffsetY by pref("eye_offset_y", 0f)               // both moved up (+) or down (-): ±EYE_OFFSET_Y_MAX
     // picture
     var lumaComb by pref("luma_comb", true)
     var cleanOsd by pref("clean_osd", true)
@@ -81,6 +86,8 @@ class Settings(private val prefs: SharedPreferences) {
     }
 
     val aspect get() = if (wide) 16f / 9f else 4f / 3f
+    /** The picture's size as shown: with goggles, theirs. */
+    val viewScale get() = if (goggles) gogglesScale else scale
     /** Fraction of the screen width each eye's picture moves toward the middle. */
     val eyeShift get() = eyeSpacing * EYE_SHIFT_MAX
 
@@ -110,6 +117,8 @@ class Settings(private val prefs: SharedPreferences) {
         const val SCALE_MIN = 0.5f
         const val SCALE_MAX = 1.5f
         const val EYE_SHIFT_MAX = 0.08f
+        const val EYE_OFFSET_X_MAX = 0.1f
+        const val EYE_OFFSET_Y_MAX = 0.2f
         const val GAIN_MAX = 45f
     }
 }

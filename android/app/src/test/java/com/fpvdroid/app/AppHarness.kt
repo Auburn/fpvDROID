@@ -264,6 +264,11 @@ abstract class AppHarness {
         views(row).any { it is TextView && it.text.toString() == title }
     }.control
 
+    /** The row titled [title] that is showing: with goggles on, theirs stands in for the screen's Size row. */
+    fun shownRow(title: String): SettingRow = views(menu).filterIsInstance<SettingRow>().first { row ->
+        row.visibility == View.VISIBLE && views(row).any { it is TextView && it.text.toString() == title }
+    }
+
     fun tile(name: String): ChannelTile = views(menu).filterIsInstance<ChannelTile>().first { it.channel?.name == name }
 
     /** Click [v] the way a finger would only if it can be pressed. */
