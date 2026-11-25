@@ -49,7 +49,7 @@ class MainActivityScenariosTest : AppHarness() {
         val c = changes()
         assertTrue(c.toString(), call("setBackdrop", true, true) in c)
         // luma comb, clean OSD, smooth lines; no repair, no colour comb
-        assertTrue(c.toString(), call("setPicture", true, true, true, false, false) in c)
+        assertTrue(c.toString(), call("setPicture", true, true, true, false, false, true) in c)
         assertTrue(c.toString(), call("setView", ViewOpts(4f / 3f, Settings.FIT, 1f)) in c)
         assertTrue(c.toString(), call("setWatchRate", 1) in c)
         assertTrue(c.toString(), call("setDiversity", false) in c)
@@ -285,27 +285,95 @@ class MainActivityScenariosTest : AppHarness() {
 
         fake.clearCalls()
         click(comb)   // off
-        assertChanges(call("setPicture", false, false, true, false, false))
+        assertChanges(call("setPicture", false, false, true, false, false, true))
         assertFalse(savedSettings().lumaComb)
         assertFalse("Clean OSD edges needs the comb filter", clean.isEnabled)
 
         fake.clearCalls()
         click(comb)   // on again: clean OSD (still on) counts again
-        assertChanges(call("setPicture", true, true, true, false, false))
+        assertChanges(call("setPicture", true, true, true, false, false, true))
 
         fake.clearCalls()
         click(clean)  // off
-        assertChanges(call("setPicture", true, false, true, false, false))
+        assertChanges(call("setPicture", true, false, true, false, false, true))
         assertFalse(savedSettings().cleanOsd)
 
         fake.clearCalls()
         click(control("Smooth lines"))
-        assertChanges(call("setPicture", true, false, false, false, false))
+        assertChanges(call("setPicture", true, false, false, false, false, true))
 
         fake.clearCalls()
         click(control("Sparkle repair"))
-        assertChanges(call("setPicture", true, false, false, true, false))
+        assertChanges(call("setPicture", true, false, false, true, false, true))
         assertTrue(savedSettings().sparkleRepair)
+    }
+
+    @Test
+    fun vsyncShowsWholePicturesAndWithoutItStripsGoUp() {
+        running()
+        showTab("Picture")
+        assertFalse("off unless it was set", savedSettings().vsync)
+        fake.clearCalls()
+        click(control("Vsync"))
+        assertChanges(call("setPicture", true, true, true, false, false, false))   // no strips
+        assertTrue(savedSettings().vsync)
+        fake.clearCalls()
+        click(control("Vsync"))
+        assertChanges(call("setPicture", true, true, true, false, false, true))
+        assertFalse(savedSettings().vsync)
+    }
+
+    @Test
+    fun maxScreenHzIsKeptAndSaysTheScreensRate() {
+        running()
+        showTab("Picture")
+        assertTrue("on unless it was set", savedSettings().maxScreenHz)
+        val said = { views(menu).filterIsInstance<SettingRow>().first { it.control === control("Max screen Hz") }.detailView.text.toString() }
+        assertTrue(said(), said().endsWith("\nScreen now 60 Hz"))
+        click(control("Max screen Hz"))
+        assertFalse(savedSettings().maxScreenHz)
+        click(control("Max screen Hz"))
+        assertTrue(savedSettings().maxScreenHz)
+        // an open menu can hold the screen at a faster rate than it has with the picture alone: both are said
+        menu.showScreenHz(120f, 59.94f)
+        assertTrue(said(), said().endsWith("\nScreen now 120 Hz, 59.94 Hz with the menu closed"))
+        menu.showScreenHz(120f, 120f)
+        assertTrue(said(), said().endsWith("\nScreen now 120 Hz"))
+    }
+
+    @Test
+    fun maxScreenHzHoldsTheDisplaysFastestModeAtItsSize() {
+        val dm = app.getSystemService(android.hardware.display.DisplayManager::class.java)
+        val now = dm.getDisplay(android.view.Display.DEFAULT_DISPLAY).mode
+        fun mode(id: Int, w: Int, h: Int, hz: Float) =
+            org.robolectric.shadows.ShadowDisplayManager.ModeBuilder.modeBuilder(id).setWidth(w).setHeight(h).setRefreshRate(hz).build()
+        val w = now.physicalWidth
+        val h = now.physicalHeight
+        val fast = now.modeId + 1
+        org.robolectric.shadows.ShadowDisplayManager.setSupportedModes(android.view.Display.DEFAULT_DISPLAY,
+            mode(now.modeId, w, h, 60f), mode(fast, w, h, 120f), mode(fast + 1, w / 2, h / 2, 144f))
+        val held = { activity.window.attributes.preferredDisplayModeId }
+        running()
+        assertEquals("before any picture: the fastest at the screen's own size", fast, held())
+        showTab("Picture")
+        click(control("Max screen Hz"))
+        assertEquals("none without Max screen Hz", 0, held())
+        click(control("Max screen Hz"))
+        assertEquals(fast, held())
+    }
+
+    @Test
+    fun theDisplaysRefreshRateReachesTheEngine() {
+        // (Robolectric cannot change a display's mode, so a change of refresh rate itself is not tried here)
+        running()
+        assertEquals("told at the start", listOf(call("setDisplayRefresh", 60f)), fake.calls("setDisplayRefresh"))
+        fake.clearCalls()
+        org.robolectric.shadows.ShadowDisplayManager.changeDisplay(android.view.Display.DEFAULT_DISPLAY, "w400dp-h800dp")
+        advance(100)
+        controller.pause().stop()
+        controller.restart().resume()
+        advance(100)
+        assertEquals("not again while it is the same", emptyList<Call>(), fake.calls("setDisplayRefresh"))
     }
 
     @Test
@@ -314,7 +382,7 @@ class MainActivityScenariosTest : AppHarness() {
         showTab("Picture")
         fake.clearCalls()
         click(control("Colour comb"))
-        assertChanges(call("setPicture", true, true, true, false, true))
+        assertChanges(call("setPicture", true, true, true, false, true, true))
         assertTrue(savedSettings().colourComb)
     }
 

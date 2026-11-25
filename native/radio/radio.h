@@ -30,6 +30,7 @@
 namespace wsdr {
 class Receiver;
 struct RxStatus;
+struct BankMeta;
 }
 
 namespace kp {
@@ -45,6 +46,8 @@ struct Pilot {
 
 class Radio {
 public:
+  // frames: the watched channel's pictures, on the decode thread, past the FrameGate; in strips while
+  // PictureOpts::strips is on (low latency: Frame::y0, y1). Their LineTimes say when the adapter took them.
   explicit Radio(FrameSink frames);
   ~Radio();
   Radio(const Radio &) = delete;
@@ -122,11 +125,12 @@ private:
     uint64_t seq;
     uint32_t gen;
     double fs, centre_hz, shift_hz;
+    double t_sampled;  // when its last sample was taken (steady clock, s): it came in, less the adapter's shipping
   };
   enum Path { kPathA = 0, kPathB = 1 };
   void dsp_loop();
   void decode_loop();
-  void on_bank(const uint8_t *b, size_t n, uint64_t seq, uint32_t gen, double fs, double centre, double shift);
+  void on_bank(const uint8_t *b, size_t n, const wsdr::BankMeta &m);
   // watching: off-centre tuning applies (the hardware centre recomputed for this rate)
   void tune(double hz, int rate_sel, bool watching = false);
   void begin_watch();
@@ -145,7 +149,8 @@ private:
   bool begin_recording(const Bank &b);
   void end_recording();
   void combine_antennas(const Bank &b, bool gap, int64_t t_ms);
-  void demod_for_decoder(bool gap);
+  void demod_for_decoder(bool gap, double t_sampled);
+
   // the steps of a scan or a sweep (_steps), each a retune
   void start_steps(std::vector<double> plan);
   bool next_step();
@@ -206,6 +211,7 @@ private:
   FrameGate _gate;  // between the decoders and the frame sink: the frames torn by a hole in the stream stop here
   std::thread _decoder;
   DecodeQueue _decq;
+
   double _dload = 0;
 
   // DSP-thread state

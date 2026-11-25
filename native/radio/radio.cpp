@@ -123,9 +123,7 @@ void Radio::open(int fd) {
   _started = false;
   _dsp = std::thread([this] { dsp_loop(); });
   _decoder = std::thread([this] { decode_loop(); });
-  _rx->start([this](const uint8_t *b, size_t n, const wsdr::BankMeta &m) {
-    on_bank(b, n, m.seq, m.gen, m.fs, m.centre_hz, m.shift_hz);
-  });
+  _rx->start([this](const uint8_t *b, size_t n, const wsdr::BankMeta &m) { on_bank(b, n, m); });
   _started = true;
 }
 
@@ -163,7 +161,10 @@ void Radio::close() {
 }
 
 // Receiver stream thread: copy only.
-void Radio::on_bank(const uint8_t *b, size_t n, uint64_t seq, uint32_t gen, double fs, double centre, double shift) {
+void Radio::on_bank(const uint8_t *b, size_t n, const wsdr::BankMeta &m) {
+  // when its last sample was taken: now, less the adapter's own shipping time (the USB transfer is not counted)
+  const double t_sampled =
+      std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count() - m.end_us * 1e-6;
   thread_local bool boosted = false;
   if (!boosted) {
     boosted = true;
@@ -185,7 +186,7 @@ void Radio::on_bank(const uint8_t *b, size_t n, uint64_t seq, uint32_t gen, doub
       _q.pop_front();
       _dropped++;
     }
-    _q.push_back(Bank{std::move(v), seq, gen, fs, centre, shift});
+    _q.push_back(Bank{std::move(v), m.seq, m.gen, m.fs, m.centre_hz, m.shift_hz, t_sampled});
   }
   _banks++;
   _qcv.notify_one();
@@ -589,7 +590,7 @@ void Radio::handle_watch(Bank &b) {
   measure_snr(_iq, b.fs, b.shift_hz);  // path A, as without combining
   record_bank(b);                      // both paths as they came in
   combine_antennas(b, gap, t);
-  demod_for_decoder(gap);
+  demod_for_decoder(gap, b.t_sampled);
 }
 
 // Two-antenna video: path B lined up and turned into step with A and both weighted by their SNR, in place of A
@@ -625,11 +626,12 @@ void Radio::combine_antennas(const Bank &b, bool gap, int64_t t_ms) {
 }
 
 // _iq through the discriminator (this thread's half of the work), then on to the decode thread. gap: the frames
-// around this block are torn (FrameGate).
-void Radio::demod_for_decoder(bool gap) {
+// around this block are torn (FrameGate). t_sampled: when its last sample was taken.
+void Radio::demod_for_decoder(bool gap, double t_sampled) {
   DemodBlock blk = _decq.blank();
   blk.fe = _fe;
   blk.gap = gap;
+  blk.t_sampled = t_sampled;
   _fe->set_picture(_picture.load(std::memory_order_relaxed));  // whatever set_picture() last said, block by block
   _fe->demod(_iq.data(), _iq.size(), blk.d, blk.bad);
   _decq.push(std::move(blk));
@@ -721,7 +723,7 @@ void Radio::decode_loop() {
       _fps_t0_ms = now_ms();
     }
     if (blk.gap) _gate.gap(now_ms());  // the frame this block is in is torn, and the next while the decoder re-phases
-    cur->decode(blk.d, blk.bad);
+    cur->decode(blk.d, blk.bad, blk.t_sampled);
     busy += std::chrono::duration<double>(std::chrono::steady_clock::now() - ta).count();
     _decq.recycle(std::move(blk));
     const int64_t t = now_ms();

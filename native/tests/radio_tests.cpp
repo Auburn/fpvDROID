@@ -306,7 +306,7 @@ static void gate_hides_the_frames_after_a_gap() {
   int shown = 0;
   FrameGate g([&](const Frame &) { shown++; });
   const FrameSink in = g.sink();
-  const Frame f{nullptr, 0, 0, nullptr};
+  const Frame f{nullptr, 0, 0, nullptr, 0, 0};
   in(f);
   in(f);
   CHECK(shown == 2 && g.hidden() == 0);
@@ -320,7 +320,7 @@ static void gate_hides_the_frames_after_a_gap() {
 static void gate_hides_at_most_so_often() {
   int shown = 0;
   FrameGate g([&](const Frame &) { shown++; });
-  const Frame f{nullptr, 0, 0, nullptr};
+  const Frame f{nullptr, 0, 0, nullptr, 0, 0};
   g.gap(1000);
   g.frame(f);
   // more gaps close behind: the frames already marked go, no new ones are
@@ -337,7 +337,7 @@ static void gate_hides_at_most_so_often() {
 static void gate_switched_off_and_reset() {
   int shown = 0;
   FrameGate g([&](const Frame &) { shown++; });
-  const Frame f{nullptr, 0, 0, nullptr};
+  const Frame f{nullptr, 0, 0, nullptr, 0, 0};
   g.set_enabled(false);
   g.gap(1000);
   g.frame(f);
@@ -350,6 +350,27 @@ static void gate_switched_off_and_reset() {
   g.reset();
   g.frame(f);
   CHECK(shown == 2 && g.hidden() == 0);
+}
+
+// A picture that comes in strips (low latency) is hidden from the gap on: the strips before the gap were shown, the
+// rest of that picture's and all of the next one's go nowhere, and the pictures count as hidden when they finish.
+static void gate_hides_the_strips_of_hidden_frames() {
+  int strips = 0, finished = 0;
+  FrameGate g([&](const Frame &f) { (f.finished() ? finished : strips)++; });
+  const FrameSink in = g.sink();
+  const Frame top{nullptr, 720, 480, nullptr, 0, 64}, bottom{nullptr, 720, 480, nullptr, 448, 480};
+  in(top);
+  g.gap(1000);  // in the middle of a picture
+  in(top);
+  in(bottom);
+  CHECK(g.hidden() == 1);
+  in(top);
+  in(top);
+  in(bottom);
+  CHECK(strips == 1 && finished == 0 && g.hidden() == FrameGate::kFrames);
+  in(top);
+  in(bottom);
+  CHECK(strips == 2 && finished == 1);
 }
 
 // ---------------------------------------------------------------------------------------- DecodeQueue
@@ -628,6 +649,7 @@ int main() {
   gate_hides_the_frames_after_a_gap();
   gate_hides_at_most_so_often();
   gate_switched_off_and_reset();
+  gate_hides_the_strips_of_hidden_frames();
   queue_in_order();
   queue_full_loses_the_oldest_and_keeps_its_gap();
   queue_buffers_go_round();

@@ -12,7 +12,9 @@ namespace kp {
 // Sits between the decoders and the screen. After a hole in the stream (a restart, a lost block) the frame the
 // decoder is in, and the next while it re-phases, are torn: those kFrames go nowhere, and the screen keeps the
 // last whole one. At most once every kEveryMs: a stream with holes several times a second shows torn frames
-// rather than a frozen picture (so at most 4 frames a second are hidden).
+// rather than a frozen picture (so at most 4 frames a second are hidden). A picture that comes in strips (low
+// latency, PictureOpts::strips) is hidden from the hole on: none of its frames goes on until kFrames pictures
+// have finished (Frame::finished()).
 //
 // gap() and the frames come from the decode thread; the rest may be called from any thread. The clock is the
 // caller's (ms of one steady clock).
@@ -38,7 +40,7 @@ public:
 private:
   FrameSink _out;
   std::atomic<bool> _on{true};
-  std::atomic<int> _left{0};  // frames still to hide
+  std::atomic<int> _left{0};  // pictures still to hide
   std::atomic<uint64_t> _hidden{0};
   int64_t _last_ms = std::numeric_limits<int64_t>::min() / 2;  // when frames were last marked (decode thread)
 };

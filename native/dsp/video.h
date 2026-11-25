@@ -26,13 +26,30 @@ struct VideoStd {
 };
 extern const VideoStd kNtsc, kPal;
 
-// A finished picture, 4 bytes per pixel (R, G, B, 0xff). Valid only during the callback.
+// When the lines of a picture, or of a part of one, were taken: for telling how old they are on screen. On the
+// steady clock, in seconds: when the adapter took the sample that was the decoder's newest as a line was drawn,
+// reckoned from the time given with each block (FrontEnd::decode). 0: not known (no time was given, or none of the
+// lines is drawn). first: the first line drawn of those in the part, last: the last.
+struct LineTimes {
+  double t_first = 0, t_last = 0;
+};
+
+// The picture, 4 bytes per pixel (R, G, B, 0xff), with its lines [y0, y1) new since the frame before. Valid only
+// during the callback.
+// Normally every frame is a finished picture with all of its lines new: [0, height). With low latency
+// (PictureOpts::strips) a field goes out as several frames instead, each as soon as its lines are drawn: in order
+// down the picture without gaps or overlaps, from line 0 to the bottom. The one that reaches the bottom finishes
+// the picture (finished()); until then the lines from y1 down are still the picture before's.
 struct Frame {
-  const uint8_t *data;
-  int width, height;  // 720 x 480 (NTSC) / 720 x 576 (PAL)
+  const uint8_t *data;  // the whole picture, line 0 first
+  int width, height;    // 720 x 480 (NTSC) / 720 x 576 (PAL)
   const VideoStd *std;
+  int y0, y1;           // the lines that are new with this frame ...
+  LineTimes times{};    // ... and when they were taken
+  bool finished() const { return y1 >= height; }
 };
 using FrameSink = std::function<void(const Frame &)>;
+
 
 struct DecoderStats {
   bool acquiring = true;
@@ -87,7 +104,18 @@ struct PictureOpts {
   // Chroma comb (NTSC): an adaptive 3-line comb for the colour: fewer rainbows on fine detail and OSD text, for
   // ~15 % more decode CPU. Each line is then drawn one line late, combed with the lines above and below it.
   bool chroma_comb : 1 = false;
+  // Low latency (DecoderOpts::fields): each field goes out in strips, frames with about kStripRows of its lines new
+  // (Frame::y0, y1), each as soon as those are drawn, instead of as one frame once the field has ended: the top of
+  // the picture reaches the screen a field earlier. Lines sparkle repair may still redraw, and with smooth lines the
+  // line below the newest one, wait for the next strip. Takes effect at the next field. Only for a sink that takes
+  // a picture in parts (one that wants whole pictures would have to wait for Frame::finished()).
+  // From the Play RX fork's line sink (github.com/scerstt/PlayRX).
+  bool strips : 1 = false;
 };
+
+// Low latency: how many field lines a strip (PictureOpts::strips) holds: ~2 ms of picture, 8 strips a field NTSC,
+// 9 PAL.
+constexpr int kStripRows = 32;
 
 class Decoder;
 class ClickDetector;
@@ -106,8 +134,9 @@ public:
   // decode() -> frames. Each half is single-threaded.
   // bad (sparkle repair): per output sample, 1 = the carrier collapsed there (a click). demod() leaves it empty
   // while sparkle repair is off, and decode() takes an empty one as no marks.
+  // t_end: when the adapter took the last sample of d (steady clock, s; 0: not known), for the frames' LineTimes.
   void demod(const cf *x, size_t n, std::vector<float> &out, std::vector<uint8_t> &bad);
-  void decode(const std::vector<float> &d, const std::vector<uint8_t> &bad);
+  void decode(const std::vector<float> &d, const std::vector<uint8_t> &bad, double t_end = 0);
   DecoderStats stats() const;
   double fs_demod() const { return _fs_out; }
 

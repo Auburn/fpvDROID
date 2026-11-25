@@ -19,7 +19,9 @@ endif()
 
 # ---- the picture on screen: an OpenGL ES 3 renderer (the app's Surface; off screen in kp_render) ----
 if(ANDROID)
-  add_library(fpvdroid_render STATIC render/video_renderer.cpp render/no_signal.cpp)
+  # ... and what the app's screen (render/screen.h) has besides: the display's timing, front-buffer drawing
+  add_library(fpvdroid_render STATIC render/video_renderer.cpp render/no_signal.cpp render/latency.cpp
+              render/display_timing.cpp render/front_buffer.cpp)
   target_link_libraries(fpvdroid_render PUBLIC fpvdroid_dsp GLESv3 EGL)
 else()
   find_package(PkgConfig QUIET)
@@ -27,7 +29,7 @@ else()
     pkg_check_modules(KP_GLES IMPORTED_TARGET QUIET egl glesv2)  # e.g. Mesa: libegl-dev libgles-dev
   endif()
   if(KP_GLES_FOUND)
-    add_library(fpvdroid_render STATIC render/video_renderer.cpp render/no_signal.cpp)
+    add_library(fpvdroid_render STATIC render/video_renderer.cpp render/no_signal.cpp render/latency.cpp)
     target_link_libraries(fpvdroid_render PUBLIC fpvdroid_dsp PkgConfig::KP_GLES)
   endif()
 endif()
@@ -109,6 +111,11 @@ if(NOT ANDROID)
   target_link_libraries(kp_spectrum_tests PRIVATE fpvdroid_dsp)
   target_compile_options(kp_spectrum_tests PRIVATE -O2 -Wall -Wextra)
   add_test(NAME spectrum COMMAND kp_spectrum_tests)
+  # the screen's picture delay (render/latency.h: no GL in it)
+  add_executable(kp_screen_tests tests/screen_tests.cpp render/latency.cpp)
+  target_include_directories(kp_screen_tests PRIVATE render)
+  target_compile_options(kp_screen_tests PRIVATE -O2 -Wall -Wextra)
+  add_test(NAME screen COMMAND kp_screen_tests)
 endif()
 
 # ---- Android JNI ----

@@ -112,4 +112,39 @@ class RadioStatus private constructor(s: JSONObject) {
     }
 }
 
+/**
+ * How old the picture is on screen, over the last second or so: the JSON of latency_json
+ * (native/render/latency.cpp), read once. Its keys are named here and nowhere else in the app.
+ *
+ * From the adapter taking a line to that line on the screen, measured as far along that way as the display lets it
+ * be: each of the three is null where there is no such measurement.
+ */
+class PictureDelay private constructor(o: JSONObject) {
+    /** A delay at the two ends of the picture: its top line and its bottom line. */
+    class Ends(val topMs: Double, val bottomMs: Double)
+
+    /** To the display showing it, as the display itself says. */
+    val shown: Ends? = o.ends("shown")
+    /**
+     * ... as the compositor expected to show it, where the display gives no time for each frame. With [front]: to
+     * it being drawn, plus half a refresh.
+     */
+    val expected: Ends? = o.ends("expected")
+    /** To the frame being handed to the display. */
+    val queued: Ends? = o.ends("queued")
+    /** The display's refresh rate; 0: not known. */
+    val refreshHz = o.num("refresh_hz")
+    /** Front-buffer drawing (a debug switch): the picture is drawn straight into what the display shows. */
+    val front = o.optBoolean("front")
+
+    companion object {
+        /** Throws [org.json.JSONException] for text that is not JSON at all. */
+        fun parse(json: String) = PictureDelay(JSONObject(json))
+    }
+}
+
 private fun JSONObject.num(key: String): Double = optDouble(key, 0.0).let { if (it.isFinite()) it else 0.0 }
+
+/** The pair "<name>_top_ms", "<name>_bottom_ms"; null where there is no top (nothing measured). */
+private fun JSONObject.ends(name: String): PictureDelay.Ends? =
+    num("${name}_top_ms").takeIf { it > 0 }?.let { PictureDelay.Ends(it, num("${name}_bottom_ms")) }

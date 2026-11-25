@@ -39,6 +39,9 @@ Their comments are marked `fpvDROID:`. How each was found, and what it measured 
 - **A restart leaves a shorter hole:** 10 ms between starts instead of 100, and a drain of 10 ms instead of 30.
 - **Whether the link is SuperSpeed** comes from the descriptors when the kernel cannot say (older Android
   kernels).
+- **When a bank's samples were taken:** `BankMeta::end_us` (from the user's Play RX fork) is each bank's shipping
+  time on the adapter's own clock, from its last sample to its last packet. With the time the bank came in, that
+  says when its samples were taken (the picture-delay readout).
 
 ## Applying
 

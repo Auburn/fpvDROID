@@ -5,11 +5,13 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
+import android.hardware.display.DisplayManager
 import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.Display
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.Surface
@@ -71,7 +73,25 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     private var noVideoFound = false       // the last scan came back empty
     private var lastDropped = 0L
     private var overloadedUntil = 0L
-    private var frameRateFor = ""
+    /** Which refresh rate the display is asked for ([matchDisplayTo]). [word]: its name in the "refresh" debug extra. */
+    private enum class RefreshAsk(val word: String) {
+        FIELD("field"),   // the camera's field rate, so that frames do not beat against the refresh
+        MAX("max"),       // the fastest the display has
+        NONE("none"),     // none of its own: whatever the display runs at
+    }
+    private var asked: Pair<RefreshAsk, String>? = null   // what the display was last asked for, and for which picture
+    private var displayStd = ""            // the camera's standard the display was last asked to fit ("" none yet)
+    /** Debug ("refresh" extra: "field", "max" or "none"): in place of what [matchDisplayTo] would ask for. */
+    private var refreshOverride: RefreshAsk? = null
+    private var toldRefresh = 0f           // the display's refresh rate as last told to the engine ([tellRefresh])
+    private var flyingHz = 0f              // ... and as it was with the menu closed, the picture alone (0: not seen yet)
+    private val displayWatch = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) {}
+        override fun onDisplayRemoved(displayId: Int) {}
+        override fun onDisplayChanged(displayId: Int) {
+            if (displayId == shownOn()?.displayId) tellRefresh()
+        }
+    }
     private var scanOnReturn = false       // a scan is owed: the first one, or one the background cut short
     private var scanStartedAt = 0L         // when the last scan began (elapsedRealtime); 0: none this session
     private var statusBroken = false
@@ -99,6 +119,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         showChannel()
         engine.setBackdrop(true, true)
         buildUi()
+        matchDisplayTo(displayStd)   // Max screen Hz holds the display's fastest mode with or without a picture
         link = UsbLink(this, engine, this)
         handleIntent(intent)
         link.start()
@@ -112,6 +133,9 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
 
     /**
      * adb shell am start -n com.fpvdroid.app/.MainActivity [--es mode usbtest] [--ef gain 30] [--ef record 3] [--ez testcard true]
+     * Picture delay: [--ez vsync true] (the Picture tab's Vsync), [--es refresh field|max|none] (the display rate
+     * asked for, in place of what Max screen Hz says: the field rate, the display's fastest, or none),
+     * [--ez menu false] (the menu closed, the picture full size, as when flying; true opens it).
      * USB debugging: [--es env WSDR_URB_DEPTH=64,OTHER=1] (wifi-sdr / devourer switches, in place from the next
      * open; KEY= removes one), [--ez soak true] (a 40 MS/s stream test after every open instead of watching: how long
      * the link holds up, open after open).
@@ -139,6 +163,23 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
             if (::menu.isInitialized) menu.syncGain()
             onSignal()
         }
+        if (i.hasExtra("vsync")) {   // the same as the Picture tab's Vsync
+            settings.vsync = i.getBooleanExtra("vsync", false)
+            engine.log("debug: vsync ${settings.vsync}")
+            if (::menu.isInitialized) menu.syncVsync()
+            applyPicture()
+        }
+        if (i.hasExtra("menu") && ::menu.isInitialized) {
+            val open = i.getBooleanExtra("menu", true)
+            engine.log("debug: menu ${if (open) "open" else "closed"}")
+            if (open) openMenu() else closeMenu()
+        }
+        i.getStringExtra("refresh")?.let {
+            refreshOverride = RefreshAsk.entries.firstOrNull { ask -> ask.word == it }
+            engine.log("debug: display refresh ${refreshOverride?.word ?: "as the settings say"}")
+            asked = null
+            if (::video.isInitialized) matchDisplayTo(displayStd)
+        }
         if (i.hasExtra("record")) {
             val secs = i.getFloatExtra("record", 3f).toDouble()
             val name = "rec-" + java.text.SimpleDateFormat("HHmmss", java.util.Locale.US).format(java.util.Date())
@@ -152,6 +193,8 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         ui.removeCallbacks(closeInBackground)
         ui.removeCallbacks(poll)
         ui.post(poll)
+        getSystemService(DisplayManager::class.java)?.registerDisplayListener(displayWatch, ui)
+        tellRefresh()   // it may have changed while the app was away
         if (!link.started) {
             // the adapter was let go in the background: it takes a few seconds to come back (onRadioUp then
             // tunes), and until then the menu says so instead of a black screen saying nothing
@@ -179,6 +222,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     override fun onStop() {
         foreground = false
         ui.removeCallbacks(poll)
+        getSystemService(DisplayManager::class.java)?.unregisterDisplayListener(displayWatch)
         // nobody is watching: no reason to keep two cores decoding
         if (link.state == UsbLink.State.RUNNING && !testRunning) {
             if (mode == Mode.SCAN) scanOnReturn = true   // cut short: start it over when the app is back
@@ -212,8 +256,12 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     }
 
     // ---------------------------------------------------------------------------------------- settings -> native
-    private fun applyPicture() = engine.setPicture(settings.lumaComb, settings.lumaComb && settings.cleanOsd,
-        settings.smoothLines, settings.sparkleRepair, settings.colourComb)
+    private fun applyPicture() {
+        engine.setPicture(settings.lumaComb, settings.lumaComb && settings.cleanOsd, settings.smoothLines,
+            settings.sparkleRepair, settings.colourComb, !settings.vsync)
+        // Max screen Hz asks the display for another refresh rate
+        if (::video.isInitialized) matchDisplayTo(displayStd)
+    }
 
     /**
      * True when something changed that a watch only takes when it starts: the native side knows which of its
@@ -523,6 +571,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
             if (st.fallback) append(" (40 kept dropping out)")
             append(" · processing %.0f%%".format(load * 100))
             append(" · $dropped dropped · ${st.restarts} restarts")
+            if (mode == Mode.WATCH && locked) pictureDelay()?.let { append("\n").append(it) }
             st.antennas?.let { a ->
                 if (a.combine) append("\nAntenna A %.0f dB · B %.0f dB · together %.0f dB".format(a.snrA, a.snrB, a.snrC))
             }
@@ -568,18 +617,111 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         showChannel()
     }
 
-    /** Ask for a display mode that fits the camera's field rate, so frames do not beat against the refresh. */
+    /**
+     * Ask for a display mode that suits the picture. Max screen Hz: the fastest the display has, at its resolution,
+     * which shows each picture, or each strip of it, sooner. That one is held ([holdMode]) from the start, with or
+     * without a picture. Without Max screen Hz: the camera's field rate once there is a picture, so that frames do
+     * not beat against the refresh. That only works on a display with such a mode: a panel with only 60 and 120 Hz
+     * asked for 59.94 goes to 60, which neither matches nor is fast.
+     */
     private fun matchDisplayTo(std: String) {
-        if (Build.VERSION.SDK_INT < 30 || std == frameRateFor) return
-        val rate = when (std) { "PAL" -> 50f; "NTSC" -> 59.94f; else -> return }
+        displayStd = std
+        val ask = refreshOverride ?: if (settings.maxScreenHz) RefreshAsk.MAX else RefreshAsk.FIELD
+        holdMode(if (ask == RefreshAsk.MAX) fastestMode() else null)
+        if (Build.VERSION.SDK_INT < 30) return
+        val field = when (std) { "PAL" -> 50f; "NTSC" -> 59.94f; else -> 0f }
+        if (ask == RefreshAsk.FIELD && field == 0f) return   // no picture yet whose rate to match
+        val key = ask to if (ask == RefreshAsk.FIELD) std else ""
+        if (key == asked) return
         val surface = video.holder.surface ?: return
         if (!surface.isValid) return
-        frameRateFor = std
+        asked = key
+        val (hz, how) = when (ask) {
+            RefreshAsk.FIELD -> field to Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE
+            RefreshAsk.MAX -> fastestRefresh() to Surface.FRAME_RATE_COMPATIBILITY_DEFAULT
+            RefreshAsk.NONE -> 0f to Surface.FRAME_RATE_COMPATIBILITY_DEFAULT
+        }
         try {
-            surface.setFrameRate(rate, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)
+            surface.setFrameRate(hz, how)
+            engine.log("display: asked for ${if (ask == RefreshAsk.NONE) "no rate" else "$hz Hz"} (${std.ifEmpty { "no" }} picture)")
         } catch (e: Exception) {
             engine.log("setFrameRate: $e")
         }
+        flyingHz = 0f   // that was with the request before
+        tellRefresh()
+    }
+
+    /** The display's fastest mode at the resolution it is in (null: not known). */
+    private fun fastestMode(): Display.Mode? {
+        val d = shownOn() ?: return null
+        val now = d.mode
+        return d.supportedModes.filter { it.physicalWidth == now.physicalWidth && it.physicalHeight == now.physicalHeight }
+            .maxByOrNull { it.refreshRate }
+    }
+
+    /** The fastest refresh rate the display has at the resolution it is in (0: not known). */
+    private fun fastestRefresh(): Float = fastestMode()?.refreshRate ?: 0f
+
+    /**
+     * Max screen Hz: the window asks for the display mode itself ([m]; null: none). That is firmer than the
+     * Surface's rate alone (setFrameRate), which the system weighs against what else is on screen, and it holds
+     * whether or not the picture is coming. Battery Saver, heat and the phone's own refresh-rate setting still
+     * come first.
+     */
+    private fun holdMode(m: Display.Mode?) {
+        val id = m?.modeId ?: 0
+        val lp = window.attributes
+        if (lp.preferredDisplayModeId == id) return
+        lp.preferredDisplayModeId = id
+        window.attributes = lp
+        engine.log(if (m == null) "display: no mode held" else "display: holding mode $id (${m.refreshRate} Hz)")
+    }
+
+    /** The display the activity is on. */
+    private fun shownOn(): Display? {
+        if (Build.VERSION.SDK_INT >= 30) {
+            try {
+                return display
+            } catch (e: UnsupportedOperationException) {
+                // not tied to a display yet (seen under Robolectric in onStart): the window manager's is the same
+            }
+        }
+        @Suppress("DEPRECATION")
+        return windowManager.defaultDisplay
+    }
+
+    /**
+     * The display's refresh rate as it is now (what [matchDisplayTo] asked for is not always what the display does).
+     * To the engine when it changed: the picture-delay readout needs it where the display's own timing is out of
+     * date (front-buffer drawing). And to the menu, under Max screen Hz, with the rate the screen had while the menu
+     * was closed: an open menu can hold it at a faster one.
+     */
+    private fun tellRefresh() {
+        val hz = shownOn()?.mode?.refreshRate ?: return
+        if (hz != toldRefresh) {
+            toldRefresh = hz
+            engine.setDisplayRefresh(hz)
+            engine.log("display: now $hz Hz")
+        }
+        if (!::menu.isInitialized) return
+        if (!menu.isOpen) flyingHz = hz
+        menu.showScreenHz(hz, flyingHz)
+    }
+
+    /**
+     * How old the picture is on screen, for the Signal tab: from the adapter taking its top and bottom lines to the
+     * display showing them, or, where the display does not say when it shows a frame, to the frame being handed
+     * to it. null: nothing measured.
+     */
+    private fun pictureDelay(): String? {
+        val d = try { PictureDelay.parse(engine.latency()) } catch (e: org.json.JSONException) { return null }
+        // as far along as the display lets it be measured
+        val (ends, how) = d.shown?.let { it to "" }
+            ?: d.expected?.let { it to if (d.front) ", drawn straight to the screen" else "" }
+            ?: d.queued?.let { it to ", before the display" }
+            ?: return null
+        val hz = if (d.refreshHz > 0) " · %.0f Hz display".format(d.refreshHz) else ""
+        return "Picture delay %.0f ms at the top, %.0f at the bottom".format(ends.topMs, ends.bottomMs) + how + hz
     }
 
     // ---------------------------------------------------------------------------------------- UI
@@ -591,9 +733,10 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         video = SurfaceView(this)
         video.holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(h: SurfaceHolder) {
-                frameRateFor = ""
+                asked = null
                 surfaceOwner = surfaceToken
                 engine.setSurface(h.surface)
+                matchDisplayTo(displayStd)   // a new Surface has no rate of its own yet
             }
             override fun surfaceChanged(h: SurfaceHolder, f: Int, w: Int, ht: Int) = engine.redraw()
             override fun surfaceDestroyed(h: SurfaceHolder) {
@@ -657,6 +800,7 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
     private fun closeMenu() {
         if (!menu.isOpen) return
         menu.close()   // all but its status line, which stays over the picture while it has something to say
+        tellRefresh()   // from here on the screen's rate is the one it flies at
         menuAuto = false
         sweepOn = false
         syncSweep()   // a sweep under way gives way to the picture

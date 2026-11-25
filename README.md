@@ -51,7 +51,15 @@ it, a picture that has stopped), full size or in the preview, colour bars show t
 - **Picture** — comb filter (sharper, no echo after edges), clean OSD edges (no rainbow fringe around text),
   smooth lines (no stair steps, no shimmer), sparkle repair (for a weak signal), colour comb (fewer rainbows
   on fine detail). The first three are on by default. Smooth lines and sparkle repair work on every camera;
-  the other three only change an NTSC picture. None adds delay.
+  the other three only change an NTSC picture. None adds delay. Two more are about the delay itself. **Max screen
+  Hz** (on by default) holds the display in its fastest mode while the app is in front, with or without a picture
+  (Battery Saver, heat and the phone's own refresh-rate setting can still cap it), and says under it what rate
+  the screen runs at; off, the display is asked for the camera's field rate, which suits a screen that has such a
+  mode. **Vsync** (off by default) shows each picture whole, once its field has ended; off, each part of the
+  picture goes up as soon as its lines are decoded, a strip of 32 lines at a time, and the top of the picture
+  reaches the compositor a field (~17 ms) sooner. How much of that reaches the screen depends on the phone's
+  compositor; the Signal tab's numbers include the picture's delay, from the adapter taking its top and bottom
+  lines to the display.
 - **Signal** — sample rate (40 MS/s, or 20 for a USB link that cannot carry 40; the app also falls back by
   itself when 40 keeps restarting or losing blocks past the first 10 s of watching, and stops doing so for the
   session once 20 has locked up on that phone, where 20 is the worse of the two), diversity (both antennas combined: fit two; it adds
@@ -166,7 +174,12 @@ off the chip's own recovery from the adapter's USB 3 lock-up (it frees itself wi
 line counts that as `unwedged`), so that each lock-up shows in the log as a stream fault. The app's own, under the same
 extra: `KP_CONCEAL=0` shows the frames torn by a stream restart (at once), and `KP_FAST_CPUS=0` lets Android put
 the two processing threads on any core (from the next open; by default they are kept off the phone's slowest
-cores, where they fall behind).
+cores, where they fall behind). The screen's, at once: `KP_PRESENT_ALIGN=0` puts each strip up as it comes (by
+default they go up once a refresh, `KP_PRESENT_MARGIN_US` before the compositor's next frame), `KP_FRONT_BUFFER=1`
+tries front-buffer drawing (a prototype: straight into the buffer the display shows, no queue; the log says
+whether the phone can). And `--ez vsync true|false`, `--es refresh field|max|none` (the display rate asked for,
+in place of what Max screen Hz says) and `--ez menu false` (the menu closed, as when flying) for measuring the
+picture's delay.
 
 ## Desktop bench
 

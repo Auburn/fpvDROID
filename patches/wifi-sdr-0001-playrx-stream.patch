@@ -117,7 +117,7 @@ index 57c5d0d..1b155a3 100644
          LI32    $2, 0xfff8
          addu    $6, $6, $2              # a2 = last sample of the bank
 diff --git a/src/receiver.cpp b/src/receiver.cpp
-index 72e29c5..29b512b 100644
+index 72e29c5..2000678 100644
 --- a/src/receiver.cpp
 +++ b/src/receiver.cpp
 @@ -3,6 +3,7 @@
@@ -202,7 +202,7 @@ index 72e29c5..29b512b 100644
      c.la.igi = cur.agc ? -1 : igi_for(cur.gain_db, _caps.cu);
      c.la.no_cca = !cur.agc;
      // 0 leaves devourer's DFIR (8822B: BW20 set; 8822C: per width). The wide sets only where the rate carries
-@@ -285,14 +312,27 @@ void Receiver::worker() {
+@@ -285,15 +312,29 @@ void Receiver::worker() {
        _st.gapped = c.gapped;
        _st.state = RxState::Streaming;
      }
@@ -229,9 +229,11 @@ index 72e29c5..29b512b 100644
 +      seq += bi.seq - run_next; // fpvDROID: the run's count includes the banks it dropped before this one
 +      run_next = bi.seq + 1;
        meta.seq = seq++;
++      meta.end_us = bi.end_us;
        {
          std::lock_guard<std::mutex> l(_m);
-@@ -319,12 +359,26 @@ void Receiver::worker() {
+         _st.banks++;
+@@ -319,12 +360,26 @@ void Receiver::worker() {
      // The count and the reason change together: a status() read between them would show a new
      // restart with the old (or no) text, and the reason is the only record of why.
      RxState next = RxState::Starting;
@@ -258,7 +260,7 @@ index 72e29c5..29b512b 100644
        why = "stream keeps failing: " + ss.error;
      }
      {
-@@ -333,10 +387,17 @@ void Receiver::worker() {
+@@ -333,10 +388,17 @@ void Receiver::worker() {
        _st.state = next;
        _st.error = why;
        _st.last_fault = why;
@@ -278,7 +280,7 @@ index 72e29c5..29b512b 100644
  }
  
 diff --git a/src/receiver.h b/src/receiver.h
-index f107565..aadf279 100644
+index f107565..c2d6dc8 100644
 --- a/src/receiver.h
 +++ b/src/receiver.h
 @@ -47,6 +47,9 @@ inline uint16_t model_pid(uint16_t vid, uint16_t pid) {
@@ -301,7 +303,14 @@ index f107565..aadf279 100644
    uint32_t gen = 0;      // stream run (changes on every restart: reset DSP state when it does)
    uint32_t cfg = 0;      // settings generation (changes only when the caller changed settings)
    double fs = 0;         // sample rate
-@@ -89,6 +93,15 @@ struct BankMeta {
+@@ -85,10 +89,22 @@ struct BankMeta {
+   bool cu = false;
+   bool gapped = false;   // each bank is a complete capture, but banks are not contiguous (a ~1.5 ms gap
+                          // between them): FFT within a bank only, no continuous recording
++  double end_us = 0;     // fpvDROID (from the Play RX fork): on the adapter's own clock, from the bank's last sample
++                         // to its last packet shipped (BankInfo::end_us); with the time the bank came in, when its
++                         // samples were taken (less the USB transfer)
+ };
  
  using BankSink = std::function<void(const uint8_t *bank, size_t bytes, const BankMeta &)>;
  
@@ -317,7 +326,7 @@ index f107565..aadf279 100644
  struct RxStatus {
    RxState state = RxState::Closed;
    uint64_t banks = 0, restarts = 0;
-@@ -102,6 +115,15 @@ struct RxStatus {
+@@ -102,6 +118,15 @@ struct RxStatus {
    bool settling = false; // a settings change is waiting to be applied (the run above is about to end)
    bool gapped = false;   // the current run is gapped (BankMeta::gapped)
    unsigned start_retries = 0; // stream starts repeated because the first packet never came (issue #2)

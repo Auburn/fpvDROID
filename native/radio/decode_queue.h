@@ -17,6 +17,7 @@ struct DemodBlock {
   std::vector<float> d;          // discriminator output
   std::vector<uint8_t> bad;      // sparkle repair marks (empty while it is off)
   bool gap = false;              // the stream lost samples before this block (a restart, a dropped bank)
+  double t_sampled = 0;          // when its last sample was taken (steady clock, s; 0: not known)
 };
 
 // The DSP thread fills blocks and push()es them, the decode thread pop()s and decodes them. A decoder that falls

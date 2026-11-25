@@ -3,9 +3,11 @@
 namespace kp {
 
 void FrameGate::frame(const Frame &f) {
-  if (_left.load(std::memory_order_relaxed) > 0) {
-    _left--;
-    _hidden++;
+  if (_left.load(std::memory_order_relaxed) > 0) {  // in a picture that is hidden: counted once it has finished
+    if (f.finished()) {
+      _left--;
+      _hidden++;
+    }
     return;
   }
   _out(f);
