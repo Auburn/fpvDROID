@@ -2,9 +2,15 @@
 // (github.com/scerstt/PlayRX, tools/gen_testsignal.cpp, GPL-2.0).
 //
 //   kp_gen OUT [--mhz 5769] [--centre MHZ (default --mhz)] [--frames 30] [--dev 8] [--cnr 25] [--pal] [--label R4]
+//              [--copy MHZ DB] [--mirror DB]
 //
 // Writes OUT.cs16 (int16 I,Q at 40 MS/s, 12-bit values << 4, like wsdr_probe) and OUT.json (sample_rate,
 // centre_hz), which kp_replay and the simulated receiver (kp_sim, KP_SIM_FILE) read.
+//
+// --copy puts a second, weaker transmitter of the same picture MHZ away (negative: below), DB under the first: the
+// copy a strong analog VTX shows beside itself (radio/pilots.h). --mirror puts the signal's mirror image about the
+// centre DB under it (frequency and modulation turned over, as a receiver's IQ imbalance makes one). Either way the
+// first transmitter keeps the CNR asked for, and the sum stays inside the 12-bit range.
 //
 // Picture: 75 % colour bars (top two thirds), a grey ramp, and a white box that moves across the bottom band
 // once per loop, so a frozen picture is obvious; --label puts big text over the bars. Composite levels in IRE
@@ -85,11 +91,13 @@ bool label_lit(const std::string &text, double x, double y) {
 
 int main(int argc, char **argv) {
   if (argc < 2) {
-    std::fprintf(stderr, "usage: kp_gen OUT [--mhz F] [--centre F] [--frames N] [--dev MHZ] [--cnr DB] [--pal] [--label TEXT]\n");
+    std::fprintf(stderr, "usage: kp_gen OUT [--mhz F] [--centre F] [--frames N] [--dev MHZ] [--cnr DB] [--pal] [--label TEXT]"
+                         " [--copy MHZ DB] [--mirror DB]\n");
     return 2;
   }
   const std::string out = argv[1];
   double vtx_mhz = 5769, centre_mhz = NAN, dev_mhz = 8, cnr_db = 25;
+  double copy_mhz = 0, copy_db = NAN, mirror_db = NAN;  // NAN: none
   int frames = 30;
   bool pal = false;
   std::string label;  // big text over the bars (a channel name), so feeds are easy to tell apart
@@ -103,6 +111,8 @@ int main(int argc, char **argv) {
     else if (k == "--cnr") cnr_db = v();
     else if (k == "--pal") pal = true;
     else if (k == "--label" && i + 1 < argc) label = argv[++i];
+    else if (k == "--copy") { copy_mhz = v(); copy_db = v(); }
+    else if (k == "--mirror") mirror_db = v();
     else { std::fprintf(stderr, "unknown option %s\n", k.c_str()); return 2; }
   }
   if (std::isnan(centre_mhz)) centre_mhz = vtx_mhz;  // the recording centred on its transmitter
@@ -120,7 +130,10 @@ int main(int argc, char **argv) {
   FILE *f = std::fopen((out + ".cs16").c_str(), "wb");
   if (!f) { std::fprintf(stderr, "cannot write %s.cs16\n", out.c_str()); return 1; }
 
-  const double amp = 1400;  // 12-bit full scale is 2047
+  // 12-bit full scale is 2047; with a copy or a mirror, the first transmitter gives up enough for the sum not to clip
+  const double copy_gain = std::isnan(copy_db) ? 0 : std::pow(10, -copy_db / 20);
+  const double mirror_gain = std::isnan(mirror_db) ? 0 : std::pow(10, -mirror_db / 20);
+  const double amp = 1400 / (1 + copy_gain + mirror_gain);
   // CNR in an 18 MHz channel: noise power over the whole 40 MHz is scaled up by 40/18
   const double noise_pow = amp * amp / std::pow(10, cnr_db / 10) * (fs / 18e6);
   std::mt19937 rng(1);
@@ -128,7 +141,7 @@ int main(int argc, char **argv) {
 
   std::vector<int16_t> buf;
   buf.reserve(1 << 20);
-  double phase = 0;
+  double phase = 0, copy_phase = 0;
   const double w_sc = 2 * M_PI * S.fsc;
   for (size_t i = 0; i < n; i++) {
     const double t = i / fs;
@@ -198,7 +211,10 @@ int main(int argc, char **argv) {
     const double fi = offset_hz + dev_mhz * 1e6 * ((ire + 40) / 140.0 - 0.5);
     phase += 2 * M_PI * fi / fs;
     if (phase > M_PI) phase -= 2 * M_PI * std::floor((phase + M_PI) / (2 * M_PI));
-    const double re = amp * std::cos(phase) + nd(rng), im = amp * std::sin(phase) + nd(rng);
+    copy_phase = std::remainder(copy_phase + 2 * M_PI * (fi + copy_mhz * 1e6) / fs, 2 * M_PI);
+    const double cp = std::cos(phase), sp = std::sin(phase);
+    const double re = amp * (cp + copy_gain * std::cos(copy_phase) + mirror_gain * cp) + nd(rng);
+    const double im = amp * (sp + copy_gain * std::sin(copy_phase) - mirror_gain * sp) + nd(rng);
     auto q = [](double v) { return static_cast<int16_t>(std::lround(std::max(-2047.0, std::min(2047.0, v))) * 16); };
     buf.push_back(q(re));
     buf.push_back(q(im));
@@ -216,5 +232,8 @@ int main(int argc, char **argv) {
   }
   std::fprintf(stderr, "wrote %s.cs16: %zu samples (%.3f s, %d %s frames), VTX %.1f MHz, centre %.1f MHz, CNR %.0f dB\n",
                out.c_str(), n, n / fs, frames, pal ? "PAL" : "NTSC", vtx_mhz, centre_mhz, cnr_db);
+  if (copy_gain > 0) std::fprintf(stderr, "  a copy at %.1f MHz, %.1f dB under it\n", vtx_mhz + copy_mhz, copy_db);
+  if (mirror_gain > 0)
+    std::fprintf(stderr, "  its mirror at %.1f MHz, %.1f dB under it\n", 2 * centre_mhz - vtx_mhz, mirror_db);
   return 0;
 }
