@@ -30,27 +30,31 @@ private:
 
 void fft_inplace(cf *x, int n);  // radix-2, n a power of two, forward
 
-// A hump in the spectrum that looks like an FM video carrier (3.5..24 MHz wide at floor + 6 dB).
+// A hump in the spectrum that looks like an FM video carrier: kHumpMinHz..kHumpMaxHz wide at floor + 6 dB (a VTX
+// next to the phone is about 16 MHz wide).
+inline constexpr double kHumpMinHz = 3.5e6, kHumpMaxHz = 24e6;
 struct Hump {
   double offset_hz;  // centroid, relative to the stream centre
   double width_hz;
   float peak_db, snr_db;
 };
-// Humps fully inside +-edge_hz of the centre.
-std::vector<Hump> find_humps(const std::vector<float> &db, double fs, double edge_hz);
-
-// A signal that runs past one edge of +-edge_hz, which find_humps leaves out: with scan steps 20 MHz apart a signal
-// is sure to be whole in one only up to 13 MHz wide, and a VTX close by is 15-20. The same runs over the same floor
-// as find_humps, at least 3.5 MHz of each inside the span; f0..f1 that part (relative to the centre), snr_db its
-// median over the floor. One past both edges, wider than the span, is not a VTX and is left out; with the scan's
-// span (+-16.5 MHz at 40 MS/s) there is none anyway: it would hold over three quarters of the bins, and the floor is
-// their lower quartile. A signal that wide (a 40 or 80 MHz Wi-Fi channel) leaves nothing over the floor.
+// A signal that runs on past one edge of +-edge_hz, so that it is no hump: f0..f1 the part of it inside (relative to
+// the centre, at least kHumpMinHz), snr_db that part's median over the floor.
 struct CutSignal {
   double f0_hz = 0, f1_hz = 0;
   bool cut_hi = false;  // it goes on past the top edge; else past the bottom one
   float snr_db = 0;
 };
-std::vector<CutSignal> find_cut_signals(const std::vector<float> &db, double fs, double edge_hz);
+// One spectrum's signals over one floor: the humps fully inside +-edge_hz of the centre, and the signals cut by one
+// edge. One past both edges is wider than the span, no VTX, and left out. (With edge_hz over 3/8 of fs there is none:
+// it would hold over three quarters of the bins, and the floor is their lower quartile.)
+struct StepSignals {
+  std::vector<Hump> whole;
+  std::vector<CutSignal> cut;
+};
+StepSignals find_step_signals(const std::vector<float> &db, double fs, double edge_hz);
+// Its humps alone.
+std::vector<Hump> find_humps(const std::vector<float> &db, double fs, double edge_hz);
 
 // Live SNR of the carrier being watched (dB): the strongest point of the smoothed spectrum against the noise
 // floor (10th percentile) inside +-span_hz of the carrier, which sits carrier_hz from the stream centre (0 unless

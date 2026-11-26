@@ -1,12 +1,13 @@
 // kp_spectrum_tests: the Spectrum tab's sweep plan (Sweep) and band picture (BandMap, find_carriers) from sweep steps
-// made here, and what a scan step finds whole or cut (find_humps, find_cut_signals) (ctest: "spectrum"). Plain checks,
-// as in radio_tests.cpp.
+// made here, and what a scan step finds whole or cut (find_step_signals) (ctest: "spectrum"). Plain checks, as in
+// radio_tests.cpp.
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <random>
 #include <vector>
 
+#include "scan.h"
 #include "spectrum.h"
 #include "sweep.h"
 
@@ -29,7 +30,7 @@ struct Signal {
   bool flat;  // digital (a flat top, steep sides); else an FM video hump
 };
 
-static constexpr double kFs = 40e6, kUse = 16.5e6;  // a step's sample rate and the span of it used (radio.cpp's kEdge)
+static constexpr double kFs = 40e6, kUse = ScanPlan::kEdge;  // a step's sample rate and the span of it used
 
 // One retune's spectrum as the radio takes it: 40 MS/s, 1024 bins (fftshifted, dB), centred on the hardware centre
 // centre_hz, with a gain of its own (the chip's AGC), the RX filter rolling off past 17 MHz, and noise.
@@ -141,50 +142,50 @@ static void forget_and_bridge() {
   CHECK(none);
 }
 
-// A scan step's signals (radio.cpp: handle_scan): find_humps takes the ones it sees whole, find_cut_signals those an
-// edge of its +-16.5 MHz cuts. F2 (5760 MHz, 18 MHz wide) halfway between the 5750 and 5770 steps is cut in both: by
+// What a scan step sees cut by an edge.
+static std::vector<CutSignal> cut_in(const std::vector<float> &db) { return find_step_signals(db, kFs, kUse).cut; }
+
+// A scan step's signals (radio.cpp: handle_scan): find_step_signals finds the ones it sees whole, and those an edge
+// of its +-kEdge cuts. F2 (5760 MHz, 18 MHz wide) halfway between the 5750 and 5770 steps is cut in both: by
 // the 5750 one's top edge, then by the 5770 one's bottom edge, and neither sees it whole.
 static void a_signal_between_two_steps_is_cut_in_both() {
   std::mt19937 rng(5);
   const std::vector<Signal> f2 = {{5760, 18, 30, true}};
-  auto db = step_db(f2, 5750e6, 4, rng);
-  CHECK(find_humps(db, kFs, kUse).empty());
-  auto cut = find_cut_signals(db, kFs, kUse);
-  CHECK(cut.size() == 1);
+  StepSignals s = find_step_signals(step_db(f2, 5750e6, 4, rng), kFs, kUse);
+  CHECK(s.whole.empty() && s.cut.size() == 1);
+  auto cut = s.cut;
   if (cut.size() == 1) {
     CHECK(cut[0].cut_hi);
     CHECK(std::fabs(cut[0].f0_hz - 1e6) < 0.3e6 && cut[0].f1_hz == kUse);  // its bottom end, 5751 MHz, is seen
     CHECK(std::fabs(cut[0].snr_db - 30) < 1.5);
   }
-  db = step_db(f2, 5770e6, -5, rng);
-  CHECK(find_humps(db, kFs, kUse).empty());
-  cut = find_cut_signals(db, kFs, kUse);
-  CHECK(cut.size() == 1);
+  s = find_step_signals(step_db(f2, 5770e6, -5, rng), kFs, kUse);
+  CHECK(s.whole.empty() && s.cut.size() == 1);
+  cut = s.cut;
   if (cut.size() == 1) {
     CHECK(!cut[0].cut_hi);
     CHECK(cut[0].f0_hz == -kUse && std::fabs(cut[0].f1_hz + 1e6) < 0.3e6);  // its top end, 5769 MHz
     CHECK(std::fabs(cut[0].snr_db - 30) < 1.5);
   }
   // an FM video hump (soft sides: 6 dB over the floor from about 5752 to 5776 MHz) is cut the same way
-  cut = find_cut_signals(step_db({{5764, 16, 20, false}}, 5750e6, 0, rng), kFs, kUse);
+  cut = cut_in(step_db({{5764, 16, 20, false}}, 5750e6, 0, rng));
   CHECK(cut.size() == 1);
   if (cut.size() == 1) CHECK(cut[0].cut_hi && cut[0].f0_hz > 1e6 && cut[0].f0_hz < 3.5e6);
 }
 
-// Whole inside a step is find_humps' alone. A signal wider than the step (an 80 MHz Wi-Fi channel) leaves nothing over
-// the floor, and a sliver of one inside an edge (under 3.5 MHz) is not listed, nor is the noise; one cut at each edge
-// of a step, both.
+// Whole inside a step is only a hump. A signal wider than the step (an 80 MHz Wi-Fi channel) leaves nothing over
+// the floor, and a sliver of one inside an edge (under kHumpMinHz) is not listed, nor is the noise; one cut at each
+// edge of a step, both.
 static void cut_signals_whole_wide_and_slivers() {
   std::mt19937 rng(6);
-  auto db = step_db({{5769, 18, 35, true}}, 5770e6, 0, rng);  // R4
-  CHECK(find_humps(db, kFs, kUse).size() == 1);
-  CHECK(find_cut_signals(db, kFs, kUse).empty());
-  db = step_db({{5775, 80, 15, true}}, 5770e6, 0, rng);
-  CHECK(find_humps(db, kFs, kUse).empty() && find_cut_signals(db, kFs, kUse).empty());
-  CHECK(find_cut_signals(step_db({{5785, 18, 30, true}}, 5760e6, 0, rng), kFs, kUse).empty());  // 5776..: 0.5 MHz in
-  CHECK(find_cut_signals(step_db({{5783, 18, 30, true}}, 5760e6, 0, rng), kFs, kUse).empty());  // 5774..: 2.5 MHz in
-  CHECK(find_cut_signals(step_db({}, 5760e6, 3, rng), kFs, kUse).empty());
-  const auto cut = find_cut_signals(step_db({{5750, 18, 25, true}, {5790, 18, 12, true}}, 5770e6, 0, rng), kFs, kUse);
+  StepSignals s = find_step_signals(step_db({{5769, 18, 35, true}}, 5770e6, 0, rng), kFs, kUse);  // R4
+  CHECK(s.whole.size() == 1 && s.cut.empty());
+  s = find_step_signals(step_db({{5775, 80, 15, true}}, 5770e6, 0, rng), kFs, kUse);
+  CHECK(s.whole.empty() && s.cut.empty());
+  CHECK(cut_in(step_db({{5785, 18, 30, true}}, 5760e6, 0, rng)).empty());  // 5776..: 0.5 MHz in
+  CHECK(cut_in(step_db({{5783, 18, 30, true}}, 5760e6, 0, rng)).empty());  // 5774..: 2.5 MHz in
+  CHECK(cut_in(step_db({}, 5760e6, 3, rng)).empty());
+  const auto cut = cut_in(step_db({{5750, 18, 25, true}, {5790, 18, 12, true}}, 5770e6, 0, rng));
   CHECK(cut.size() == 2);
   if (cut.size() == 2) {
     CHECK(!cut[0].cut_hi && std::fabs(cut[0].f1_hz + 11e6) < 0.3e6);  // 5741..5759: its top end

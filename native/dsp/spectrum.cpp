@@ -75,87 +75,62 @@ std::vector<float> smooth_db(const std::vector<float> &db, double bin) {
   }
   return sm;
 }
+}  // namespace
 
-// The runs of a spectrum standing over floor + 6 dB, the floor the lower quartile of the median-smoothed spectrum
-// (robust even when a wide signal fills much of the span). Each run is [i, j) in bins of sm.
-struct Runs {
-  std::vector<float> sm;
-  float floor = 0;
-  std::vector<std::pair<int, int>> runs;
-};
-Runs runs_over_floor(const std::vector<float> &db, double bin) {
-  Runs r;
+StepSignals find_step_signals(const std::vector<float> &db, double fs, double edge_hz) {
   const int n = static_cast<int>(db.size());
-  r.sm = smooth_db(db, bin);
-  std::vector<float> sorted = r.sm;
+  const double bin = fs / n;
+  // median-smooth, then floor = lower quartile of the smoothed spectrum
+  const std::vector<float> sm = smooth_db(db, bin);
+  std::vector<float> sorted = sm;
   std::nth_element(sorted.begin(), sorted.begin() + n / 4, sorted.end());
-  r.floor = sorted[n / 4];
-  const float thr = r.floor + 6.f;
+  const float floor = sorted[n / 4];  // lower quartile: robust even when a wide signal fills much of the span
+  const float thr = floor + 6.f;
+  StepSignals out;
   int i = 0;
   while (i < n) {
-    if (r.sm[i] <= thr) {
+    if (sm[i] <= thr) {
       i++;
       continue;
     }
     int j = i;
-    while (j < n && r.sm[j] > thr) j++;
-    r.runs.emplace_back(i, j);
-    i = j;
-  }
-  return r;
-}
-}  // namespace
-
-std::vector<Hump> find_humps(const std::vector<float> &db, double fs, double edge_hz) {
-  const int n = static_cast<int>(db.size());
-  const double bin = fs / n;
-  const Runs r = runs_over_floor(db, bin);
-  std::vector<Hump> out;
-  for (const auto &[i, j] : r.runs) {
+    while (j < n && sm[j] > thr) j++;
     const double f0 = (i - n / 2) * bin, f1 = (j - 1 - n / 2) * bin;
     const double width = f1 - f0 + bin;
-    if (width >= 3.5e6 && width <= 24e6 && f0 > -edge_hz && f1 < edge_hz) {  // a VTX next to the phone: ~16 MHz
+    const bool lo = f0 <= -edge_hz, hi = f1 >= edge_hz;  // it runs past the bottom, the top edge
+    if (!lo && !hi && width >= kHumpMinHz && width <= kHumpMaxHz) {
       double sw = 0, sf = 0;
       float pk = -1e9f;
       for (int k = i; k < j; k++) {
-        const double p = std::pow(10.0, (r.sm[k] - r.floor) / 10.0);
+        const double p = std::pow(10.0, (sm[k] - floor) / 10.0);
         sw += p;
         sf += p * (k - n / 2) * bin;
-        pk = std::max(pk, r.sm[k]);
+        pk = std::max(pk, sm[k]);
       }
-      out.push_back(Hump{sf / sw, width, pk, pk - r.floor});
+      out.whole.push_back(Hump{sf / sw, width, pk, pk - floor});
+    } else if (lo != hi) {
+      CutSignal c;
+      c.f0_hz = std::max(f0, -edge_hz);
+      c.f1_hz = std::min(f1 + bin, edge_hz);
+      c.cut_hi = hi;
+      std::vector<float> in;  // its bins inside the span, for their median
+      for (int k = i; k < j; k++) {
+        const double f = (k - n / 2) * bin;
+        if (f >= c.f0_hz && f < c.f1_hz) in.push_back(sm[k]);
+      }
+      if (c.f1_hz - c.f0_hz >= kHumpMinHz && !in.empty()) {
+        std::nth_element(in.begin(), in.begin() + in.size() / 2, in.end());
+        c.snr_db = in[in.size() / 2] - floor;
+        out.cut.push_back(c);
+      }
     }
+    i = j;
   }
   return out;
 }
 
-std::vector<CutSignal> find_cut_signals(const std::vector<float> &db, double fs, double edge_hz) {
-  constexpr double kMinSeen = 3.5e6;  // as find_humps' narrowest
-  const int n = static_cast<int>(db.size());
-  const double bin = fs / n;
-  const Runs r = runs_over_floor(db, bin);
-  std::vector<CutSignal> out;
-  for (const auto &[i, j] : r.runs) {
-    // the edges as find_humps draws them: a run is whole there or cut here, never both
-    const double f0 = (i - n / 2) * bin, f1 = (j - 1 - n / 2) * bin;
-    const bool lo = f0 <= -edge_hz, hi = f1 >= edge_hz;
-    if (lo == hi) continue;  // whole, or wider than the span
-    CutSignal c;
-    c.f0_hz = std::max(f0, -edge_hz);
-    c.f1_hz = std::min(f1 + bin, edge_hz);
-    c.cut_hi = hi;
-    if (c.f1_hz - c.f0_hz < kMinSeen) continue;
-    std::vector<float> in;
-    for (int k = i; k < j; k++) {
-      const double f = (k - n / 2) * bin;
-      if (f >= c.f0_hz && f < c.f1_hz) in.push_back(r.sm[k]);
-    }
-    if (in.empty()) continue;
-    std::nth_element(in.begin(), in.begin() + in.size() / 2, in.end());
-    c.snr_db = in[in.size() / 2] - r.floor;
-    out.push_back(c);
-  }
-  return out;
+std::vector<Hump> find_humps(const std::vector<float> &db, double fs, double edge_hz) {
+  return find_step_signals(db, fs, edge_hz).whole;
 }
 
 float carrier_snr(const std::vector<float> &db, double fs, double span_hz, double carrier_hz, double pass_hz) {

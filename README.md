@@ -28,8 +28,8 @@ it, a picture that has stopped), full size or in the preview, colour bars show t
 **NO SIGNAL** before one has been chosen.
 
 - **Channel** — the band (Raceband, Fatshark, Boscam A / B / E, Lowband) and its eight channels. **Scan** is
-  optional: it sweeps every band, marks the channels with video on them and tunes the strongest (or the one
-  you were on, if this scan finds it there). It retunes every 20 MHz and sees 33 MHz at each, so a transmitter
+  optional: it sweeps every band, marks the channels with video on them and tunes the strongest it found (or the
+  one you were on, if it found that one again). It retunes every 20 MHz and sees 33 MHz at each, so a transmitter
   close by (15–20 MHz wide) may never be whole in one: F1–F8 and R7 sit halfway between two retunes, E8 past the
   highest. Such a transmitter gets a retune of its own (up to eight a scan, each one more in the count under
   Scan). The channel is remembered for the next start.
@@ -122,7 +122,7 @@ On screen: the OSD pill (channel, frequency, SNR, decode → screen latency) can
 - `native/radio/` — the adapter (wifi-sdr `Receiver`) + a DSP thread: scan, watch, sweep, stream test; antenna
   combining (`combine.cpp`); when 40 MS/s gives way to 20 (`fallback_policy.cpp`); torn frames kept off the
   screen (`frame_gate.cpp`); the retunes of a scan or sweep and each one's capture (`steps.cpp`); the scan's
-  plan and the retunes it adds for a transmitter none of them sees whole (`cut_steps.cpp`); what a scan found,
+  plan and the retunes it adds for a transmitter none of them sees whole (`scan.cpp`); what a scan found,
   less a strong transmitter's copy, and what it watches after (`pilots.cpp`); the sweep's passes and the band
   picture as the app reads it (`sweep.cpp`).
 - `native/tests/` — unit tests of the radio's and the scan's rules, the decoder's sync and the Spectrum tab's band
@@ -216,7 +216,7 @@ build/desktop/kp_replay ../vtx-spike/rec/r4.cs16 --cnr 8      # with noise added
 build/desktop/kp_replay ../vtx-spike/rec/r4.cs16 --frames | ffplay -f rawvideo -pixel_format rgb0 -video_size 720x480 -i -
 KP_SIM_FILE=../vtx-spike/rec/r4.cs16 build/desktop/kp_sim --scan   # scan -> watch without hardware
 build/desktop/kp_gen rec/f2 --mhz 5760 --centre 5770 --cnr 35 --label F2   # F2, halfway between the 5750 and 5770 retunes
-KP_SIM_FILE=rec/f2.cs16 build/desktop/kp_sim --scan   # the scan adds a retune at 5760 for it ("scan: ... extra step")
+KP_SIM_FILE=rec/f2.cs16 build/desktop/kp_sim --scan   # right after 5770, a retune at 5760 for it ("scan: 5770.0 MHz step: extra step at 5760...")
 build/desktop/kp_live --scan --frames | ffplay -f rawvideo -pixel_format rgb0 -video_size 720x480 -framerate 60 -fflags nobuffer -i -
 ```
 
