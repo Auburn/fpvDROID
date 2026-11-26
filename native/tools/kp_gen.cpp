@@ -92,6 +92,35 @@ bool label_lit(const std::string &text, double x, double y) {
 // int16 as wsdr_probe writes them: 12-bit values << 4
 int16_t q12(double v) { return static_cast<int16_t>(std::lround(std::max(-2047.0, std::min(2047.0, v))) * 16); }
 
+// A recording as kp_replay and kp_sim read it: OUT.cs16 from n samples at 40 MS/s, sample(i) giving each in turn from
+// i = 0 (in 12-bit counts), and OUT.json with the sample rate, the centre, the transmitter's frequency and json_extra
+// (more "key": value pairs). 0 once written.
+template <class F>
+int write_recording(const std::string &out, size_t n, double centre_mhz, double vtx_mhz, const std::string &json_extra,
+                    F sample) {
+  FILE *f = std::fopen((out + ".cs16").c_str(), "wb");
+  if (!f) { std::fprintf(stderr, "cannot write %s.cs16\n", out.c_str()); return 1; }
+  std::vector<int16_t> buf;
+  buf.reserve(1 << 20);
+  for (size_t i = 0; i < n; i++) {
+    const std::complex<double> v = sample(i);
+    buf.push_back(q12(v.real()));
+    buf.push_back(q12(v.imag()));
+    if (buf.size() >= (1 << 20)) {
+      std::fwrite(buf.data(), 2, buf.size(), f);
+      buf.clear();
+    }
+  }
+  std::fwrite(buf.data(), 2, buf.size(), f);
+  std::fclose(f);
+  if (FILE *j = std::fopen((out + ".json").c_str(), "w")) {
+    std::fprintf(j, "{\"sample_rate\": %.0f, \"centre_hz\": %.0f, \"vtx_hz\": %.0f, %s, \"synthetic\": true}\n",
+                 kp::tx::kFs, centre_mhz * 1e6, vtx_mhz * 1e6, json_extra.c_str());
+    std::fclose(j);
+  }
+  return 0;
+}
+
 // --digital: the recording of a digital transmitter (digital_tx.h) with noise of 20 counts per I and Q, as the
 // digital tests have it. A whole number of DJI frames (2.5 ms) long, so that the frame goes on unbroken where kp_sim
 // loops the recording.
@@ -115,21 +144,10 @@ int write_digital(const std::string &out, const std::string &kind, double vtx_mh
   std::vector<kp::cf> x(n);
   for (auto &v : x) v = kp::cf(nd(rng), nd(rng));
   kp::tx::add_ofdm(x, o, kNoise, rng);
-  FILE *f = std::fopen((out + ".cs16").c_str(), "wb");
-  if (!f) { std::fprintf(stderr, "cannot write %s.cs16\n", out.c_str()); return 1; }
-  std::vector<int16_t> buf(2 * n);
-  for (size_t i = 0; i < n; i++) {
-    buf[2 * i] = q12(x[i].real());
-    buf[2 * i + 1] = q12(x[i].imag());
-  }
-  std::fwrite(buf.data(), 2, buf.size(), f);
-  std::fclose(f);
-  if (FILE *j = std::fopen((out + ".json").c_str(), "w")) {
-    std::fprintf(j, "{\"sample_rate\": %.0f, \"centre_hz\": %.0f, \"vtx_hz\": %.0f, \"digital\": \"%s\", "
-                 "\"width_hz\": %.0f, \"synthetic\": true}\n", kp::tx::kFs, centre_mhz * 1e6, vtx_mhz * 1e6,
-                 kind.c_str(), o.width_hz);
-    std::fclose(j);
-  }
+  char extra[96];
+  std::snprintf(extra, sizeof extra, "\"digital\": \"%s\", \"width_hz\": %.0f", kind.c_str(), o.width_hz);
+  if (const int e = write_recording(out, n, centre_mhz, vtx_mhz, extra, [&](size_t i) { return std::complex<double>(x[i]); }))
+    return e;
   std::fprintf(stderr, "wrote %s.cs16: %zu samples (%.3f s), %s %.1f MHz wide at %.1f MHz, centre %.1f MHz, %.0f dB\n",
                out.c_str(), n, n / kp::tx::kFs, kind.c_str(), o.width_hz / 1e6, vtx_mhz, centre_mhz, snr_db);
   return 0;
@@ -180,20 +198,16 @@ int main(int argc, char **argv) {
   const double bars[8][3] = {{.75, .75, .75}, {.75, .75, 0}, {0, .75, .75}, {0, .75, 0},
                              {.75, 0, .75}, {.75, 0, 0}, {0, 0, .75}, {0, 0, 0}};
 
-  FILE *f = std::fopen((out + ".cs16").c_str(), "wb");
-  if (!f) { std::fprintf(stderr, "cannot write %s.cs16\n", out.c_str()); return 1; }
-
   const double amp = 1400;  // 12-bit full scale is 2047
   // CNR in an 18 MHz channel: noise power over the whole 40 MHz is scaled up by 40/18
   const double noise_pow = amp * amp / std::pow(10, cnr_db / 10) * (fs / 18e6);
   std::mt19937 rng(1);
   std::normal_distribution<double> nd(0, std::sqrt(noise_pow / 2));
 
-  std::vector<int16_t> buf;
-  buf.reserve(1 << 20);
   double phase = 0;
   const double w_sc = 2 * M_PI * S.fsc;
-  for (size_t i = 0; i < n; i++) {
+  const std::string extra = std::string("\"std\": \"") + (pal ? "PAL" : "NTSC") + "\"";
+  const int e = write_recording(out, n, centre_mhz, vtx_mhz, extra, [&](size_t i) {
     const double t = i / fs;
     const double tf = std::fmod(t, frame_s);
     const int frame_no = static_cast<int>(t / frame_s);
@@ -262,20 +276,9 @@ int main(int argc, char **argv) {
     phase += 2 * M_PI * fi / fs;
     if (phase > M_PI) phase -= 2 * M_PI * std::floor((phase + M_PI) / (2 * M_PI));
     const double re = amp * std::cos(phase) + nd(rng), im = amp * std::sin(phase) + nd(rng);
-    buf.push_back(q12(re));
-    buf.push_back(q12(im));
-    if (buf.size() >= (1 << 20)) {
-      std::fwrite(buf.data(), 2, buf.size(), f);
-      buf.clear();
-    }
-  }
-  std::fwrite(buf.data(), 2, buf.size(), f);
-  std::fclose(f);
-  if (FILE *j = std::fopen((out + ".json").c_str(), "w")) {
-    std::fprintf(j, "{\"sample_rate\": %.0f, \"centre_hz\": %.0f, \"vtx_hz\": %.0f, \"std\": \"%s\", \"synthetic\": true}\n",
-                 fs, centre_mhz * 1e6, vtx_mhz * 1e6, pal ? "PAL" : "NTSC");
-    std::fclose(j);
-  }
+    return std::complex<double>(re, im);
+  });
+  if (e) return e;
   std::fprintf(stderr, "wrote %s.cs16: %zu samples (%.3f s, %d %s frames), VTX %.1f MHz, centre %.1f MHz, CNR %.0f dB\n",
                out.c_str(), n, n / fs, frames, pal ? "PAL" : "NTSC", vtx_mhz, centre_mhz, cnr_db);
   return 0;
