@@ -43,6 +43,24 @@ it, a picture that has stopped), full size or in the preview, colour bars show t
   too, since DJI numbers its wide modes apart: 30 MHz or wider is V1/V2 at 50 Mbps (its CH1–CH3 are the 25 Mbps
   CH2, CH4 and CH6, per Oscar Liang's chart; DJI publishes only the 25 Mbps table) or the O3's or O4's widest
   channel. Only analog video can be watched, so picking a digital channel tunes nothing.
+
+  It also recognises **5 GHz Wi-Fi** networks, the most common thing in the way at 5.8 GHz, and marks each one on
+  the graph as a span of its own, named at the top (**Wi-Fi 149**, or **Wi-Fi 100–112** for one of 80 MHz), with a
+  chip after the others that says whether it is **in use** (on the air 5 % of the time or more) or **idle**. A
+  network is a channel of the Wi-Fi grid whose whole 16.6 MHz lights up at once, evenly, in bursts, and goes quiet
+  again: each retune's 12 ms are looked at a tenth of a millisecond at a time. Analog video (a few MHz wide at any
+  instant, its sync pulses there all the time) and a digital link that never stops are not taken for one. An idle
+  network only sends its beacons (a few tenths of a millisecond, ten times a second), so it barely shows in the band
+  picture, but takes its channel as soon as someone uses it. It is only caught now and then and may take a minute
+  to show; every network seen stays marked for 5 minutes after it was last seen, with dashed edges while only its
+  beacons have been heard (a network of 40 or 80 MHz sends them on one 20 MHz channel, and lights its whole block
+  only when it is in use). One in use shows in the band picture too, as something on the air. Channels next to one
+  another within one 40, 80 or 160 MHz block of the Wi-Fi grid read as one network. Every region's channels are
+  looked for (36–177, the US plan, which holds Europe's): a router only uses what its country allows, so what is
+  seen is what is there, and there is nothing to set. Not marked: a network right under a VTX that is on (that
+  channel is taken anyway), a network so busy it is never off (it shows as something on the air), the shoulders of a
+  strong network, and the bursts that a VTX very close to the phone makes 10 to 45 MHz either side of it. Tapping a
+  Wi-Fi chip tunes nothing. The idea comes from the channel analyser of [FPVDesktopWiFiReceiver](https://github.com/Pwn3dP4nd4/FPVDesktopWiFiReceiver).
 - **View** — aspect ratio (4:3, or 16:9 for a widescreen camera), scaling (**Fit** the whole picture,
   **Stretch** it to the screen, or **Crop** it to fill the screen), size (50–150 %), and **Goggles**: the
   picture twice, side by side, for goggles that hold a phone. Goggles have a size of their own (in place of
@@ -106,13 +124,13 @@ On screen: the OSD pill (channel, frequency, SNR, decode → screen latency) can
 
 - `native/dsp/` — video decoder (`video.cpp`: FM discriminator, sync, fields; the luma and colour filters,
   line drawing, sparkle repair and deinterlacing in files of their own), spectrum + pilot finding, the band picture the Spectrum tab draws
-  (`BandMap`). No hardware.
+  (`BandMap`), the Wi-Fi networks it marks (`wifi.cpp`). No hardware.
 - `native/radio/` — the adapter (wifi-sdr `Receiver`) + a DSP thread: scan, watch, sweep, stream test; antenna
   combining (`combine.cpp`); when 40 MS/s gives way to 20 (`fallback_policy.cpp`); torn frames kept off the
   screen (`frame_gate.cpp`); the retunes of a scan or sweep and each one's capture (`steps.cpp`); the sweep's
   passes and the band picture as the app reads it (`sweep.cpp`).
-- `native/tests/` — unit tests of the radio's rules, the decoder's sync and the Spectrum tab's band picture, no
-  hardware (`ctest`; `scripts/build-desktop.sh` runs them).
+- `native/tests/` — unit tests of the radio's rules, the decoder's sync and the Spectrum tab's band picture and
+  Wi-Fi networks, no hardware (`ctest`; `scripts/build-desktop.sh` runs them).
 - `native/render/` — the picture on screen (OpenGL ES 3): layout, side-by-side view, the menu's preview,
   the NO SIGNAL card.
 - `native/jni/` — the app's native side; a render thread draws each frame on the video Surface as it is decoded.
@@ -189,6 +207,8 @@ build/desktop/kp_replay rec/r4.cs16 --luma-comb --adaptive --smooth --repair   #
 KP_SIM_FILE=rec/r4.cs16 build/desktop/kp_sim --scan --offset-tune --diversity   # the radio's switches, no hardware
 KP_SIM_FILE=rec/r4.cs16 KP_SIM_LEAD_NS=146 build/desktop/kp_sim --watch 5769 --diversity   # path B 146 ns ahead of A: the combiner measures and undoes it
 KP_SIM_FILE=rec/r4.cs16 build/desktop/kp_sim --sweep 5635 5955   # the Spectrum tab's sweep: its band picture every second
+build/desktop/kp_gen rec/wifi --mhz 5785 --centre 5770 --wifi 153   # a Wi-Fi network in use on channel 153 beside a VTX (--wifi-quiet 153: beacons only)
+KP_SIM_FILE=rec/wifi.cs16 build/desktop/kp_sim --sweep 5635 5955   # ... "wifi" in the band picture: Wi-Fi 153 within a second (a quiet one: within a minute)
 KP_SIM_FILE=rec/r4.cs16 KP_SIM_DROP_EVERY=700 build/desktop/kp_sim --watch 5769   # a link that loses every 700th block: falls back to 20 MS/s (after the 10 s grace)
 KP_SIM_FILE=rec/r4.cs16 KP_SIM_RESTART_EVERY_MS=1500 build/desktop/kp_sim --watch 5769   # a stream that restarts every 1.5 s: torn frames hidden, then 20 MS/s
 KP_SIM_FILE=rec/r4.cs16 build/desktop/kp_sim --watch 5769 --msps 20               # watch at 20 MS/s (kp_live takes --msps too)
