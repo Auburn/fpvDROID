@@ -459,6 +459,7 @@ void Radio::begin_scan() {
   auto plan = scan_plan();
   _plan_n = plan.size();
   _step = 0;
+  _scan_t0_ms = now_ms();
   KP_LOGI("radio: scan, %zu steps", plan.size());
   _cut.start();
   start_steps(std::move(plan));
@@ -858,19 +859,24 @@ void Radio::scan_step_done() {
     }
     std::sort(_pilots.begin(), _pilots.end(), [](const Pilot &a, const Pilot &b) { return a.snr_db > b.snr_db; });
     if (done && current) {
-      // after a scan: the pilot watched before, if still there, else the strongest seen in this scan
-      const int64_t scan_start = now_ms() - 60000;
-      for (const auto &p : _pilots)
+      // after a scan: the pilot watched before, if this scan saw it again, else the strongest this scan saw. Only
+      // this scan's pilots count: _pilots keeps every one ever seen, and a VTX moved to another channel left one
+      // behind that the scan went back to (FPVDesktopWiFiReceiver measured it, and counts only its scan's too:
+      // the VTX moved from F4 to R3, the scan found R3 and watched F4, with no picture)
+      size_t seen = 0;
+      for (const auto &p : _pilots) {
+        if (p.seen_ms < _scan_t0_ms) continue;
+        seen++;
         if (_resume_hz > 0 && std::fabs(p.mhz * 1e6 - _resume_hz) < 4e6) next_watch = p.mhz * 1e6;
+      }
       if (next_watch == 0)
-        for (const auto &p : _pilots)
-          if (p.seen_ms >= scan_start) {
+        for (const auto &p : _pilots)  // strongest first
+          if (p.seen_ms >= _scan_t0_ms) {
             next_watch = p.mhz * 1e6;
             break;
           }
       if (next_watch == 0 && _resume_hz > 0) next_watch = _resume_hz;
-      KP_LOGI("scan: done, %zu pilot(s), %zu extra step(s)%s", _pilots.size(), _cut.given(),
-              next_watch > 0 ? ", watching" : "");
+      KP_LOGI("scan: done, %zu pilot(s), %zu extra step(s)%s", seen, _cut.given(), next_watch > 0 ? ", watching" : "");
       if (next_watch > 0) {
         _watch_hz = next_watch;
         _mode = Mode::Watch;

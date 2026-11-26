@@ -29,7 +29,7 @@ it, a picture that has stopped), full size or in the preview, colour bars show t
 
 - **Channel** — the band (Raceband, Fatshark, Boscam A / B / E, Lowband) and its eight channels. **Scan** is
   optional: it sweeps every band, marks the channels with video on them and tunes the strongest (or the one
-  you were on, if it is still there). It retunes every 20 MHz and sees 33 MHz at each, so a transmitter
+  you were on, if this scan finds it there). It retunes every 20 MHz and sees 33 MHz at each, so a transmitter
   close by (15–20 MHz wide) may never be whole in one: F1–F8 and R7 sit halfway between two retunes, E8 past the
   highest. Such a transmitter gets a retune of its own (up to eight a scan, each one more in the count under
   Scan). The channel is remembered for the next start.

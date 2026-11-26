@@ -64,8 +64,8 @@ public:
   // Radio still reads as open, but nothing more will come until open() again (which clears this).
   bool dead() const;
 
-  // Then watch prefer_hz if found (or, with nothing found, anyway), else the previous pilot again, else the
-  // strongest found. prefer_hz 0: the pilot being watched.
+  // Then watch prefer_hz if this scan finds it (or, with nothing found, anyway), else the strongest this scan
+  // finds; pilots from earlier scans do not count. prefer_hz 0: the pilot being watched.
   void scan(double prefer_hz = 0);
   void watch(double hz);
   void stream_test(int rate_sel, double seconds);
@@ -244,6 +244,7 @@ private:
   // back to the start by scan() for the status to show until that thread takes the new scan up.
   std::atomic<size_t> _step{0}, _plan_n{0};
   std::vector<Hump> _humps;  // this step's candidates (from the first kPsdSpan of the capture)
+  int64_t _scan_t0_ms = 0;   // when the scan under way began (its sightings are seen_ms >= this)
   double _resume_hz = 0;
   // test
   uint64_t _test_banks = 0, _test_gaps = 0, _test_last_seq = 0, _test_runs = 0;
