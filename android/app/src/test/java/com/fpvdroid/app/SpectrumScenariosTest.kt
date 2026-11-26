@@ -307,6 +307,8 @@ class SpectrumScenariosTest : AppHarness() {
         advance(300)
         assertEquals(SignalKind.DJI, graph.spectrum!!.carriers.first { it.mhz == 5695.2 }.kind)   // parsed from the radio's JSON
         assertEquals(null, graph.spectrum!!.carriers.first { it.mhz == 5806.3 }.kind)
+        assertEquals(Signal(5695.2 - 18.5 / 2, 5695.2 + 18.5 / 2, SignalKind.DJI, "DJI"), graph.spectrum!!.signals.first())   // and the signals
+        assertEquals(4, graph.spectrum!!.signals.size)
         // the F band is marked: a signal on one of its channels is named by it, the others by the analog channel they are on
         assertEquals(listOf("DJI R2", "Digital A7", "HDZero R4", "R5", "HDZero narrow F6"), used())
 
@@ -348,6 +350,19 @@ class SpectrumScenariosTest : AppHarness() {
         assertEquals(listOf("R4"), used())
         click(usedChip("R4"))
         assertEquals(call("watch", 5769e6, true), fake.last("watch"))
+    }
+
+    /** The radio's signals as the app reads them: each kind it knows, with its span, label and whether it is active; a kind it does not know yet is left out. */
+    @Test
+    fun theSignalsOfTheSpectrumAreReadAndAnUnknownKindIsSkipped() {
+        val sp = Spectrum.parse("""{"first_mhz":5735.0,"bin_mhz":0.5,"db":[0,0,0],"carriers":[{"mhz":5745.0,"width":16.5,"snr":12.0,"kind":"later"}],
+            "signals":[{"lo_mhz":5726.0,"hi_mhz":5744.0,"kind":"dji","label":"DJI","active":true},
+            {"lo_mhz":5735.0,"hi_mhz":5755.0,"kind":"later","label":"Later 149","active":false},
+            {"lo_mhz":5755.4,"hi_mhz":5782.5,"kind":"hdzero","label":"HDZero","active":false}]}""")!!
+        assertEquals(listOf(Signal(5726.0, 5744.0, SignalKind.DJI, "DJI"), Signal(5755.4, 5782.5, SignalKind.HDZERO, "HDZero", active = false)),
+            sp.signals)
+        assertEquals(null, sp.carriers.single().kind)
+        assertTrue(Spectrum.parse("""{"first_mhz":5735.0,"bin_mhz":0.5,"db":[0],"carriers":[]}""")!!.signals.isEmpty())
     }
 
     @Test
