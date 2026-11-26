@@ -38,7 +38,8 @@ interface Engine {
     /**
      * The decoder's picture switches (PictureOpts in native/dsp/video.h). At once. [colourComb]: the NTSC 3-line
      * chroma comb (fewer rainbows on fine detail, more decode CPU). [strips]: low latency, each part of the picture
-     * on screen as soon as its lines are decoded instead of a whole picture at a time (from the next field).
+     * on screen as soon as its lines are decoded instead of a whole picture at a time (from the next field), and
+     * drawn straight into the buffer the display shows where the phone can (native/render/front_buffer.h).
      */
     fun setPicture(lumaComb: Boolean, adaptiveComb: Boolean, smoothLines: Boolean, repair: Boolean, colourComb: Boolean,
                    strips: Boolean)
@@ -75,7 +76,7 @@ interface Engine {
     fun testCard(on: Boolean) {}
     /**
      * Debug: a switch by name. KP_CONCEAL and KP_FAST_CPUS are the radio's own ("0" turns one off); KP_FRONT_BUFFER
-     * (front-buffer drawing, a prototype), KP_PRESENT_ALIGN and KP_PRESENT_MARGIN_US (how strips go up) the
+     * ("0": no front-buffer drawing), KP_PRESENT_ALIGN and KP_PRESENT_MARGIN_US (how strips go up without it) the
      * screen's (native/render/screen.h). Any other is an environment variable for wifi-sdr / devourer, in place from
      * the next open ("" removes it).
      */
