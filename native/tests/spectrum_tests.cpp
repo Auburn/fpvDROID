@@ -28,7 +28,7 @@ static int g_checks = 0, g_failed = 0;
   } while (0)
 
 // ---------------------------------------------------------------------------------------- the air
-struct Signal {
+struct Tx {
   double mhz, width_mhz;
   float db;   // over the noise
   bool flat;  // digital (a flat top, steep sides); else an FM video hump
@@ -37,7 +37,7 @@ struct Signal {
 // What the radio's sweep does (radio.cpp: handle_sweep), pass after pass of the radio's own plan (Sweep), each step
 // a 40 MS/s spectrum of 1024 bins (fftshifted, dB) with a gain of its own (the chip's AGC), the RX filter rolling
 // off past 17 MHz, and noise. Its +-16.5 MHz (radio.cpp's kEdge) go into the map.
-static BandMap swept(const std::vector<Signal> &air, int passes, unsigned seed = 3) {
+static BandMap swept(const std::vector<Tx> &air, int passes, unsigned seed = 3) {
   constexpr double kFs = 40e6, kUse = 16.5e6;
   constexpr int kN = 1024;
   std::mt19937 rng(seed);
@@ -62,7 +62,7 @@ static BandMap swept(const std::vector<Signal> &air, int passes, unsigned seed =
         if (std::fabs(off) > 17e6) v -= (std::fabs(off) - 17e6) / 1e6 * 6;
         db[i] = static_cast<float>(v);
       }
-      map.add(db, kFs, c, kUse, t);
+      map.add(smooth_db(db, kFs / kN), kFs, c, kUse, t);
       t += 180;  // ~2 s a pass
     }
   }
@@ -126,7 +126,7 @@ static void a_signal_wider_than_a_step_is_found_whole() {
 // Bins not seen again within the time asked are forgotten; a gap of up to 3 MHz between seen bins is bridged.
 static void forget_and_bridge() {
   BandMap map(5600e6, 5700e6, 0.5e6);
-  std::vector<float> db(1024, 0.f);
+  std::vector<float> db(1024, 0.f);  // flat: its own smoothing
   map.add(db, 40e6, 5650e6, 16.5e6, 1000);
   double first = 0;
   auto out = map.get(5640e6, 5660e6, &first);

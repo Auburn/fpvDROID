@@ -59,7 +59,7 @@ FallbackPolicy::Stopped stopped_of(wsdr::RxGaveUp g) {
 }
 }  // namespace
 
-Radio::Radio(FrameSink frames) : _band(Sweep::kBandLo, Sweep::kBandHi, Sweep::kBandBin), _gate(std::move(frames)) {}
+Radio::Radio(FrameSink frames) : _gate(std::move(frames)) {}
 
 Radio::~Radio() { close(); }
 
@@ -480,12 +480,11 @@ void Radio::begin_sweep() {
     lo = _sweep.lo();
     hi = _sweep.hi();
     plan = _sweep.pass();
-    _band.forget(lo, hi, now_ms() - Sweep::kStaleMs);
-    _digital.forget(lo, hi, now_ms() - Sweep::kStaleMs);
+    _band.sweep_started(lo, hi, now_ms());
   }
   KP_LOGI("radio: sweep %.0f..%.0f MHz, %zu steps a pass", lo / 1e6, hi / 1e6, plan.size());
   start_steps(std::move(plan));
-  _digital_scan.reset();
+  _analysers.sweep_started();
 }
 
 void Radio::begin_test() {
@@ -783,8 +782,7 @@ void Radio::handle_scan(Bank &b) {
 
 void Radio::handle_sweep(Bank &b) {
   if (!capture_step(b)) return;
-  const bool pass_done = !next_step();
-  if (pass_done) {
+  if (!next_step()) {
     // a pass done: the next one, on the other grid. Unless a mode call came meanwhile: the next bank takes it up,
     // and a new sweep starts from its own first pass.
     std::vector<double> plan;
@@ -795,29 +793,17 @@ void Radio::handle_sweep(Bank &b) {
     }
     start_steps(std::move(plan));
   }
-  // the step just taken, while the chip retunes: its spectrum, and what in it is digital (from its 12 ms of IQ in a
-  // row, which a TDD frame or a burst shows in)
-  const std::vector<cf> x = _steps.iq();
-  const std::vector<float> db = spectrum_db(x);
-  add_spectrum(db, _steps.centre_hz());
-  add_digital(_digital_scan.step(db, x.data(), x.size(), kFs, _steps.centre_hz(), kEdge), pass_done);
-  if (pass_done) _digital_scan.reset();  // the next pass starts at its own first step: nothing to join it with
+  // the step just taken, while the chip retunes: measured with no lock held (its 12 ms of IQ in a row, which a TDD
+  // frame or a burst shows in), then into the band picture
+  const StepFindings f = _analysers.step(_steps.iq(), kFs, _steps.centre_hz(), kEdge);
+  std::lock_guard<std::mutex> l(_m);
+  _band.add(f, now_ms());
 }
 
 void Radio::add_spectrum(const std::vector<float> &db, double centre_hz) {
+  const std::vector<float> sm = smooth_db(db, kFs / db.size());
   std::lock_guard<std::mutex> l(_m);
-  _band.add(db, kFs, centre_hz, kEdge, now_ms());
-}
-
-// A sweep step's digital signals into the verdicts kept. At the end of a pass, those in the span that the passes
-// over them have not found again for DigitalMap::kKeepMs go: the band picture's levels fade by themselves, being
-// averaged with new ones, but a verdict is only ever confirmed. Once the sweep stops, both stay as last seen (and a
-// pass cut short by a mode call is not counted, as in handle_sweep).
-void Radio::add_digital(const std::vector<DigitalSignal> &found, bool pass_done) {
-  const int64_t t = now_ms();
-  std::lock_guard<std::mutex> l(_m);
-  _digital.add(found, t);
-  if (pass_done && _mode_epoch == _epoch_seen) _digital.forget(_sweep.lo(), _sweep.hi(), t - DigitalMap::kKeepMs);
+  _band.add_levels(sm, kFs, centre_hz, kEdge, now_ms());
 }
 
 void Radio::scan_step_done() {
@@ -983,19 +969,9 @@ std::string Radio::status_json() {
 }
 
 std::string Radio::spectrum_json(double lo_hz, double hi_hz) {
-  double first = 0, at = 0;
-  std::vector<float> db;
-  std::vector<DigitalSignal> digital;
-  uint64_t sweeps;
-  {
-    std::lock_guard<std::mutex> l(_m);
-    db = _band.get(lo_hz, hi_hz, &first);
-    digital = _digital.all();
-    if (_mode == Mode::Sweep || _mode == Mode::Scan) at = _req_hz;
-    sweeps = _mode == Mode::Sweep ? _sweep.passes() : 0;
-  }
-  // the bin size is fixed: no lock needed
-  return band_json(db, first, _band.bin_hz(), at, 2 * kEdge, sweeps, digital);
+  std::lock_guard<std::mutex> l(_m);
+  const double at = _mode == Mode::Sweep || _mode == Mode::Scan ? _req_hz : 0;
+  return _band.json(lo_hz, hi_hz, at, 2 * kEdge, _mode == Mode::Sweep ? _sweep.passes() : 0);
 }
 
 }  // namespace kp

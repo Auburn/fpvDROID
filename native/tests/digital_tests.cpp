@@ -1,11 +1,12 @@
 // kp_digital_tests: the Spectrum tab telling digital signals apart (dsp/digital.h), from sweep steps made here: 12 ms
-// of 40 MS/s IQ a step, on the radio's own plan (Sweep), as radio.cpp's handle_sweep takes them (ctest: "digital").
-// The cases are FPVDesktopWiFiReceiver's test/digital_scan_test.cpp (github.com/Pwn3dP4nd4/fpvdesktopwifireceiver,
-// GPL-2.0), run through the sweep's two grids instead of upstream's scan.
+// of 40 MS/s IQ a step, on the radio's own plan (Sweep), each taken as radio.cpp's handle_sweep takes it
+// (StepAnalysers::step, then BandPicture::add: sweep.h) (ctest: "digital"). The cases are FPVDesktopWiFiReceiver's
+// test/digital_scan_test.cpp (github.com/Pwn3dP4nd4/fpvdesktopwifireceiver, GPL-2.0), run through the sweep's two
+// grids instead of upstream's scan.
 //
 //   kp_digital_tests          every case; exits 1 if any fails
 //   kp_digital_tests -v       ... with every block each step sees, and how it measures
-//   kp_digital_tests --time   what the digital scan costs a sweep step, against the step's spectrum
+//   kp_digital_tests --time   what a sweep step costs: its spectrum, its grid, telling digital signals apart
 //
 // The signals are models, not captures (tools/digital_tx.h): continuous flat OFDM for HDZero, DJI's TDD frame as
 // measured upstream on a real transmitter, Wi-Fi in bursts, and analog FM video.
@@ -21,6 +22,7 @@
 #include "digital_tx.h"
 #include "log.h"
 #include "spectrum.h"
+#include "step_grid.h"
 #include "sweep.h"
 
 using namespace kp;
@@ -150,43 +152,41 @@ static std::vector<cf> step_samples(double centre_hz, const std::vector<Air> &ai
   return x;
 }
 
-static std::vector<float> spectrum_of(const std::vector<cf> &x) {
-  Psd psd(1024);
-  psd.add(x.data(), x.size());
-  return psd.db();
+static StepGrid grid_of(const std::vector<cf> &x) {
+  StepGrid g;
+  g.build(x.data(), x.size(), kFs, kEdge);
+  return g;
 }
 
 // ---------------------------------------------------------------------------------------- the sweep
-// What the radio does on the Spectrum tab (radio.cpp: handle_sweep, add_digital), pass after pass of its own plan
-// over 5635..5955 MHz: each step's spectrum into the band picture and, with its IQ, into the digital scan; the
-// verdicts kept, and at the end of a pass those not found again for DigitalMap::kKeepMs forgotten. A step whose span
-// is nowhere near anything on the air holds only noise and is left out (it would change nothing but the time taken),
-// unless every_step.
+// The radio's sweep on the Spectrum tab, pass after pass of its own plan over 5635..5955 MHz, each step taken as
+// Radio::handle_sweep takes it: measured (StepAnalysers::step), then into the band picture (BandPicture::add), which
+// keeps the verdicts and forgets those the steps over them have not found again for DigitalMap::kKeepMs. A step whose
+// span is nowhere near anything on the air holds only noise and is left out (it would change nothing but the time
+// taken), unless every_step.
 struct Swept {
-  BandMap band{Sweep::kBandLo, Sweep::kBandHi, Sweep::kBandBin};
-  DigitalMap digital;
-  DigitalScan scan;
+  StepAnalysers analysers;
+  BandPicture picture;
   Sweep sweep;
   int64_t t = 1000;
 
-  Swept() { sweep.start(5635e6, 5955e6); }
+  Swept() {
+    sweep.start(5635e6, 5955e6);
+    picture.sweep_started(sweep.lo(), sweep.hi(), t);
+    analysers.sweep_started();
+  }
 
-  // One pass on the sweep's grid of the moment; what it found (the verdicts as they stand after it) is digital.all().
+  // One pass on the sweep's grid of the moment; the verdicts as they stand after it are verdicts().
   void pass(const std::vector<Air> &air, bool dc_notch = false, bool every_step = false) {
     for (double c : sweep.pass()) {
       bool near = every_step;
       for (const auto &s : air) near = near || std::fabs(c - s.mhz * 1e6) < kEdge + s.width_mhz * 1e6 / 2 + 5e6;
       t += kStepMs;
-      if (!near) continue;
-      const auto x = step_samples(c, air, dc_notch);
-      const auto db = spectrum_of(x);
-      band.add(db, kFs, c, kEdge, t);
-      digital.add(scan.step(db, x.data(), x.size(), kFs, c, kEdge), t);
+      if (near) picture.add(analysers.step(step_samples(c, air, dc_notch), kFs, c, kEdge), t);
     }
-    digital.forget(sweep.lo(), sweep.hi(), t - DigitalMap::kKeepMs);
-    scan.reset();
     sweep.pass_done();
   }
+  const std::vector<DigitalSignal> &verdicts() const { return picture.digital().all(); }
 };
 
 // A pass on each grid: what the Spectrum tab says after its first two passes.
@@ -194,7 +194,7 @@ static std::vector<DigitalSignal> judged(const std::vector<Air> &air, bool every
   Swept s;
   s.pass(air, false, every_step);
   s.pass(air, false, every_step);
-  return s.digital.all();
+  return s.verdicts();
 }
 
 static void expect(const char *name, const std::vector<DigitalSignal> &got, DigitalKind kind, double mhz = 0,
@@ -220,18 +220,75 @@ static void expect(const char *name, const std::vector<DigitalSignal> &got, Digi
 static void the_frame_and_the_duty() {
   const double f0 = -9e6, f1 = 9e6;
   for (int mode : {1, 2}) {
-    const auto x = step_samples(5770e6, {dji(5770, 15, mode)});
-    const double frame = tdd_frame(x.data(), x.size(), kFs, f0, f1);
-    std::printf("DJI frame (pattern %d): %.3f ms, duty %.2f\n", mode, frame * 1e3,
-                band_duty(x.data(), x.size(), kFs, f0, f1));
+    const StepGrid g = grid_of(step_samples(5770e6, {dji(5770, 15, mode)}));
+    const double frame = tdd_frame(g, f0, f1);
+    std::printf("DJI frame (pattern %d): %.3f ms, duty %.2f\n", mode, frame * 1e3, band_duty(g, f0, f1));
     CHECK(std::fabs(frame - 2.5e-3) <= 0.1e-3);
   }
-  auto x = step_samples(5770e6, {hdzero(5770)});
-  CHECK(tdd_frame(x.data(), x.size(), kFs, -13.5e6, 13.5e6) == 0);
-  CHECK(band_duty(x.data(), x.size(), kFs, -13.5e6, 13.5e6) > 0.95f);
-  x = step_samples(5770e6, {wifi(5770, 16.25, 0.3)});
-  CHECK(tdd_frame(x.data(), x.size(), kFs, f0, f1) == 0);
-  CHECK(band_duty(x.data(), x.size(), kFs, f0, f1) < 0.9f);
+  StepGrid g = grid_of(step_samples(5770e6, {hdzero(5770)}));
+  CHECK(tdd_frame(g, -13.5e6, 13.5e6) == 0);
+  CHECK(band_duty(g, -13.5e6, 13.5e6) > 0.95f);
+  g = grid_of(step_samples(5770e6, {wifi(5770, 16.25, 0.3)}));
+  CHECK(tdd_frame(g, f0, f1) == 0);
+  CHECK(band_duty(g, f0, f1) < 0.9f);
+}
+
+// The grid itself: 1875 frames of 256 in a step's 12 ms, 117 slices of 16; a slice the mean of its frames, bin by bin;
+// noise's floor at the mean of its cells, a tone in the bin of its frequency.
+static void the_grid() {
+  std::vector<cf> x = step_samples(5770e6, {});
+  for (size_t i = 0; i < x.size(); i++) x[i] += 100.f * std::polar(1.f, static_cast<float>(2 * M_PI * 5e6 * i / kFs));
+  const StepGrid g = grid_of(x);
+  CHECK(g.frames() == 1875 && g.slices() == 117);
+  const int tone = StepGrid::kN / 2 + 32;  // 5 MHz up: 32 bins of 156.25 kHz
+  CHECK(std::fabs(g.offset_hz(tone) - 5e6) < 1);
+  double mean = 0, frames = 0;
+  int cells = 0;
+  for (int k = 0; k < StepGrid::kN; k++) {
+    if (!g.in_span(k) || std::abs(k - tone) < 3) continue;
+    for (size_t s = 0; s < g.slices(); s++, cells++) mean += g.slice(s)[k];
+  }
+  mean /= cells;
+  for (int f = 0; f < StepGrid::kSliceFrames; f++) frames += g.frame(16 + f)[tone];
+  CHECK(std::fabs(g.slice(1)[tone] - frames / StepGrid::kSliceFrames) < 1e-3 * g.slice(1)[tone]);
+  std::printf("grid: floor %.0f, the noise's cells %.0f on average, the tone's %.0f\n", g.floor(), mean, g.slice(1)[tone]);
+  CHECK(std::fabs(10 * std::log10(g.floor() / mean)) < 0.5);
+  CHECK(g.slice(1)[tone] > 100 * g.floor());
+  CHECK(!g.in_span(StepGrid::kN / 2) && !g.in_span(0) && g.in_span(tone));  // the DC notch, past the span
+}
+
+// judge, rule by rule: a block on the band (absolute), as DigitalScan::step hands it over.
+static void the_rules() {
+  using K = DigitalKind;
+  const auto block = [](double mhz, double width_mhz, float flat, float duty, double frame_ms, float snr = 15) {
+    WideRegion r;
+    r.f0_hz = (mhz - width_mhz / 2) * 1e6;
+    r.f1_hz = (mhz + width_mhz / 2) * 1e6;
+    r.snr_db = snr;
+    r.flat = flat;
+    r.duty = duty;
+    r.frame_s = frame_ms * 1e-3;
+    return r;
+  };
+  CHECK(judge(block(5769, 27, 0.95f, 1, 0)) == K::HDZero);
+  CHECK(judge(block(5771, 27, 0.95f, 1, 0)) == K::HDZero);       // 2 MHz off R4
+  CHECK(judge(block(5772, 27, 0.95f, 1, 0)) == K::Other);        // 3 MHz off: no HDZero channel
+  CHECK(judge(block(5362, 27, 0.95f, 1, 0)) == K::HDZero);       // L1
+  CHECK(judge(block(5745, 27, 0.95f, 1, 0)) == K::Other);        // A7: no HDZero channel
+  CHECK(judge(block(5769, 17, 0.95f, 1, 0)) == K::HDZeroNarrow);
+  CHECK(judge(block(5769, 13, 0.95f, 1, 0)) == K::Other);
+  CHECK(judge(block(5769, 11, 0.95f, 1, 0)) == K::None);         // narrower than 12 MHz
+  CHECK(judge(block(5769, 32, 0.95f, 1, 0)) == K::None);         // wider than 31
+  CHECK(judge(block(5769, 27, 0.95f, 1, 0, 7)) == K::None);      // weaker than 8 dB
+  CHECK(judge(block(5769, 27, 0.95f, 0.5f, 0)) == K::None);      // in bursts with no rhythm
+  CHECK(judge(block(5769, 27, 0.7f, 1, 0)) == K::None);          // not flat
+  CHECK(judge(block(5695, 18, 0.5f, 0.4f, 2.5)) == K::DJI);      // DJI's frame: less flat will do, gaps or not
+  CHECK(judge(block(5695, 18, 0.5f, 0.4f, 2.41)) == K::DJI);
+  CHECK(judge(block(5695, 18, 0.5f, 0.4f, 2.59)) == K::DJI);
+  CHECK(judge(block(5695, 18, 0.29f, 0.4f, 2.5)) == K::None);
+  CHECK(judge(block(5695, 18, 0.5f, 0.4f, 2.39)) == K::None);    // another frame is as flat as any block must be
+  CHECK(judge(block(5695, 18, 0.9f, 0.4f, 2.39)) == K::Other);
+  CHECK(judge(block(5769, 27, 0.9f, 0.4f, 1.2)) == K::Other);    // a frame of its own, even on an HDZero channel
 }
 
 // Upstream's cases, each a pass on each grid of the sweep.
@@ -291,26 +348,41 @@ static void a_verdict_holds_across_passes_that_cannot_judge_it() {
     Swept one;
     for (int k = 0; k < pass; k++) one.sweep.pass_done();  // that grid on its own
     one.pass(air);
-    if (!one.digital.all().empty()) found_in = found_in < 0 ? pass : 2;
+    if (!one.verdicts().empty()) found_in = found_in < 0 ? pass : 2;
   }
   CHECK(found_in == 1);  // grid 1 only
   for (int pass = 0; pass < 6; pass++) {
     s.pass(air);
     if (pass >= 1) {
-      CHECK(s.digital.all().size() == 1);
-      if (!s.digital.all().empty()) CHECK(s.digital.all()[0].kind == DigitalKind::HDZero);
+      CHECK(s.verdicts().size() == 1);
+      if (!s.verdicts().empty()) CHECK(s.verdicts()[0].kind == DigitalKind::HDZero);
     }
   }
   // switched off: the verdict stays a while, then goes
   const int64_t off_at = s.t;
   int passes_left = 0;
-  while (!s.digital.all().empty() && passes_left < 10) {
+  while (!s.verdicts().empty() && passes_left < 10) {
     s.pass({}, false, true);
     passes_left++;
   }
   std::printf("verdict gone %d passes (%.1f s) after the signal\n", passes_left, (s.t - off_at) / 1000.0);
-  CHECK(s.digital.all().empty());
+  CHECK(s.verdicts().empty());
   CHECK(passes_left >= 3);  // not at the first pass that misses it
+}
+
+// A signal centred just past the end of the span (5965 MHz, for 5635..5955) is in the reach of the step at that end,
+// which judges it; it goes the same way once it has gone, while the sweep runs.
+static void a_verdict_past_the_span_goes_too() {
+  Swept s;
+  s.pass({dji(5965)});
+  s.pass({dji(5965)});
+  CHECK(s.verdicts().size() == 1);
+  int passes = 0;
+  while (!s.verdicts().empty() && passes < 10) {
+    s.pass({}, false, true);
+    passes++;
+  }
+  CHECK(s.verdicts().empty());
 }
 
 // The verdicts kept: one per signal (a new verdict within kSameHz takes the old one's place), forgotten only in the
@@ -335,7 +407,8 @@ static void the_map_of_verdicts() {
 }
 
 // Through the band picture, as the app reads it: what is on the 5.8 GHz band, swept with the chip's DC notch, comes
-// out of band_json with each carrier's kind (or none, for the analog transmitter and Wi-Fi's bursts).
+// out of BandPicture::json as signals, and each carrier on one with its kind (none for the analog transmitter and
+// Wi-Fi's bursts).
 struct JsonCarrier {
   double mhz, width;
   std::string kind;
@@ -343,7 +416,8 @@ struct JsonCarrier {
 static std::vector<JsonCarrier> carriers_in(const std::string &json) {
   std::vector<JsonCarrier> out;
   size_t at = json.find("\"carriers\":[");
-  while (at != std::string::npos && (at = json.find("{\"mhz\":", at)) != std::string::npos) {
+  const size_t stop = json.find("\"signals\":[");
+  while (at != std::string::npos && (at = json.find("{\"mhz\":", at)) != std::string::npos && at < stop) {
     JsonCarrier c{};
     std::sscanf(json.c_str() + at, "{\"mhz\":%lf,\"width\":%lf", &c.mhz, &c.width);
     const size_t end = json.find('}', at);
@@ -361,14 +435,34 @@ static const JsonCarrier *near(const std::vector<JsonCarrier> &cs, double mhz) {
   return nullptr;
 }
 
+struct JsonSignal {
+  double lo, hi;
+  std::string kind, label;
+  bool active;
+};
+static std::vector<JsonSignal> signals_in(const std::string &json) {
+  std::vector<JsonSignal> out;
+  size_t at = json.find("\"signals\":[");
+  while (at != std::string::npos && (at = json.find("{\"lo_mhz\":", at)) != std::string::npos) {
+    JsonSignal s{};
+    char kind[32] = {}, label[64] = {}, active[8] = {};
+    std::sscanf(json.c_str() + at, "{\"lo_mhz\":%lf,\"hi_mhz\":%lf,\"kind\":\"%31[^\"]\",\"label\":\"%63[^\"]\",\"active\":%7[a-z]",
+                &s.lo, &s.hi, kind, label, active);
+    s.kind = kind;
+    s.label = label;
+    s.active = std::string(active) == "true";
+    out.push_back(s);
+    at = json.find('}', at);
+  }
+  return out;
+}
+
 static void kinds_come_out_with_the_band_picture() {
   const std::vector<Air> air = {hdzero(5658), dji(5735), fm(5806, false, 25), wifi(5865, 16.25, 0.3),
                                 narrow(5917)};
   Swept s;
   for (int pass = 0; pass < 4; pass++) s.pass(air, true, true);
-  double first = 0;
-  const auto db = s.band.get(5635e6, 5955e6, &first);
-  const std::string json = band_json(db, first, s.band.bin_hz(), 0, 2 * kEdge, 4, s.digital.all());
+  const std::string json = s.picture.json(5635e6, 5955e6, 0, 2 * kEdge, 4);
   const auto cs = carriers_in(json);
   for (const auto &c : cs) std::printf("carrier %.1f MHz, %.1f MHz wide: %s\n", c.mhz, c.width, c.kind.empty() ? "-" : c.kind.c_str());
   const JsonCarrier *h = near(cs, 5658), *d = near(cs, 5735), *a = near(cs, 5806), *w = near(cs, 5865),
@@ -378,8 +472,28 @@ static void kinds_come_out_with_the_band_picture() {
   CHECK(a && a->kind.empty());
   CHECK(!w || w->kind.empty());  // at 30 % of the time it may not stand 6 dB over the floor at all
   CHECK(n && n->kind == "hdzero_narrow");
-  // and nothing judged without verdicts: the carriers as before, no "kind" at all
-  CHECK(band_json(db, first, s.band.bin_hz(), 0, 2 * kEdge, 4).find("\"kind\"") == std::string::npos);
+  const auto sig = signals_in(json);
+  for (const auto &g : sig)
+    std::printf("signal %.1f..%.1f MHz: %s (%s)%s\n", g.lo, g.hi, g.kind.c_str(), g.label.c_str(), g.active ? "" : ", idle");
+  CHECK(sig.size() == 3);
+  if (sig.size() == 3) {
+    CHECK(sig[0].kind == "hdzero" && sig[0].label == "HDZero" && sig[0].lo < 5658 && sig[0].hi > 5658);
+    CHECK(sig[1].kind == "dji" && sig[1].label == "DJI" && sig[1].lo < 5735 && sig[1].hi > 5735);
+    CHECK(sig[2].kind == "hdzero_narrow" && sig[2].label == "HDZero narrow" && sig[2].lo < 5917 && sig[2].hi > 5917);
+    CHECK(sig[0].active && sig[1].active && sig[2].active);
+  }
+  CHECK(signals_in(s.picture.json(5800e6, 5955e6, 0, 2 * kEdge, 4)).size() == 1);  // the ones reaching into the span
+
+  // A scan's steps judge nothing: the same air seen by them alone gives the carriers with no "kind", and no signals.
+  BandPicture scanned;
+  StepAnalysers measure;
+  for (double c : s.sweep.pass()) {
+    const StepFindings f = measure.step(step_samples(c, air, true), kFs, c, kEdge);
+    scanned.add_levels(f.spectrum, f.fs, f.centre_hz, f.edge_hz, s.t);
+  }
+  const std::string bare = scanned.json(5635e6, 5955e6, 0, 2 * kEdge, 0);
+  CHECK(!carriers_in(bare).empty());
+  CHECK(bare.find("\"kind\"") == std::string::npos && bare.find("\"signals\":[]") != std::string::npos);
 }
 
 // ---------------------------------------------------------------------------------------- the cost
@@ -404,23 +518,34 @@ static void time_it() {
       {"DJI 20 MHz whole", {dji(5770)}, 5770e6},
       {"two blocks (DJI + HDZero half)", {dji(5760), hdzero(5790)}, 5770e6},
   };
-  std::printf("a sweep step: %zu samples (12 ms at 40 MS/s)\n", kStepSamples);
+  std::printf("a sweep step: %zu samples (12 ms at 40 MS/s), ms\n", kStepSamples);
+  std::printf("%-32s %8s %8s %8s %8s | %8s %8s %8s\n", "", "spectrum", "smooth", "grid", "digital", "step", "add", "json");
   for (const auto &c : cases) {
     const auto x = step_samples(c.centre, c.air);
-    const auto db = spectrum_of(x);
-    const double psd = ms_per(kRuns, [&] { spectrum_of(x); });
-    const double scan = ms_per(kRuns, [&] {
+    Psd psd(1024);
+    const double spectrum = ms_per(kRuns, [&] {
+      psd.reset();
+      psd.add(x.data(), x.size());
+    });
+    const auto db = psd.db();
+    std::vector<float> sm;
+    const double smooth = ms_per(kRuns, [&] { sm = smooth_db(db, kFs / db.size()); });
+    StepGrid g;
+    const double grid = ms_per(kRuns, [&] { g.build(x.data(), x.size(), kFs, kEdge); });
+    const double digital = ms_per(kRuns, [&] {
       DigitalScan s;
-      s.step(db, x.data(), x.size(), kFs, c.centre, kEdge);
+      s.step(sm, g, c.centre, kEdge);
     });
-    // upstream's way: band_duty and tdd_frame each with FFTs of their own, for every wide block
-    const double each = ms_per(kRuns, [&] {
-      for (const auto &r : find_wide_regions(db, kFs, kEdge)) {
-        band_duty(x.data(), x.size(), kFs, r.f0_hz, r.f1_hz);
-        tdd_frame(x.data(), x.size(), kFs, r.f0_hz, r.f1_hz);
-      }
-    });
-    std::printf("%-32s spectrum %.2f ms, digital scan %.2f ms (upstream's way %.2f ms)\n", c.name, psd, scan, each);
+    // the whole of it: what Radio::handle_sweep takes outside its lock, then under it, and the poll's JSON
+    StepAnalysers a;
+    StepFindings f;
+    const double step = ms_per(kRuns, [&] { f = a.step(x, kFs, c.centre, kEdge); });
+    BandPicture p;
+    int64_t t = 1000;
+    const double add = ms_per(kRuns, [&] { p.add(f, t += 180); });
+    const double json = ms_per(kRuns, [&] { p.json(5635e6, 5955e6, c.centre, 2 * kEdge, 1); });
+    std::printf("%-32s %8.2f %8.2f %8.2f %8.2f | %8.2f %8.2f %8.2f\n", c.name, spectrum, smooth, grid, digital, step, add,
+                json);
   }
 }
 
@@ -435,6 +560,9 @@ int main(int argc, char **argv) {
   the_cases();
   a_verdict_holds_across_passes_that_cannot_judge_it();
   kinds_come_out_with_the_band_picture();
+  the_grid();
+  the_rules();
+  a_verdict_past_the_span_goes_too();
   std::printf("%d checks, %d failed\n", g_checks, g_failed);
   return g_failed ? 1 : 0;
 }

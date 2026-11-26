@@ -1,11 +1,12 @@
 // Ported from FPVDesktopWiFiReceiver's src/kp_ext/digital_scan.cpp (github.com/Pwn3dP4nd4/fpvdesktopwifireceiver,
 // GPL-2.0): the thresholds and the reasons for them are upstream's. What is fpvDROID's own: band_duty and tdd_frame
-// share their FFTs (frame_power, with an FFT of its own: TimeFft), the timing is worked out only for blocks that may
-// be digital, and the verdicts are kept from pass to pass (DigitalMap).
+// read the step's grid (StepGrid: its FFTs taken once a step, for every measure), the timing is worked out only for
+// blocks that may be digital, every rule is in judge, and the verdicts are kept from pass to pass (DigitalMap).
 #include "digital.h"
 
 #include <algorithm>
 #include <cmath>
+#include <string>
 
 #include "log.h"
 
@@ -18,7 +19,7 @@ constexpr double kMinVisible = 6e6;    // a narrower piece is left out (and not 
 constexpr double kJoinGap = 0.5e6;     // narrow gaps inside a block (a null subcarrier at DC, the chip's DC notch)
 constexpr double kClipMargin = 0.3e6;  // this close to the edge of the span: cut
 constexpr float kMinFlat = 0.8f;       // OFDM ~0.95; FM with a picture, less
-constexpr float kMinFlatTdd = 0.3f;    // with DJI's frame (see DigitalScan::step)
+constexpr float kMinFlatTdd = 0.3f;    // with DJI's frame (see judge)
 constexpr float kMinDuty = 0.9f;       // HDZero sends without a break; Wi-Fi comes in bursts
 constexpr double kMinWidth = 12e6, kMaxWidth = 31e6;
 constexpr double kHdzWideMin = 22e6, kHdzNarrowMin = 14e6;  // 27 and 17 MHz as specified
@@ -28,88 +29,38 @@ constexpr double kTddMinFrame = 1e-3, kTddMaxFrame = 4e-3;  // at least 3 frames
 constexpr double kTddOnMin = 0.15, kTddOnMax = 0.95;        // neither almost silent nor continuous (HDZero)
 constexpr double kTddMinRepeat = 0.7;  // how much the pattern repeats a period later, chance taken out (0..1)
 constexpr double kDjiFrame = 2.5e-3, kDjiFrameTol = 0.1e-3;
-// the timing measures: band power in kTimeN-point FFT frames (6.4 us at 40 MS/s), summed over kDutyFrames for
-// band_duty (~0.1 ms slices) and over kTddFrames for tdd_frame (12.8 us slices)
-constexpr int kTimeN = 256, kDutyFrames = 16, kTddFrames = 2;
+// the timing measures: band power in the grid's frames (6.4 us at 40 MS/s), summed over kDutyFrames for band_duty
+// (~0.1 ms slices) and over kTddFrames for tdd_frame (12.8 us slices)
+constexpr int kDutyFrames = StepGrid::kSliceFrames, kTddFrames = 2;
 
-// Median-smoothed spectrum over +-0.3 MHz, as spectrum.cpp's: takes out the DC line and narrow spurs.
-std::vector<float> median_smooth(const std::vector<float> &db, double bin) {
-  const int n = static_cast<int>(db.size());
-  const int hw = std::max(2, static_cast<int>(0.3e6 / bin));
-  std::vector<float> sm(n), win;
-  for (int i = 0; i < n; i++) {
-    win.clear();
-    for (int k = std::max(0, i - hw); k <= std::min(n - 1, i + hw); k++) win.push_back(db[k]);
-    std::nth_element(win.begin(), win.begin() + win.size() / 2, win.end());
-    sm[i] = win[win.size() / 2];
-  }
-  return sm;
-}
-
-float median_of(std::vector<float> v) {
-  if (v.empty()) return 0;
-  std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
-  return v[v.size() / 2];
-}
-
-// The bins of a kTimeN-point FFT (not fftshifted) in the band f0..f1 less 10 % at each side (where the edges fall).
-std::vector<int> band_bins(double fs, double f0_hz, double f1_hz) {
+// The grid's bins in the band f0..f1 (relative to the centre) less 10 % at each side (where the edges fall): first
+// and one past the last, in a row (the grid's bins are fftshifted). Empty when first == last.
+struct Bins {
+  int first = 0, end = 0;
+};
+Bins band_bins(const StepGrid &g, double f0_hz, double f1_hz) {
   const double w = f1_hz - f0_hz;
   const double a = f0_hz + 0.1 * w, b = f1_hz - 0.1 * w;
-  std::vector<int> bins;
-  for (int k = 0; k < kTimeN; k++) {
-    const double f = (k < kTimeN / 2 ? k : k - kTimeN) * fs / kTimeN;
-    if (f >= a && f <= b) bins.push_back(k);
+  Bins bins{StepGrid::kN, StepGrid::kN};
+  for (int k = 0; k < StepGrid::kN; k++) {
+    const double f = g.offset_hz(k);
+    if (f < a || f > b) continue;
+    if (bins.first == StepGrid::kN) bins.first = k;
+    bins.end = k + 1;
   }
   return bins;
 }
 
-// A Hann-windowed kTimeN-point FFT (as fft_inplace gives it) with its window, its bit-reversed order and its twiddles
-// worked out once: the timing measures take 1875 of these a step, and fft_inplace, which works its twiddles out as it
-// goes, takes about twice as long.
-struct TimeFft {
-  float win[kTimeN];
-  int rev[kTimeN];
-  cf tw[kTimeN / 2];
-
-  TimeFft() {
-    for (int i = 0; i < kTimeN; i++) {
-      win[i] = static_cast<float>(0.5 - 0.5 * std::cos(2 * M_PI * i / kTimeN));
-      int r = 0;
-      for (int b = 1, rb = kTimeN / 2; b < kTimeN; b <<= 1, rb >>= 1) r |= i & b ? rb : 0;
-      rev[i] = r;
-    }
-    for (int k = 0; k < kTimeN / 2; k++)
-      tw[k] = cf(static_cast<float>(std::cos(-2 * M_PI * k / kTimeN)), static_cast<float>(std::sin(-2 * M_PI * k / kTimeN)));
-  }
-  // out = FFT of src[0..kTimeN) windowed
-  void run(const cf *src, cf *out) const {
-    for (int i = 0; i < kTimeN; i++) out[rev[i]] = src[i] * win[i];
-    for (int half = 1, step = kTimeN / 2; half < kTimeN; half <<= 1, step >>= 1)
-      for (int i = 0; i < kTimeN; i += 2 * half)
-        for (int k = 0; k < half; k++) {
-          const cf u = out[i + k], v = out[i + k + half] * tw[k * step];
-          out[i + k] = u + v;
-          out[i + k + half] = u - v;
-        }
-  }
-};
-
-// The power of each band (its bins) in each kTimeN-sample frame of x, frames one after another from x[0], Hann
-// window: out[b][i] is band b in frame i. band_duty and tdd_frame are both sums of these over a few frames (upstream
-// worked out each with FFTs of its own, the same ones), and the bands of a step's blocks share each frame's FFT:
-// 1875 FFTs for a step's 12 ms, however many blocks it has.
-std::vector<std::vector<double>> frame_power(const cf *x, size_t n, const std::vector<std::vector<int>> &bands) {
-  static const TimeFft fft;
-  const size_t frames = n / kTimeN;
-  std::vector<std::vector<double>> out(bands.size(), std::vector<double>(frames, 0.0));
-  std::vector<cf> buf(kTimeN);
-  for (size_t f = 0; f < frames; f++) {
-    fft.run(x + f * kTimeN, buf.data());
+// The power of each band (its bins) in each of the grid's frames: out[b][i] is band b in frame i. band_duty and
+// tdd_frame are both sums of these over a few frames (upstream worked out each with FFTs of its own, the same ones).
+std::vector<std::vector<double>> frame_power(const StepGrid &g, const std::vector<Bins> &bands) {
+  std::vector<std::vector<double>> out(bands.size(), std::vector<double>(g.frames(), 0.0));
+  for (size_t f = 0; f < g.frames(); f++) {
+    const float *p = g.frame(f);
     for (size_t b = 0; b < bands.size(); b++) {
-      double p = 0;
-      for (int k : bands[b]) p += std::norm(buf[k]);
-      out[b][f] = p;
+      double sum = 0;
+      for (int k = bands[b].first; k < bands[b].end; k++) sum += p[k];
+      out[b][f] = sum;
     }
   }
   return out;
@@ -134,7 +85,7 @@ float duty_of(const std::vector<double> &frames) {
 // tdd_frame from a band's frame powers, in slices of kTddFrames.
 double frame_of(const std::vector<double> &frames, double fs) {
   const size_t slices = frames.size() / kTddFrames;
-  const double slice_s = kTimeN * kTddFrames / fs;
+  const double slice_s = StepGrid::kN * kTddFrames / fs;
   if (slices * slice_s < 3 * kTddMinFrame) return 0;
   std::vector<float> p(slices);
   for (size_t s = 0; s < slices; s++) {
@@ -194,21 +145,38 @@ double frame_of(const std::vector<double> &frames, double fs) {
 
 // A block whose timing is worth working out (upstream's DigitalScan::wants_timing): strong enough, flat enough for
 // DJI at least, and either cut (its other part is in the next step) or wide enough. Anything else is never judged
-// digital by itself, so its FFTs are not done; as one half of a signal cut between two steps, the other half's timing
-// is the one taken (upstream took the better of the two halves' figures, measured for any block).
+// digital by itself (judge), so it is not timed; as one half of a signal cut between two steps, the other half's
+// timing is the one taken (upstream took the better of the two halves' figures, measured for any block).
 bool may_be_digital(const WideRegion &r) {
   const double w = r.f1_hz - r.f0_hz;
   const bool cut = r.clip_lo || r.clip_hi;
   return r.snr_db >= kMinSnrDb && r.flat >= kMinFlatTdd && w <= kMaxWidth && (cut || w >= kMinWidth);
 }
+
+bool is_dji_frame(double frame_s) { return std::fabs(frame_s - kDjiFrame) <= kDjiFrameTol; }
+
+// HDZero's channels: Raceband, E1, F1, F2 and F4, and its unlockable L1-L8 (the analog low band's), as the app's
+// Plans.hdzero has them.
+bool on_hdzero_channel(double hz) {
+  static const std::vector<double> mhz = [] {
+    std::vector<double> v;
+    for (const auto &c : fpv_channels()) {
+      const std::string n = c.name;
+      if (n[0] == 'R' || n[0] == 'L' || n == "E1" || n == "F1" || n == "F2" || n == "F4") v.push_back(c.mhz);
+    }
+    return v;
+  }();
+  for (double c : mhz)
+    if (std::fabs(hz / 1e6 - c) <= kHdzMaxOffMhz) return true;
+  return false;
+}
 }  // namespace
 
-std::vector<WideRegion> find_wide_regions(const std::vector<float> &db, double fs, double edge_hz) {
+std::vector<WideRegion> find_wide_regions(const std::vector<float> &sm, double fs, double edge_hz) {
   std::vector<WideRegion> out;
-  const int n = static_cast<int>(db.size());
+  const int n = static_cast<int>(sm.size());
   if (n < 64) return out;
   const double bin = fs / n;
-  const std::vector<float> sm = median_smooth(db, bin);
   auto freq = [&](int i) { return (i - n / 2) * bin; };
   // only inside the span used: past it the chip's filter rolls off and would pull the floor down
   int lo = n, hi = -1;
@@ -255,34 +223,32 @@ std::vector<WideRegion> find_wide_regions(const std::vector<float> &db, double f
   return out;
 }
 
-float band_duty(const cf *x, size_t n, double fs, double f0_hz, double f1_hz) {
-  const auto bins = band_bins(fs, f0_hz, f1_hz);
-  if (bins.empty()) return 0;
-  return duty_of(frame_power(x, n, {bins})[0]);
+float band_duty(const StepGrid &g, double f0_hz, double f1_hz) {
+  const Bins bins = band_bins(g, f0_hz, f1_hz);
+  if (bins.first == bins.end) return 0;
+  return duty_of(frame_power(g, {bins})[0]);
 }
 
-double tdd_frame(const cf *x, size_t n, double fs, double f0_hz, double f1_hz) {
-  const auto bins = band_bins(fs, f0_hz, f1_hz);
-  if (bins.empty()) return 0;
-  return frame_of(frame_power(x, n, {bins})[0], fs);
+double tdd_frame(const StepGrid &g, double f0_hz, double f1_hz) {
+  const Bins bins = band_bins(g, f0_hz, f1_hz);
+  if (bins.first == bins.end) return 0;
+  return frame_of(frame_power(g, {bins})[0], g.fs());
 }
 
-const std::vector<double> &hdzero_channels_mhz() {
-  static const std::vector<double> ch = {5658, 5695, 5732, 5769, 5806, 5843, 5880, 5917,   // R1-R8
-                                         5705, 5740, 5760, 5800,                           // E1 F1 F2 F4
-                                         5362, 5399, 5436, 5473, 5510, 5547, 5584, 5621};  // L1-L8
-  return ch;
-}
-
-DigitalKind classify_digital(double centre_hz, double width_hz, double frame_s) {
-  if (width_hz < kMinWidth || width_hz > kMaxWidth) return DigitalKind::None;
-  if (std::fabs(frame_s - kDjiFrame) <= kDjiFrameTol) return DigitalKind::DJI;
-  if (frame_s > 0) return DigitalKind::Other;  // HDZero has no gaps
-  bool on_channel = false;
-  for (double c : hdzero_channels_mhz()) on_channel = on_channel || std::fabs(centre_hz / 1e6 - c) <= kHdzMaxOffMhz;
-  if (on_channel && width_hz >= kHdzWideMin) return DigitalKind::HDZero;
-  if (on_channel && width_hz >= kHdzNarrowMin) return DigitalKind::HDZeroNarrow;
-  return DigitalKind::Other;
+DigitalKind judge(const WideRegion &b) {
+  const double w = b.f1_hz - b.f0_hz;
+  if (w < kMinWidth || w > kMaxWidth || b.snr_db < kMinSnrDb) return DigitalKind::None;
+  // With DJI's frame the gaps are the frame's (duty 0.15-0.9), so being there all the time is not asked for, and the
+  // frame already rules out analog FM and Wi-Fi, so less flatness will do (a real DJI at 1-2 m: at 30-40 dB its sides
+  // take ~2 MHz each and multipath bows the block by ~11 dB; flat 0.34-0.99). Only DJI's frame, though: analog FM can
+  // give a "period" too (from the picture; a real transmitter on R4 gave 1.0-1.3 ms with flat 0.14-0.38), so any
+  // other frame has to be as flat as ever.
+  if (is_dji_frame(b.frame_s)) return b.flat >= kMinFlatTdd ? DigitalKind::DJI : DigitalKind::None;
+  if (b.flat < kMinFlat) return DigitalKind::None;
+  if (b.frame_s > 0) return DigitalKind::Other;  // a frame of its own: HDZero has no gaps
+  if (b.duty < kMinDuty) return DigitalKind::None;
+  if (!on_hdzero_channel((b.f0_hz + b.f1_hz) / 2)) return DigitalKind::Other;
+  return w >= kHdzWideMin ? DigitalKind::HDZero : w >= kHdzNarrowMin ? DigitalKind::HDZeroNarrow : DigitalKind::Other;
 }
 
 const char *digital_code(DigitalKind k) {
@@ -296,74 +262,77 @@ const char *digital_code(DigitalKind k) {
   return "";
 }
 
-std::vector<DigitalSignal> DigitalScan::step(const std::vector<float> &db, const cf *x, size_t n, double fs,
-                                             double centre_hz, double edge_hz) {
-  std::vector<WideRegion> regions = find_wide_regions(db, fs, edge_hz);
-  std::vector<std::vector<int>> bands;
+const char *digital_label(DigitalKind k) {
+  switch (k) {
+  case DigitalKind::HDZero: return "HDZero";
+  case DigitalKind::HDZeroNarrow: return "HDZero narrow";
+  case DigitalKind::DJI: return "DJI";
+  case DigitalKind::Other: return "Digital";
+  case DigitalKind::None: break;
+  }
+  return "";
+}
+
+std::vector<DigitalSignal> DigitalScan::step(const std::vector<float> &sm, const StepGrid &grid, double centre_hz,
+                                             double edge_hz) {
+  std::vector<WideRegion> regions = find_wide_regions(sm, grid.fs(), edge_hz);
+  std::vector<Bins> bands;
   std::vector<size_t> timed;  // the regions bands[k] is of
   for (size_t i = 0; i < regions.size(); i++) {
     if (!may_be_digital(regions[i])) continue;
-    auto bins = band_bins(fs, regions[i].f0_hz, regions[i].f1_hz);
-    if (bins.empty()) continue;
-    bands.push_back(std::move(bins));
+    const Bins bins = band_bins(grid, regions[i].f0_hz, regions[i].f1_hz);
+    if (bins.first == bins.end) continue;
+    bands.push_back(bins);
     timed.push_back(i);
   }
   if (!bands.empty()) {
-    const auto power = frame_power(x, n, bands);
+    const auto power = frame_power(grid, bands);
     for (size_t k = 0; k < timed.size(); k++) {
       regions[timed[k]].duty = duty_of(power[k]);
-      regions[timed[k]].frame_s = frame_of(power[k], fs);
+      regions[timed[k]].frame_s = frame_of(power[k], grid.fs());
     }
   }
 
-  std::vector<Abs> now;
-  for (const auto &r : regions) {
-    now.push_back(Abs{centre_hz + r.f0_hz, centre_hz + r.f1_hz, r.clip_lo, r.clip_hi, r.snr_db, r.flat, r.duty,
-                      r.frame_s});
+  std::vector<WideRegion> whole;
+  for (auto &r : regions) {
+    r.f0_hz += centre_hz;  // on the band from here on
+    r.f1_hz += centre_hz;
     KP_LOGD("digital: %.1f MHz step, block %.1f..%.1f MHz%s%s, %.1f dB, flat %.2f, duty %.2f, frame %.3f ms",
-            centre_hz / 1e6, (centre_hz + r.f0_hz) / 1e6, (centre_hz + r.f1_hz) / 1e6, r.clip_lo ? " [cut low]" : "",
-            r.clip_hi ? " [cut high]" : "", r.snr_db, r.flat, r.duty, r.frame_s * 1e3);
+            centre_hz / 1e6, r.f0_hz / 1e6, r.f1_hz / 1e6, r.clip_lo ? " [cut low]" : "", r.clip_hi ? " [cut high]" : "",
+            r.snr_db, r.flat, r.duty, r.frame_s * 1e3);
+    if (!r.clip_lo && !r.clip_hi) whole.push_back(r);
   }
-  std::vector<Abs> whole;
-  for (const auto &a : now)
-    if (!a.clip_lo && !a.clip_hi) whole.push_back(a);
-  // cut here and in the step before, on opposite sides, and overlapping: one signal
-  if (_have_prev && std::fabs(centre_hz - _prev_centre) <= edge_hz + _prev_edge) {
-    const bool up = centre_hz > _prev_centre;
-    for (const auto &a : now)
-      for (const auto &p : _prev) {
-        const Abs &lo = up ? p : a, &hi = up ? a : p;
+  // Cut at this step's lower edge and at the upper edge of the step just below it (Sweep::plan goes upwards), and
+  // overlapping: one signal. The first step of a pass is below the step before it, the last of the pass before.
+  if (!_prev.empty() && centre_hz > _prev_centre && centre_hz - _prev_centre <= 2 * edge_hz)
+    for (const auto &hi : regions)
+      for (const auto &lo : _prev) {
         if (!lo.clip_hi || lo.clip_lo || !hi.clip_lo || hi.clip_hi) continue;
-        if (std::min(lo.f1, hi.f1) - std::max(lo.f0, hi.f0) < 1e6) continue;
+        if (std::min(lo.f1_hz, hi.f1_hz) - std::max(lo.f0_hz, hi.f0_hz) < 1e6) continue;
         // Flat and continuous: the better half's. Each half sees the signal beside its filter's edge and one of the
         // two steps may have it over its DC point: with a real HDZero transmitter on R1, upstream's step at 5650 MHz
         // measured flat 0.6-0.8 and duty 0.5-0.9 and the one at 5670 MHz 0.96 and 1.00, scan after scan. Wi-Fi still
         // stays out: it comes in bursts in both halves.
-        whole.push_back(Abs{lo.f0, hi.f1, false, false, std::max(lo.snr, hi.snr), std::max(lo.flat, hi.flat),
-                            std::max(lo.duty, hi.duty), lo.frame_s > 0 ? lo.frame_s : hi.frame_s});
+        WideRegion j = lo;
+        j.f1_hz = hi.f1_hz;
+        j.clip_hi = false;
+        j.snr_db = std::max(lo.snr_db, hi.snr_db);
+        j.flat = std::max(lo.flat, hi.flat);
+        j.duty = std::max(lo.duty, hi.duty);
+        j.frame_s = lo.frame_s > 0 ? lo.frame_s : hi.frame_s;
+        whole.push_back(j);
       }
-  }
-  _prev = std::move(now);
+  _prev = std::move(regions);
   _prev_centre = centre_hz;
-  _prev_edge = edge_hz;
-  _have_prev = true;
 
   std::vector<DigitalSignal> out;
-  for (const auto &a : whole) {
-    // With a regular TDD frame the gaps are the frame's (DJI: duty 0.15-0.9), so being there all the time is not
-    // asked for, and the frame already rules out analog FM and Wi-Fi, so less flatness will do (a real DJI at 1-2 m:
-    // at 30-40 dB its sides take ~2 MHz each and multipath bows the block by ~11 dB; flat 0.34-0.99). Only DJI's
-    // frame, though: analog FM can give a "period" too (from the picture; a real transmitter on R4 gave 1.0-1.3 ms
-    // with flat 0.14-0.38), so any other frame has to be as flat as ever.
-    const bool tdd = a.frame_s > 0;
-    const bool dji = std::fabs(a.frame_s - kDjiFrame) <= kDjiFrameTol;
-    if (a.snr < kMinSnrDb || a.flat < (dji ? kMinFlatTdd : kMinFlat) || (!tdd && a.duty < kMinDuty)) continue;
+  for (const auto &b : whole) {
     DigitalSignal s;
-    s.centre_hz = (a.f0 + a.f1) / 2;
-    s.width_hz = a.f1 - a.f0;
-    s.snr_db = a.snr;
-    s.kind = classify_digital(s.centre_hz, s.width_hz, a.frame_s);
+    s.kind = judge(b);
     if (s.kind == DigitalKind::None) continue;
+    s.centre_hz = (b.f0_hz + b.f1_hz) / 2;
+    s.width_hz = b.f1_hz - b.f0_hz;
+    s.snr_db = b.snr_db;
     KP_LOGD("digital: %s at %.1f MHz, %.1f MHz wide, %.1f dB", digital_code(s.kind), s.centre_hz / 1e6,
             s.width_hz / 1e6, s.snr_db);
     out.push_back(s);

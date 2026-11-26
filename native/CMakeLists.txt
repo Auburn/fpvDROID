@@ -10,7 +10,7 @@ option(FPVDROID_RADIO "Build the radio (wifi-sdr + devourer + libusb)" ON)
 
 # ---- DSP: no hardware, shared by the app and the desktop tools ----
 add_library(fpvdroid_dsp STATIC dsp/video.cpp dsp/deinterlace.cpp dsp/line_draw.cpp dsp/picture_filters.cpp
-            dsp/sparkle.cpp dsp/spectrum.cpp dsp/digital.cpp dsp/log.cpp)
+            dsp/sparkle.cpp dsp/spectrum.cpp dsp/step_grid.cpp dsp/digital.cpp dsp/log.cpp)
 target_include_directories(fpvdroid_dsp PUBLIC dsp)
 target_compile_options(fpvdroid_dsp PRIVATE -O3 -ffast-math -Wall -Wextra)
 if(ANDROID)

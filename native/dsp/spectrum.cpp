@@ -93,11 +93,9 @@ std::vector<float> Psd::db() const {
   return out;
 }
 
-namespace {
-// Median-smoothed spectrum: kills the DC line and narrow carriers (~0.6 MHz window).
-std::vector<float> smooth_db(const std::vector<float> &db, double bin) {
+std::vector<float> smooth_db(const std::vector<float> &db, double bin_hz) {
   const int n = static_cast<int>(db.size());
-  const int hw = std::max(2, static_cast<int>(0.3e6 / bin));
+  const int hw = std::max(2, static_cast<int>(0.3e6 / bin_hz));
   std::vector<float> sm(n), win;
   for (int i = 0; i < n; i++) {
     win.clear();
@@ -107,7 +105,12 @@ std::vector<float> smooth_db(const std::vector<float> &db, double bin) {
   }
   return sm;
 }
-}  // namespace
+
+float median_of(std::vector<float> v) {
+  if (v.empty()) return 0;
+  std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+  return v[v.size() / 2];
+}
 
 std::vector<Hump> find_humps(const std::vector<float> &db, double fs, double edge_hz) {
   const int n = static_cast<int>(db.size());
@@ -163,7 +166,6 @@ float carrier_snr(const std::vector<float> &db, double fs, double span_hz, doubl
 }
 
 namespace {
-constexpr double kDcHz = 0.75e6;      // the DC notch, left out of a retune's spectrum
 constexpr int64_t kAverageMs = 5000;  // a bin seen this recently is averaged with the new value
 constexpr double kBridgeHz = 3e6;     // the widest gap get() fills in
 constexpr size_t kAnchorBins = 4;     // overlap with fresh bins needed to carry their floor over (2 MHz)
@@ -174,11 +176,10 @@ BandMap::BandMap(double lo_hz, double hi_hz, double bin_hz)
     : _lo(lo_hz), _bin(bin_hz),
       _db(static_cast<size_t>(std::max(1L, std::lround((hi_hz - lo_hz) / bin_hz) + 1)), kNone), _t(_db.size(), 0) {}
 
-void BandMap::add(const std::vector<float> &db, double fs, double centre_hz, double use_hz, int64_t now_ms) {
-  const int n = static_cast<int>(db.size());
+void BandMap::add(const std::vector<float> &sm, double fs, double centre_hz, double use_hz, int64_t now_ms) {
+  const int n = static_cast<int>(sm.size());
   if (n < 16 || fs <= 0) return;
   const double bin = fs / n;
-  const std::vector<float> sm = smooth_db(db, bin);
   // the floor: the lower quartile of the part that is used (the RX filter's roll-off beyond it would pull it down)
   std::vector<float> in;
   for (int i = 0; i < n; i++)
@@ -195,7 +196,7 @@ void BandMap::add(const std::vector<float> &db, double fs, double centre_hz, dou
   std::vector<float> level(static_cast<size_t>(j1 - j0 + 1), kNone);
   for (int j = j0; j <= j1; j++) {
     const double off = _lo + j * _bin - centre_hz;
-    if (std::fabs(off) < kDcHz) continue;
+    if (std::fabs(off) < kDcNotchHz) continue;
     int i0 = static_cast<int>(std::ceil((off - _bin / 2) / bin)) + n / 2;
     int i1 = static_cast<int>(std::floor((off + _bin / 2) / bin)) + n / 2;
     if (i1 < i0) i0 = i1 = static_cast<int>(std::lround(off / bin)) + n / 2;
