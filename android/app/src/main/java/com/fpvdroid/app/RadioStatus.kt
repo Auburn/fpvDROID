@@ -134,7 +134,7 @@ class PictureDelay private constructor(o: JSONObject) {
     val queued: Ends? = o.ends("queued")
     /** The display's refresh rate; 0: not known. */
     val refreshHz = o.num("refresh_hz")
-    /** Front-buffer drawing (a debug switch): the picture is drawn straight into what the display shows. */
+    /** Front-buffer drawing (Vsync off, where the phone can): the picture is drawn straight into what the display shows. */
     val front = o.optBoolean("front")
 
     companion object {

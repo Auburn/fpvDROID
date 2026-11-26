@@ -126,17 +126,18 @@ public:
     _cv.notify_one();
   }
 
-  // Vsync off: front-buffer drawing (front_buffer.h) where the phone can, from a fresh start of EGL on the window.
-  void set_front_buffer(bool on) {
+  // The picture comes in strips (PictureOpts::strips, Vsync off): where the phone can, they are drawn straight into
+  // the buffer the display shows (front_buffer.h), from a fresh start of EGL on the window.
+  void set_strips(bool on) {
     std::lock_guard<std::mutex> l(_m);
     _front_wanted = on;
-    ask_front();
+    front_changed();
   }
   // Debug (KP_FRONT_BUFFER=0): never that. Strips then go up once a refresh, as on a phone that cannot.
   void allow_front_buffer(bool on) {
     std::lock_guard<std::mutex> l(_m);
     _front_allowed = on;
-    ask_front();
+    front_changed();
   }
 
   // The display's refresh rate as the app sees it (its Display's mode), each time that changes. The readout takes
@@ -230,9 +231,12 @@ private:
   static constexpr float kFadeSeconds = 0.5f;    // ... and fades into NO SIGNAL over this, dimming on the way ...
   static constexpr float kStaleBright = 0.6f;    // ... to this; while held (hold()) it stays up, only dimmed
 
-  // Under _m: front-buffer drawing asked of the render thread, or not. A change takes a fresh start of EGL.
-  void ask_front() {
-    if (!_front.ask(_front_wanted && _front_allowed)) return;
+  // Under _m: front-buffer drawing is asked for ...
+  bool front_asked() const { return _front_wanted && _front_allowed; }
+  // ... and where that is not what EGL was last started for (egl_up), it is started again. Not on a phone whose EGL
+  // has no way to it: nothing would change.
+  void front_changed() {
+    if (!_front_possible || front_asked() == _front_built) return;
     _rebuild = true;
     _cv.notify_one();
   }
@@ -363,7 +367,12 @@ private:
       KP_LOGE("screen: no EGL display (0x%x)", eglGetError());
       return false;
     }
-    _cfg = pick_config(_dpy, _front.wants_config(_dpy));
+    {
+      std::lock_guard<std::mutex> l(_m);  // what this start of EGL is for: front_changed asks for another
+      _front_possible = FrontBuffer::available(_dpy);
+      _front_built = front_asked();
+    }
+    _cfg = pick_config(_dpy, _front_built && _front_possible);
     if (!_cfg) {
       KP_LOGE("screen: no OpenGL ES 3 config (0x%x)", eglGetError());
       return false;
@@ -416,7 +425,7 @@ private:
     _tex_stale = true;
     _gl.forget_drawn();
     // front-buffer drawing queues no frames: nothing for the display to give times of
-    if (_front.start(_dpy, _surf, _ctx, _cfg)) _timing.stop_frame_times();
+    if (_front_built && _front.start(_dpy, _surf, _ctx, _cfg)) _timing.stop_frame_times();
   }
 
   // EGL and GL from scratch on the same window (the GPU was reset under us, or front-buffer drawing was switched:
@@ -514,11 +523,13 @@ private:
           _win_done = seq;
           _done.notify_all();
         }
-        if (_rebuild) {  // front-buffer drawing switched (set_front_buffer)
+        if (_rebuild) {  // front-buffer drawing switched (set_strips, allow_front_buffer)
           _rebuild = false;
-          l.unlock();
-          restart_egl(true);
-          l.lock();
+          if (front_asked() != _front_built) {  // and not switched back since
+            l.unlock();
+            restart_egl(true);
+            l.lock();
+          }
         }
         in = take_picture();
         cleared = _clear;
@@ -602,8 +613,11 @@ private:
   std::atomic<bool> _align{true};    // set_present_align
   std::atomic<int> _margin_us{2500};  // set_present_margin_us
   bool _have = false, _clear = false, _dirty = false, _stop = false;
-  bool _front_wanted = false, _front_allowed = true;  // set_front_buffer, allow_front_buffer
-  bool _rebuild = false;              // EGL to be started again (ask_front)
+  bool _front_wanted = false, _front_allowed = true;  // set_strips, allow_front_buffer
+  // Front-buffer drawing as EGL was last started for it, and whether this EGL has the way to it (true until EGL
+  // says no). Written by the render thread alone (egl_up), which reads them without the lock.
+  bool _front_built = false, _front_possible = true;
+  bool _rebuild = false;              // EGL to be started again (front_changed)
   std::atomic<float> _display_hz{0};  // set_display_hz (0: not said)
   Clock::time_point _quiet_until{};
   Clock::time_point _hold_until{};
@@ -622,7 +636,7 @@ private:
   bool _gl_ready = false, _tex_stale = false;
   std::vector<uint8_t> _last;  // the picture in hand, whole (rows go up as they change; all of it after a GL restart)
   int _lw = 0, _lh = 0;
-  FrontBuffer _front;          // front-buffer drawing (asked for from any thread: ask_front)
+  FrontBuffer _front;          // front-buffer drawing, where it is on
   DisplayTiming _timing;       // the display's own timing, where it gives any
   // the picture's delay (latency.h)
   LatencyMeter _lat;

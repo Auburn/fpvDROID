@@ -246,8 +246,7 @@ JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_setPicture(JNIEnv *, jclass,
   p.chroma_comb = colour_comb;
   p.strips = strips;
   if (g_radio) g_radio->set_picture(p);
-  // ... and the screen draws the strips straight into the buffer the display shows, where the phone can
-  if (g_screen) g_screen->set_front_buffer(strips);
+  if (g_screen) g_screen->set_strips(p.strips);
 }
 
 // The picture's delay on screen (render/latency.h), over the last second, as JSON.
