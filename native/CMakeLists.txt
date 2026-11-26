@@ -72,6 +72,7 @@ if(NOT ANDROID)
   target_link_libraries(kp_replay PRIVATE fpvdroid_dsp)
   target_compile_options(kp_replay PRIVATE -O2 -Wall)
   add_executable(kp_gen tools/kp_gen.cpp)  # a synthetic transmitter: recordings to test with, no hardware
+  target_link_libraries(kp_gen PRIVATE fpvdroid_dsp)
   target_compile_options(kp_gen PRIVATE -O2 -Wall)
   if(TARGET fpvdroid_render)
     add_executable(kp_render tools/kp_render.cpp)  # the app's renderer off screen (needs EGL + OpenGL ES 3)

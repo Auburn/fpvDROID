@@ -2,6 +2,7 @@
 // (github.com/scerstt/PlayRX, tools/gen_testsignal.cpp, GPL-2.0).
 //
 //   kp_gen OUT [--mhz 5769] [--centre MHZ (default --mhz)] [--frames 30] [--dev 8] [--cnr 25] [--pal] [--label R4]
+//              [--wifi CH | --wifi-quiet CH] [--wifi-db 20]
 //
 // Writes OUT.cs16 (int16 I,Q at 40 MS/s, 12-bit values << 4, like wsdr_probe) and OUT.json (sample_rate,
 // centre_hz), which kp_replay and the simulated receiver (kp_sim, KP_SIM_FILE) read.
@@ -9,6 +10,11 @@
 // Picture: 75 % colour bars (top two thirds), a grey ramp, and a white box that moves across the bottom band
 // once per loop, so a frozen picture is obvious; --label puts big text over the bars. Composite levels in IRE
 // (sync -40, blank 0, black 7.5 for NTSC, white 100), FM-modulated so that sync tip -> -dev/2, white -> +dev/2.
+//
+// --wifi CH adds a 5 GHz Wi-Fi network in use on channel CH (802.11a OFDM, --wifi-db over the noise), --wifi-quiet CH
+// one that only sends its beacons, for the Spectrum tab's Wi-Fi (dsp/wifi.h). kp_sim takes the recording for one
+// centred on 5770 MHz and moves it without filtering, so keep the channel near the middle: 153 (5765 MHz) with
+// --centre 5770, and the VTX off it (--mhz 5785).
 #include <cmath>
 #include <complex>
 #include <cstdint>
@@ -17,6 +23,8 @@
 #include <random>
 #include <string>
 #include <vector>
+
+#include "spectrum.h"  // fft_inplace
 
 namespace {
 
@@ -85,7 +93,8 @@ bool label_lit(const std::string &text, double x, double y) {
 
 int main(int argc, char **argv) {
   if (argc < 2) {
-    std::fprintf(stderr, "usage: kp_gen OUT [--mhz F] [--centre F] [--frames N] [--dev MHZ] [--cnr DB] [--pal] [--label TEXT]\n");
+    std::fprintf(stderr, "usage: kp_gen OUT [--mhz F] [--centre F] [--frames N] [--dev MHZ] [--cnr DB] [--pal] [--label TEXT]\n"
+                 "              [--wifi CH | --wifi-quiet CH] [--wifi-db DB]\n");
     return 2;
   }
   const std::string out = argv[1];
@@ -93,6 +102,9 @@ int main(int argc, char **argv) {
   int frames = 30;
   bool pal = false;
   std::string label;  // big text over the bars (a channel name), so feeds are easy to tell apart
+  int wifi_ch = 0;    // a Wi-Fi network on this channel (0: none)
+  bool wifi_quiet = false;
+  double wifi_db = 20;
   for (int i = 2; i < argc; i++) {
     const std::string k = argv[i];
     auto v = [&] { return i + 1 < argc ? std::atof(argv[++i]) : (std::fprintf(stderr, "missing value\n"), std::exit(2), 0.0); };
@@ -103,6 +115,9 @@ int main(int argc, char **argv) {
     else if (k == "--cnr") cnr_db = v();
     else if (k == "--pal") pal = true;
     else if (k == "--label" && i + 1 < argc) label = argv[++i];
+    else if (k == "--wifi") wifi_ch = static_cast<int>(v());
+    else if (k == "--wifi-quiet") { wifi_ch = static_cast<int>(v()); wifi_quiet = true; }
+    else if (k == "--wifi-db") wifi_db = v();
     else { std::fprintf(stderr, "unknown option %s\n", k.c_str()); return 2; }
   }
   if (std::isnan(centre_mhz)) centre_mhz = vtx_mhz;  // the recording centred on its transmitter
@@ -125,6 +140,18 @@ int main(int argc, char **argv) {
   const double noise_pow = amp * amp / std::pow(10, cnr_db / 10) * (fs / 18e6);
   std::mt19937 rng(1);
   std::normal_distribution<double> nd(0, std::sqrt(noise_pow / 2));
+
+  // The Wi-Fi network: 52 subcarriers 312.5 kHz apart (+-1..26) around 5000 + 5 CH MHz, symbols of 4 us (128 samples
+  // and a cyclic prefix of 32), on for a beacon of 0.4 ms every 102.4 ms and, in use, in a quarter of its 0.5 ms frames
+  // at random. Each subcarrier's power is wifi_db over the noise in its 312.5 kHz.
+  std::vector<std::complex<float>> sym(160);
+  std::mt19937 wrng(2);
+  std::uniform_real_distribution<float> wu(0, 1);
+  const double wifi_off = (5000 + 5.0 * wifi_ch - centre_mhz) * 1e6;
+  const float wamp = static_cast<float>(std::sqrt(std::pow(10, wifi_db / 10) * noise_pow / 128));
+  double wph = 0;
+  long wframe = -1;
+  bool wframe_on = false;
 
   std::vector<int16_t> buf;
   buf.reserve(1 << 20);
@@ -198,7 +225,28 @@ int main(int argc, char **argv) {
     const double fi = offset_hz + dev_mhz * 1e6 * ((ire + 40) / 140.0 - 0.5);
     phase += 2 * M_PI * fi / fs;
     if (phase > M_PI) phase -= 2 * M_PI * std::floor((phase + M_PI) / (2 * M_PI));
-    const double re = amp * std::cos(phase) + nd(rng), im = amp * std::sin(phase) + nd(rng);
+    double re = amp * std::cos(phase) + nd(rng), im = amp * std::sin(phase) + nd(rng);
+    if (wifi_ch) {
+      if (i % 160 == 0) {
+        const double t_us = i / 40.0;
+        if (static_cast<long>(t_us / 500) != wframe) {
+          wframe = static_cast<long>(t_us / 500);
+          wframe_on = !wifi_quiet && wu(wrng) < 0.25f;
+        }
+        std::fill(sym.begin(), sym.end(), std::complex<float>(0, 0));
+        if (wframe_on || std::fmod(t_us, 102400.0) < 400) {
+          std::complex<float> x[128] = {};
+          for (int sc = -26; sc <= 26; sc++)
+            if (sc) x[(sc + 128) % 128] = std::conj(std::complex<float>(wu(wrng) < 0.5f ? wamp : -wamp, wu(wrng) < 0.5f ? wamp : -wamp)) * 0.7071f;
+          kp::fft_inplace(x, 128);  // the inverse, by conjugates
+          for (int k2 = 0; k2 < 160; k2++) sym[k2] = std::conj(x[(k2 + 96) % 128]);
+        }
+      }
+      const std::complex<float> w = sym[i % 160] * std::complex<float>(std::cos(wph), std::sin(wph));
+      re += w.real();
+      im += w.imag();
+      wph = std::fmod(wph + 2 * M_PI * wifi_off / fs, 2 * M_PI);
+    }
     auto q = [](double v) { return static_cast<int16_t>(std::lround(std::max(-2047.0, std::min(2047.0, v))) * 16); };
     buf.push_back(q(re));
     buf.push_back(q(im));
