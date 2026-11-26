@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "spectrum.h"
+#include "step_grid.h"
 #include "sweep.h"
 #include "wifi.h"
 
@@ -163,6 +164,12 @@ static std::vector<cf> capture(const Air &air, double centre_hz, double t0_us, s
   return x;
 }
 
+static StepGrid grid_of(const std::vector<cf> &x) {
+  StepGrid g;
+  g.build(x.data(), x.size(), kFs, kEdge);
+  return g;
+}
+
 // ---------------------------------------------------------------------------------------- the sweep
 // The radio's sweep on the Spectrum tab, each step taken as Radio::handle_sweep takes it: measured
 // (StepAnalysers::step), then into the band picture (BandPicture::add), which weighs its bursts against the carriers
@@ -173,7 +180,7 @@ struct Sim {
   bool blind = false;
   StepAnalysers analysers;
   BandPicture picture;
-  WifiWatch alone;  // blind's
+  WifiWatch alone{Sweep::kBandLo, Sweep::kBandHi, Sweep::kBandBin};  // blind's
   Sweep sweep;
   int64_t t_ms = 1000;
   uint64_t seed = 1;
@@ -216,35 +223,37 @@ static bool is(const std::vector<WifiNet> &nets, std::vector<std::pair<int, int>
 }
 
 // ---------------------------------------------------------------------------------------- the tests
-// One capture: noise reads 0 dB and lights nothing; a beacon lights every bin of its channel at once, and the rest of
-// the time none; an OFDM link that never stops is never off; nothing is measured within 0.75 MHz of the centre.
-static void a_capture_tells_bursts_from_steady_signals() {
+// One step's grid: noise reads 0 dB and lights nothing; a beacon lights every bin of its channel at once, and the rest
+// of the time none; an OFDM link that never stops is never off; nothing is measured within 0.75 MHz of the centre,
+// and each bin is handed on at its own frequency, within reach of the centre.
+static void a_step_tells_bursts_from_steady_signals() {
   const size_t n = static_cast<size_t>(0.012 * kFs);
-  BurstStep s = measure_bursts(capture({}, 5770e6, 0, n, 7).data(), n, kFs, 5770e6, 15e6, kEdge);
+  BurstStep s = measure_bursts(grid_of(capture({}, 5770e6, 0, n, 7)), 5770e6, 15e6);
   double sum = 0;
   float peak = 0;
-  bool dc = false;
+  bool dc = false, reach = true;
   for (const auto &b : s.bins) {
     sum += b.duty;
     peak = std::max(peak, 10 * std::log10(b.peak));
-    dc = dc || std::fabs(BurstMap::kLo + b.index * BurstMap::kBin - 5770e6) < 0.75e6;
+    dc = dc || std::fabs(b.hz - 5770e6) < 0.75e6;
+    reach = reach && b.hz >= 5755e6 && b.hz < 5785e6;
   }
   CHECK(s.bins.size() == 183);  // +-15 MHz in 156.25 kHz, less the DC notch (9 bins)
-  CHECK(!dc);
+  CHECK(!dc && reach);
   CHECK(sum / s.bins.size() < 0.001 && peak < 6);
   bool none = true;
   for (const auto &c : s.channels) none = none && c.full == 0;
   CHECK(none && !s.channels.empty());
 
   Air beacon{{wifi(5765, 20, 18, beacons(4000))}, {}};  // channel 153, a beacon 4 ms into the capture
-  s = measure_bursts(capture(beacon, 5770e6, 0, n, 7).data(), n, kFs, 5770e6, 15e6, kEdge);
+  s = measure_bursts(grid_of(capture(beacon, 5770e6, 0, n, 7)), 5770e6, 15e6);
   const BurstStep::Channel *c153 = nullptr;
   for (const auto &c : s.channels)
     if (c.ch == 153) c153 = &c;
   CHECK(c153 && c153->full == kMinSlices && c153->empty > 100 && std::fabs(c153->level_db - 18) < 3);
 
   Air link{{Ofdm{5755, 5775, 18, 18, always()}}, {}};  // a 20 MHz link on channel 153, never off
-  s = measure_bursts(capture(link, 5770e6, 0, n, 7).data(), n, kFs, 5770e6, 15e6, kEdge);
+  s = measure_bursts(grid_of(capture(link, 5770e6, 0, n, 7)), 5770e6, 15e6);
   bool burst = false;
   for (const auto &c : s.channels) burst = burst || (c.full >= kMinSlices && c.empty >= kMinSlices);
   CHECK(!burst);
@@ -394,7 +403,7 @@ static void a_carrier_on_a_network_is_that_network() {
 }
 
 int main() {
-  a_capture_tells_bursts_from_steady_signals();
+  a_step_tells_bursts_from_steady_signals();
   networks_are_grouped_by_the_wifi_grid();
   a_carrier_on_a_network_is_that_network();
   a_network_in_use_is_found();

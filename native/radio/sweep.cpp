@@ -31,11 +31,12 @@ StepFindings StepAnalysers::step(const std::vector<cf> &iq, double fs, double ce
   _grid.build(iq.data(), iq.size(), fs, edge_hz);
   f.digital = _digital.step(f.spectrum, _grid, centre_hz, edge_hz);
   // the bins handed on reach half a step either side: a pass measures every frequency once
-  f.bursts = measure_bursts(iq.data(), iq.size(), fs, centre_hz, Sweep::kStep / 2, edge_hz);
+  f.bursts = measure_bursts(_grid, centre_hz, Sweep::kStep / 2);
   return f;
 }
 
-BandPicture::BandPicture() : _band(Sweep::kBandLo, Sweep::kBandHi, Sweep::kBandBin) {}
+BandPicture::BandPicture()
+    : _band(Sweep::kBandLo, Sweep::kBandHi, Sweep::kBandBin), _wifi(Sweep::kBandLo, Sweep::kBandHi, Sweep::kBandBin) {}
 
 void BandPicture::sweep_started(double lo_hz, double hi_hz, int64_t now_ms) {
   _band.forget(lo_hz, hi_hz, now_ms - Sweep::kStaleMs);
