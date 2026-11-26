@@ -56,7 +56,8 @@ if(FPVDROID_RADIO)
   endif()
   # web/CMakeLists.txt lists the same sources
   set(FPVDROID_RADIO_SOURCES radio/radio.cpp radio/combine.cpp radio/cut_steps.cpp radio/decode_queue.cpp
-      radio/fallback_policy.cpp radio/frame_gate.cpp radio/steps.cpp radio/sweep.cpp radio/thread_placement.cpp)
+      radio/fallback_policy.cpp radio/frame_gate.cpp radio/pilots.cpp radio/steps.cpp radio/sweep.cpp
+      radio/thread_placement.cpp)
   add_library(fpvdroid_radio STATIC ${FPVDROID_RADIO_SOURCES})
   target_include_directories(fpvdroid_radio PUBLIC radio)
   target_link_libraries(fpvdroid_radio PUBLIC fpvdroid_dsp wsdrcore)
@@ -100,6 +101,11 @@ if(NOT ANDROID)
   target_link_libraries(kp_radio_tests PRIVATE fpvdroid_dsp Threads::Threads)
   target_compile_options(kp_radio_tests PRIVATE -O2 -Wall -Wextra)
   add_test(NAME radio COMMAND kp_radio_tests)
+  # the scan's rules: what it lists, less a strong transmitter's copy, and what it watches after
+  add_executable(kp_scan_tests tests/scan_tests.cpp radio/pilots.cpp)
+  target_include_directories(kp_scan_tests PRIVATE radio)
+  target_compile_options(kp_scan_tests PRIVATE -O2 -Wall -Wextra)
+  add_test(NAME scan COMMAND kp_scan_tests)
   # the decoder's sync tracking, on a signal the test makes itself
   add_executable(kp_decoder_tests tests/decoder_tests.cpp)
   target_link_libraries(kp_decoder_tests PRIVATE fpvdroid_dsp)

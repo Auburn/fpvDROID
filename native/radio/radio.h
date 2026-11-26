@@ -23,6 +23,7 @@
 #include "decode_queue.h"
 #include "fallback_policy.h"
 #include "frame_gate.h"
+#include "pilots.h"
 #include "spectrum.h"
 #include "steps.h"
 #include "sweep.h"
@@ -35,15 +36,6 @@ struct BankMeta;
 }
 
 namespace kp {
-
-struct Pilot {
-  double mhz = 0;        // measured carrier
-  std::string name;      // nearest standard channel ("R4"), "" if none
-  std::string std_name;  // NTSC / PAL
-  float snr_db = 0;
-  float lock = 0;
-  int64_t seen_ms = 0;   // steady-clock ms of the last scan that saw it
-};
 
 class Radio {
 public:
@@ -111,8 +103,7 @@ public:
   // as PREFIX_b.cs16.
   void record(double seconds, const std::string &prefix);
 
-  std::string status_json();   // for the UI (polled)
-  std::vector<Pilot> pilots();
+  std::string status_json();   // for the UI (polled); its "pilots" are the scan under way's, or the last one's
   // The band picture over lo..hi, for the spectrum page (polled while it is shown):
   //   {"first_mhz", "bin_mhz", "db": [dB over the noise floor, null where nothing has been seen],
   //    "carriers": [{"mhz", "width", "snr"}], "at_mhz": the step being taken now (0: not sweeping or scanning),
@@ -189,7 +180,7 @@ private:
   std::string _rec_prefix;
   uint64_t _rec_left = 0, _rec_samples = 0;
   double _rec_fs = 0, _rec_centre = 0, _rec_shift = 0;
-  std::vector<Pilot> _pilots;
+  Pilots _pilots;  // what the scan under way, or the last one, found (begin_scan empties it)
   BandMap _band;  // what scans and sweeps have seen (Sweep::kBandLo..kBandHi)
   Sweep _sweep;   // the span and the passes of the sweep asked for last
   bool _superspeed = false, _open = false;
@@ -244,7 +235,6 @@ private:
   // back to the start by scan() for the status to show until that thread takes the new scan up.
   std::atomic<size_t> _step{0}, _plan_n{0};
   std::vector<Hump> _humps;  // this step's candidates (from the first kPsdSpan of the capture)
-  int64_t _scan_t0_ms = 0;   // when the scan under way began (its sightings are seen_ms >= this)
   double _resume_hz = 0;
   // test
   uint64_t _test_banks = 0, _test_gaps = 0, _test_last_seq = 0, _test_runs = 0;

@@ -310,11 +310,6 @@ void Radio::record(double seconds, const std::string &prefix) {
   _rec_req_prefix = prefix;
 }
 
-std::vector<Pilot> Radio::pilots() {
-  std::lock_guard<std::mutex> l(_m);
-  return _pilots;
-}
-
 // One path's samples out of a bank's 64-bit words. Path A: I [11:0], Q [23:12] (la_i / la_q); path B the same
 // 24 bits up: I [35:24], Q [47:36] (kDmaBothPaths8822b).
 void Radio::unpack(const Bank &b, Path path, std::vector<cf> &out) {
@@ -459,7 +454,10 @@ void Radio::begin_scan() {
   auto plan = scan_plan();
   _plan_n = plan.size();
   _step = 0;
-  _scan_t0_ms = now_ms();
+  {
+    std::lock_guard<std::mutex> l(_m);
+    _pilots.begin_scan();  // the status lists this scan's pilots from here on
+  }
   KP_LOGI("radio: scan, %zu steps", plan.size());
   _cut.start();
   start_steps(std::move(plan));
@@ -851,32 +849,14 @@ void Radio::scan_step_done() {
     // this scan does not put a watch of its own choosing over it. The next bank takes that call up.
     const bool current = _mode_epoch == _epoch_seen;
     if (current) _step = _steps.at();
-    for (const auto &f : found) {
-      auto it = std::find_if(_pilots.begin(), _pilots.end(), [&](const Pilot &p) { return std::fabs(p.mhz - f.mhz) < 4; });
-      if (it == _pilots.end()) _pilots.push_back(f);
-      else if (f.snr_db >= it->snr_db - 3) *it = f;  // prefer the newer sighting unless much weaker
-      else it->seen_ms = f.seen_ms;
-    }
-    std::sort(_pilots.begin(), _pilots.end(), [](const Pilot &a, const Pilot &b) { return a.snr_db > b.snr_db; });
+    // this step's pilots into the list, less any that is only a strong VTX's copy (pilots.h)
+    for (const auto &c : _pilots.add(found, _resume_hz / 1e6))
+      KP_LOGI("scan: %.1f MHz taken as a copy of %.1f MHz", c.mhz, c.of_mhz);
     if (done && current) {
-      // after a scan: the pilot watched before, if this scan saw it again, else the strongest this scan saw. Only
-      // this scan's pilots count: _pilots keeps every one ever seen, and a VTX moved to another channel left one
-      // behind that the scan went back to (FPVDesktopWiFiReceiver measured it, and counts only its scan's too:
-      // the VTX moved from F4 to R3, the scan found R3 and watched F4, with no picture)
-      size_t seen = 0;
-      for (const auto &p : _pilots) {
-        if (p.seen_ms < _scan_t0_ms) continue;
-        seen++;
-        if (_resume_hz > 0 && std::fabs(p.mhz * 1e6 - _resume_hz) < 4e6) next_watch = p.mhz * 1e6;
-      }
-      if (next_watch == 0)
-        for (const auto &p : _pilots)  // strongest first
-          if (p.seen_ms >= _scan_t0_ms) {
-            next_watch = p.mhz * 1e6;
-            break;
-          }
-      if (next_watch == 0 && _resume_hz > 0) next_watch = _resume_hz;
-      KP_LOGI("scan: done, %zu pilot(s), %zu extra step(s)%s", seen, _cut.given(), next_watch > 0 ? ", watching" : "");
+      // after a scan: the pilot watched before, if this scan saw it, else the strongest it saw
+      next_watch = _pilots.watch_after_scan(_resume_hz / 1e6) * 1e6;
+      KP_LOGI("scan: done, %zu pilot(s), %zu extra step(s)%s", _pilots.list().size(), _cut.given(),
+              next_watch > 0 ? ", watching" : "");
       if (next_watch > 0) {
         _watch_hz = next_watch;
         _mode = Mode::Watch;
@@ -979,8 +959,9 @@ std::string Radio::status_json() {
   }
   o << ",\"test\":" << (_test_result.empty() ? "null" : _test_result);
   o << ",\"pilots\":[";
-  for (size_t i = 0; i < _pilots.size(); i++) {
-    const auto &p = _pilots[i];
+  const auto &pilots = _pilots.list();
+  for (size_t i = 0; i < pilots.size(); i++) {
+    const auto &p = pilots[i];
     o << (i ? "," : "") << "{\"mhz\":" << num(p.mhz) << ",\"name\":" << jstr(p.name) << ",\"std\":" << jstr(p.std_name)
       << ",\"snr\":" << num(p.snr_db) << ",\"age_s\":" << (t - p.seen_ms) / 1000 << "}";
   }
