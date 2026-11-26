@@ -1,14 +1,20 @@
 // kp_wifi_tests: the Spectrum tab's Wi-Fi networks (dsp/wifi.h) from sweep steps made here as raw IQ: noise, Wi-Fi
-// networks as OFDM (802.11a/ac subcarriers, on when their schedule says), analog video as FM and DJI-like links as
-// OFDM that never stops, swept on the radio's own plan (Sweep), each step taken as Radio::handle_sweep takes it
-// (StepAnalysers::step, then BandPicture::add: sweep.h) (ctest: "wifi"). Plain checks, as in radio_tests.cpp.
+// networks as OFDM on their schedules (tools/digital_tx.h), analog video as FM and digital links as OFDM that never
+// stops, swept on the radio's own plan (Sweep), each step taken as Radio::handle_sweep takes it (StepAnalysers::step,
+// then BandPicture::add: sweep.h) (ctest: "wifi"). Plain checks, as in radio_tests.cpp.
+//
+//   kp_wifi_tests          every case; exits 1 if any fails
+//   kp_wifi_tests --time   what a sweep step's bursts cost: measured on its grid, against the whole step
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <functional>
+#include <cstring>
+#include <random>
 #include <string>
 #include <vector>
 
+#include "digital_tx.h"
 #include "spectrum.h"
 #include "step_grid.h"
 #include "sweep.h"
@@ -27,52 +33,54 @@ static int g_checks = 0, g_failed = 0;
   } while (0)
 
 // ---------------------------------------------------------------------------------------- the air
-constexpr double kFs = 40e6, kEdge = 16.5e6, kSc = 0.3125;  // radio.cpp's kEdge; OFDM's subcarrier spacing (MHz)
+constexpr double kFs = 40e6, kEdge = 16.5e6;                       // radio.cpp's kEdge: the span a step uses
+constexpr size_t kStepSamples = static_cast<size_t>(0.012 * kFs);  // radio.cpp's kPsdSpan
+constexpr double kNoiseSigma = 20;                                 // the chip's noise (12-bit counts)
 
-// The same pseudo-random numbers for the same seed and time: a schedule says the same thing to every step.
-static uint64_t mix(uint64_t x) {
-  x += 0x9e3779b97f4a7c15ull;
-  x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ull;
-  x = (x ^ (x >> 27)) * 0x94d049bb133111ebull;
-  return x ^ (x >> 31);
-}
-static double unit(uint64_t seed, uint64_t n) { return static_cast<double>(mix(seed * 0x100000001b3ull + n) >> 11) / 9007199254740992.0; }
-
-using Schedule = std::function<bool(double t_us)>;
-static Schedule always() { return [](double) { return true; }; }
-// An AP with no traffic: a beacon of 0.4 ms every 102.4 ms.
-static Schedule beacons(double phase_us) {
-  return [phase_us](double t) { return std::fmod(std::fmod(t - phase_us, 102400.0) + 102400.0, 102400.0) < 400; };
-}
-// A network in use: on in `duty` of its 0.5 ms frames at random, besides its beacons.
-static Schedule traffic(double duty, uint64_t seed) {
-  return [duty, seed](double t) { return unit(seed, static_cast<uint64_t>(t / 500)) < duty || beacons(seed % 1000 * 100.0)(t); };
-}
-// Short bursts (0.1 ms) at random, `duty` of the time.
-static Schedule crackle(double duty, uint64_t seed) {
-  return [duty, seed](double t) { return unit(seed, static_cast<uint64_t>(t / 100)) < duty; };
-}
-
-// OFDM: subcarriers kSc apart from lo to hi (MHz, on the band's kSc grid), db_lo..db_hi over the noise (a slope, for a
-// strong signal's shoulders), on in the symbols (4 us) its schedule says.
+// Something on the air as OFDM (tools/digital_tx.h), centred on mhz: its offset and clock are set for each capture.
 struct Ofdm {
-  double lo, hi;
-  float db_lo, db_hi;
-  Schedule on;
-  double null_mhz = 0;  // a Wi-Fi channel's DC subcarrier, left empty
+  double mhz;
+  tx::Ofdm tx;
 };
-// A Wi-Fi network of 20, 40 or 80 MHz around mhz: 52, 114 or 242 subcarriers (+-26, +-58, +-122).
-static Ofdm wifi(double mhz, int width, float db, Schedule on) {
-  const int half = width == 80 ? 122 : width == 40 ? 58 : 26;
-  return Ofdm{mhz - half * kSc, mhz + half * kSc, db, db, std::move(on), mhz};
+// OFDM in Wi-Fi's subcarriers and symbols from lo to hi (MHz), db_lo over the noise at its lower edge to db_hi at its
+// upper (a slope: a strong signal's shoulders), sending when `on` says.
+static Ofdm block(double lo, double hi, double db_lo, double db_hi, tx::Schedule on) {
+  tx::Ofdm o;
+  o.width_hz = (hi - lo) * 1e6;
+  o.snr_db = (db_lo + db_hi) / 2;
+  o.tilt_db = db_hi - db_lo;
+  o.wifi = true;
+  o.on = std::move(on);
+  o.seed = tx::mix(static_cast<uint64_t>(lo * 1000));
+  return Ofdm{(lo + hi) / 2, o};
+}
+// A Wi-Fi network of 20, 40 or 80 MHz around mhz: 52, 114 or 242 subcarriers (+-26, +-58, +-122) 312.5 kHz apart.
+static Ofdm wifi(double mhz, int width, double db, tx::Schedule on) {
+  const double half = (width == 80 ? 122 : width == 40 ? 58 : 26) * 0.3125;
+  return block(mhz - half, mhz + half, db, db, std::move(on));
+}
+// A digital link that never stops, width_mhz wide around mhz.
+static Ofdm link(double mhz, double width_mhz, double db) {
+  tx::Ofdm o;
+  o.width_hz = width_mhz * 1e6;
+  o.snr_db = db;
+  return Ofdm{mhz, o};
 }
 
-// Analog video, FM: sync tip at -dev/2, white at +dev/2, around mhz. The picture is the hardest kind for this: a bright
-// top, a ramp across the middle and a dark bottom, so that the bins of the levels it dwells on come and go.
+// Analog video, FM: sync tip at -dev/2, white at +dev/2, around mhz.
 struct Fm {
+  enum Picture {
+    // The hardest kind for this: a bright top, a ramp across the middle and a dark bottom, so that the bins of the
+    // levels it dwells on come and go.
+    kBusy,
+    // A still picture, a flat grey of `grey` IRE: the spectrum's twin peaks, at the blanking level and at the grey.
+    kStill,
+  };
   double mhz;
-  float db;  // over the noise, as if spread over 9 MHz
+  double db;  // over the noise, as if spread over 9 MHz
   double dev_mhz = 12;
+  Picture picture = kBusy;
+  double grey = 50;
 };
 
 struct Air {
@@ -80,85 +88,45 @@ struct Air {
   std::vector<Fm> fm;
 };
 
-static double ire_at(double t_us) {
-  const double tf = std::fmod(t_us, 16683.0);  // an NTSC field
+// The level of an NTSC picture at t (s on the transmitter's clock).
+static double ire_at(const Fm &f, double t) {
+  const double tf = std::fmod(t * 1e6, 16683.0);  // an NTSC field, in us
   const int line = static_cast<int>(tf / 63.556);
   const double tl = tf - line * 63.556;
   if (line < 9) return tl < 27 ? -40 : 0;  // the vertical sync
   if (tl < 4.7) return -40;
   if (tl < 10.9 || line < 21) return 0;
+  if (f.picture == Fm::kStill) return f.grey;
   if (line < 100) return 90;
   if (line < 180) return 7.5 + 92.5 * (tl - 10.9) / 52.6;
   return 15;
 }
 
-// What a sweep step hears: n samples at 40 MS/s centred on centre_hz from t0_us on, noise of power 1.
-static std::vector<cf> capture(const Air &air, double centre_hz, double t0_us, size_t n, uint64_t seed) {
-  std::vector<cf> x(n);
-  {
-    uint64_t s = mix(seed);
-    for (auto &v : x) {  // Gaussian enough: the FFT's bins are, whatever the samples are
-      float a[2];
-      for (float &c : a) {
-        float u = 0;
-        for (int k = 0; k < 4; k++) {
-          s = s * 6364136223846793005ull + 1442695040888963407ull;
-          u += static_cast<float>(s >> 40) / 16777216.f;
-        }
-        c = (u - 2.f) * 1.2247f;  // variance 4/12 x 1.5 = 0.5 a component
-      }
-      v = cf(a[0], a[1]);
-    }
-  }
-  const double c_mhz = centre_hz / 1e6;
+// What a sweep step hears: kStepSamples at 40 MS/s centred on centre_hz from t0_s on, noise of kNoiseSigma.
+static std::vector<cf> capture(const Air &air, double centre_hz, double t0_s, uint64_t seed) {
+  std::mt19937 rng(static_cast<unsigned>(seed));
+  std::normal_distribution<float> nd(0, static_cast<float>(kNoiseSigma));
+  std::vector<cf> x(kStepSamples);
+  for (auto &v : x) v = cf(nd(rng), nd(rng));
   for (const auto &o : air.ofdm) {
-    // the subcarriers in the stream (+-19.5 MHz), as bins of a 128-point IFFT at 40 MS/s
-    std::vector<int> bin;
-    std::vector<float> amp;
-    const int k0 = static_cast<int>(std::lround(o.lo / kSc)), k1 = static_cast<int>(std::lround(o.hi / kSc));
-    for (int k = k0; k <= k1; k++) {
-      const double f = k * kSc;
-      if (o.null_mhz > 0 && std::fabs(f - o.null_mhz) < kSc / 2) continue;
-      const long m = std::lround((f - c_mhz) / kSc);
-      if (std::abs(m) > 62) continue;
-      const float db = k1 > k0 ? o.db_lo + (o.db_hi - o.db_lo) * static_cast<float>(k - k0) / static_cast<float>(k1 - k0) : o.db_lo;
-      bin.push_back(static_cast<int>((m + 128) % 128));
-      amp.push_back(std::sqrt(std::pow(10.f, db / 10) / 128.f));
-    }
-    if (bin.empty()) continue;
-    cf sym[128];
-    const uint64_t os = mix(static_cast<uint64_t>(o.lo * 1000) + seed);
-    // symbols on the absolute 4 us grid: 128 samples and a cyclic prefix of 32
-    const double first = std::ceil(t0_us / 4.0);
-    for (double j = first;; j++) {
-      const size_t at = static_cast<size_t>(std::lround((j * 4.0 - t0_us) * 40));
-      if (at >= n) break;
-      if (!o.on(j * 4.0)) continue;
-      std::fill(sym, sym + 128, cf(0, 0));
-      for (size_t i = 0; i < bin.size(); i++) {
-        const uint64_t r = mix(os + static_cast<uint64_t>(j) * 977 + i);
-        sym[bin[i]] = cf(r & 1 ? amp[i] : -amp[i], r & 2 ? amp[i] : -amp[i]) * 0.7071f;
-      }
-      for (auto &v : sym) v = std::conj(v);
-      fft_inplace(sym, 128);  // the inverse, by conjugates
-      for (size_t i = 0; i < 160 && at + i < n; i++) {
-        const cf v = std::conj(sym[(i + 96) % 128]);
-        x[at + i] = cf(x[at + i].real() + v.real(), x[at + i].imag() + v.imag());
-      }
-    }
+    tx::Ofdm s = o.tx;
+    s.offset_hz = o.mhz * 1e6 - centre_hz;
+    s.t0_s = t0_s;
+    if (std::fabs(s.offset_hz) - s.width_hz / 2 < 18e6) tx::add_ofdm(x, s, kNoiseSigma, rng);
   }
   for (const auto &f : air.fm) {
-    const double off = (f.mhz - c_mhz) * 1e6;
+    const double off = f.mhz * 1e6 - centre_hz;
     if (std::fabs(off) > 20e6 + f.dev_mhz * 0.5e6) continue;
-    const float a = std::sqrt(std::pow(10.f, f.db / 10) * 9e6f / 40e6f);
+    const double noise_density = 2 * kNoiseSigma * kNoiseSigma / kFs;
+    const float a = static_cast<float>(std::sqrt(noise_density * 9e6 * std::pow(10.0, f.db / 10)));
     double ph = 0;
-    for (size_t i = 0; i < n; i++) {
-      const double fi = off + f.dev_mhz * 1e6 * ((ire_at(t0_us + i / 40.0) + 40) / 140.0 - 0.5);
+    for (size_t i = 0; i < x.size(); i++) {
+      const double fi = off + f.dev_mhz * 1e6 * ((ire_at(f, t0_s + i / kFs) + 40) / 140.0 - 0.5);
       ph += 2 * M_PI * fi / kFs;
       if (ph > M_PI) ph -= 2 * M_PI;
       if (ph < -M_PI) ph += 2 * M_PI;
       if (std::fabs(fi) > 19.5e6) continue;  // outside what the chip's filter passes
-      x[i] = cf(x[i].real() + a * static_cast<float>(std::cos(ph)), x[i].imag() + a * static_cast<float>(std::sin(ph)));
+      x[i] += a * cf(static_cast<float>(std::cos(ph)), static_cast<float>(std::sin(ph)));
     }
   }
   return x;
@@ -173,8 +141,8 @@ static StepGrid grid_of(const std::vector<cf> &x) {
 // ---------------------------------------------------------------------------------------- the sweep
 // The radio's sweep on the Spectrum tab, each step taken as Radio::handle_sweep takes it: measured
 // (StepAnalysers::step), then into the band picture (BandPicture::add), which weighs its bursts against the carriers
-// of the span. A step every 180 ms, each capture 12 ms (radio.cpp's kPsdSpan). blind: the bursts go into a WifiWatch
-// of its own with no carriers to go by (no pilots), to show what those carriers keep out.
+// of the span. A step every 180 ms, each capture 12 ms. blind: the bursts go into a WifiWatch of its own with no
+// carriers to go by (no pilots), to show what those carriers keep out.
 struct Sim {
   Air air;
   bool blind = false;
@@ -191,8 +159,7 @@ struct Sim {
     analysers.sweep_started();
   }
   void step(double c) {
-    const auto x = capture(air, c, static_cast<double>(t_ms) * 1000, static_cast<size_t>(0.012 * kFs), seed++);
-    const StepFindings f = analysers.step(x, kFs, c, kEdge);
+    const StepFindings f = analysers.step(capture(air, c, t_ms / 1e3, seed++), kFs, c, kEdge);
     if (blind) alone.add(f.bursts, sweep.lo(), sweep.hi(), {}, t_ms);
     else picture.add(f, t_ms);
     t_ms += 180;
@@ -222,13 +189,18 @@ static bool is(const std::vector<WifiNet> &nets, std::vector<std::pair<int, int>
   return true;
 }
 
+static const BurstStep::Channel *channel(const BurstStep &s, int ch) {
+  for (const auto &c : s.channels)
+    if (c.ch == ch) return &c;
+  return nullptr;
+}
+
 // ---------------------------------------------------------------------------------------- the tests
 // One step's grid: noise reads 0 dB and lights nothing; a beacon lights every bin of its channel at once, and the rest
 // of the time none; an OFDM link that never stops is never off; nothing is measured within 0.75 MHz of the centre,
 // and each bin is handed on at its own frequency, within reach of the centre.
 static void a_step_tells_bursts_from_steady_signals() {
-  const size_t n = static_cast<size_t>(0.012 * kFs);
-  BurstStep s = measure_bursts(grid_of(capture({}, 5770e6, 0, n, 7)), 5770e6, 15e6);
+  BurstStep s = measure_bursts(grid_of(capture({}, 5770e6, 0, 7)), 5770e6, 15e6);
   double sum = 0;
   float peak = 0;
   bool dc = false, reach = true;
@@ -245,24 +217,23 @@ static void a_step_tells_bursts_from_steady_signals() {
   for (const auto &c : s.channels) none = none && c.full == 0;
   CHECK(none && !s.channels.empty());
 
-  Air beacon{{wifi(5765, 20, 18, beacons(4000))}, {}};  // channel 153, a beacon 4 ms into the capture
-  s = measure_bursts(grid_of(capture(beacon, 5770e6, 0, n, 7)), 5770e6, 15e6);
-  const BurstStep::Channel *c153 = nullptr;
-  for (const auto &c : s.channels)
-    if (c.ch == 153) c153 = &c;
+  Air beacon{{wifi(5765, 20, 18, tx::beacons(4e-3))}, {}};  // channel 153, a beacon 4 ms into the capture
+  s = measure_bursts(grid_of(capture(beacon, 5770e6, 0, 7)), 5770e6, 15e6);
+  const BurstStep::Channel *c153 = channel(s, 153);
   CHECK(c153 && c153->full == kMinSlices && c153->empty > 100 && std::fabs(c153->level_db - 18) < 3);
 
-  Air link{{Ofdm{5755, 5775, 18, 18, always()}}, {}};  // a 20 MHz link on channel 153, never off
-  s = measure_bursts(grid_of(capture(link, 5770e6, 0, n, 7)), 5770e6, 15e6);
+  Air steady{{link(5765, 20, 18)}, {}};  // a 20 MHz link on channel 153, never off
+  s = measure_bursts(grid_of(capture(steady, 5770e6, 0, 7)), 5770e6, 15e6);
   bool burst = false;
   for (const auto &c : s.channels) burst = burst || (c.full >= kMinSlices && c.empty >= kMinSlices);
   CHECK(!burst);
 }
 
-// A network in use on channel 157: found on the first pass, and in use within three.
+// A network in use on channel 157: found on the first pass, and in use within three; as the app reads it, a signal of
+// kind "wifi", and the carrier its bursts make tagged with it.
 static void a_network_in_use_is_found() {
   Sim sim;
-  sim.air.ofdm.push_back(wifi(5785, 20, 25, traffic(0.3, 11)));
+  sim.air.ofdm.push_back(wifi(5785, 20, 25, tx::traffic(0.3, 11)));
   sim.passes(1);
   CHECK(is(sim.nets(), {{157, 157}}));
   sim.passes(2);
@@ -270,7 +241,6 @@ static void a_network_in_use_is_found() {
   std::fprintf(stderr, "  in use on 157: %s\n", labels(nets).c_str());
   CHECK(is(nets, {{157, 157}}));
   CHECK(nets.size() == 1 && nets[0].busy && nets[0].lo_mhz == 5775 && nets[0].hi_mhz == 5795 && nets[0].label() == "Wi-Fi 157");
-  // as the app reads it: a signal of kind "wifi", and the carrier its bursts make tagged with it
   const std::string j = sim.picture.json(sim.sweep.lo(), sim.sweep.hi(), 0, 2 * kEdge, 3);
   CHECK(j.find("\"signals\":[{\"lo_mhz\":5775.0,\"hi_mhz\":5795.0,\"kind\":\"wifi\",\"label\":\"Wi-Fi 157\","
                "\"active\":true}]") != std::string::npos);
@@ -278,10 +248,10 @@ static void a_network_in_use_is_found() {
 }
 
 // An AP with no traffic on channel 149: only its beacons, caught now and then. Once caught it is kept (not busy) while
-// it goes on being missed, until kWifiHoldMs after the last time.
+// it goes on being missed, until kWifiHoldMs after the last time; and with the sweep stopped, as last seen.
 static void a_quiet_network_is_remembered_then_forgotten() {
   Sim sim;
-  sim.air.ofdm.push_back(wifi(5745, 20, 20, beacons(31700)));
+  sim.air.ofdm.push_back(wifi(5745, 20, 20, tx::beacons(31.7e-3)));
   int found_at = -1;
   for (int pass = 0; pass < 60 && found_at < 0; pass++) {
     sim.passes(1);
@@ -298,6 +268,7 @@ static void a_quiet_network_is_remembered_then_forgotten() {
   sim.passes(2);
   CHECK(is(sim.nets(), {{149, 149}}));
   sim.t_ms += kWifiHoldMs;
+  CHECK(is(sim.nets(), {{149, 149}}));  // no step since: as last seen
   sim.passes(1);
   CHECK(sim.nets().empty());
 }
@@ -305,8 +276,8 @@ static void a_quiet_network_is_remembered_then_forgotten() {
 // A network of 40 MHz on 132+136 and one of 80 on 149-161, both in use: each read as one, over its whole block.
 static void wide_networks_read_as_one() {
   Sim sim(5635, 5850);
-  sim.air.ofdm.push_back(wifi(5670, 40, 22, traffic(0.25, 21)));
-  sim.air.ofdm.push_back(wifi(5775, 80, 22, traffic(0.25, 22)));
+  sim.air.ofdm.push_back(wifi(5670, 40, 22, tx::traffic(0.25, 21)));
+  sim.air.ofdm.push_back(wifi(5775, 80, 22, tx::traffic(0.25, 22)));
   sim.passes(3);
   const auto nets = sim.nets();
   std::fprintf(stderr, "  40 MHz on 132+136, 80 MHz on 149-161: %s\n", labels(nets).c_str());
@@ -319,9 +290,9 @@ static void wide_networks_read_as_one() {
 // that never stops right on a Wi-Fi channel and a 40 MHz one: all on the air, none of them Wi-Fi.
 static void analog_video_and_steady_digital_links_are_not_wifi() {
   Sim sim(5700, 5910);
-  sim.air.fm = {{5769, 40}, {5745, 25}, {5806, 12, 8}};    // R4 (inside channel 153), A7 (on 149's centre), R5
-  sim.air.ofdm.push_back(Ofdm{5835, 5855, 22, 22, always()});  // a 20 MHz link on channel 169's centre
-  sim.air.ofdm.push_back(Ofdm{5860, 5900, 18, 18, always()});  // 40 MHz over channels 173 and 177
+  sim.air.fm = {{5769, 40}, {5745, 25}, {5806, 12, 8}};  // R4 (inside channel 153), A7 (on 149's centre), R5
+  sim.air.ofdm.push_back(link(5845, 20, 22));            // a 20 MHz link on channel 169's centre
+  sim.air.ofdm.push_back(link(5880, 40, 18));            // 40 MHz over channels 173 and 177
   sim.passes(6);
   const auto nets = sim.nets();
   const auto on_air = sim.on_air();
@@ -336,8 +307,8 @@ static void analog_video_and_steady_digital_links_are_not_wifi() {
 static void a_strong_vtxs_sidebands_are_not_wifi() {
   Air air;
   air.fm.push_back({5658, 44});  // R1: 37 dB in the band picture
-  air.ofdm.push_back(Ofdm{5613, 5648, 15, 22, crackle(0.04, 31)});
-  air.ofdm.push_back(Ofdm{5668, 5703, 22, 15, crackle(0.04, 32)});
+  air.ofdm.push_back(block(5613, 5648, 15, 22, tx::crackle(0.04, 31)));
+  air.ofdm.push_back(block(5668, 5703, 22, 15, tx::crackle(0.04, 32)));
   Sim sim(5635, 5760);
   sim.air = air;
   sim.passes(6);
@@ -354,7 +325,7 @@ static void a_strong_vtxs_sidebands_are_not_wifi() {
 
   Sim real(5635, 5760);
   real.air = air;
-  real.air.ofdm.push_back(wifi(5680, 20, 30, traffic(0.15, 33)));  // channel 136, 22 MHz from the VTX
+  real.air.ofdm.push_back(wifi(5680, 20, 30, tx::traffic(0.15, 33)));  // channel 136, 22 MHz from the VTX
   real.passes(6);
   nets = real.nets();
   std::fprintf(stderr, "  ... and a network on 136 at 30 dB: %s\n", labels(nets).c_str());
@@ -365,10 +336,10 @@ static void a_strong_vtxs_sidebands_are_not_wifi() {
 // 30 MHz, bursting with it): the network alone.
 static void a_strong_networks_shoulders_are_not_wifi() {
   Sim sim(5700, 5880);
-  const Schedule on = traffic(0.25, 41);
+  const tx::Schedule on = tx::traffic(0.25, 41);
   sim.air.ofdm.push_back(wifi(5775, 80, 33, on));
-  sim.air.ofdm.push_back(Ofdm{5815.3125, 5845, 24, 13, on});
-  sim.air.ofdm.push_back(Ofdm{5705, 5734.6875, 13, 24, on});
+  sim.air.ofdm.push_back(block(5815, 5845, 24, 13, on));
+  sim.air.ofdm.push_back(block(5705, 5735, 13, 24, on));
   sim.passes(3);
   const auto nets = sim.nets();
   std::fprintf(stderr, "  80 MHz at 33 dB with its shoulders: %s\n", labels(nets).c_str());
@@ -402,7 +373,45 @@ static void a_carrier_on_a_network_is_that_network() {
   CHECK(wifi_for(nets, Carrier{5745, 30, 25}) == nullptr);     // run together with something else
 }
 
-int main() {
+// ---------------------------------------------------------------------------------------- the cost
+template <class F>
+static double ms_per(int runs, F f) {
+  const auto t0 = std::chrono::steady_clock::now();
+  for (int i = 0; i < runs; i++) f();
+  return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / runs;
+}
+
+static void time_it() {
+  constexpr int kRuns = 50;
+  struct Case {
+    const char *name;
+    Air air;
+  };
+  const Case cases[] = {
+      {"noise only", {}},
+      {"analog FM (R4)", {{}, {{5769, 30}}}},
+      {"Wi-Fi in use (153)", {{wifi(5765, 20, 25, tx::traffic(0.3, 11))}, {}}},
+      {"Wi-Fi 80 MHz in use", {{wifi(5775, 80, 22, tx::traffic(0.5, 22))}, {}}},
+  };
+  std::printf("a sweep step: %zu samples (12 ms at 40 MS/s), ms\n", kStepSamples);
+  std::printf("%-24s %8s %8s | %8s\n", "", "grid", "bursts", "step");
+  for (const auto &c : cases) {
+    const auto x = capture(c.air, 5770e6, 0.1, 9);
+    StepGrid g;
+    const double grid = ms_per(kRuns, [&] { g.build(x.data(), x.size(), kFs, kEdge); });
+    BurstStep b;
+    const double bursts = ms_per(kRuns, [&] { b = measure_bursts(g, 5770e6, Sweep::kStep / 2); });
+    StepAnalysers a;
+    const double step = ms_per(kRuns, [&] { a.step(x, kFs, 5770e6, kEdge); });
+    std::printf("%-24s %8.2f %8.2f | %8.2f\n", c.name, grid, bursts, step);
+  }
+}
+
+int main(int argc, char **argv) {
+  if (argc > 1 && std::strcmp(argv[1], "--time") == 0) {
+    time_it();
+    return 0;
+  }
   a_step_tells_bursts_from_steady_signals();
   networks_are_grouped_by_the_wifi_grid();
   a_carrier_on_a_network_is_that_network();

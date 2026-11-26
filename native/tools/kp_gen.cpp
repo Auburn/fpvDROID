@@ -17,10 +17,10 @@
 // once per loop, so a frozen picture is obvious; --label puts big text over the bars. Composite levels in IRE
 // (sync -40, blank 0, black 7.5 for NTSC, white 100), FM-modulated so that sync tip -> -dev/2, white -> +dev/2.
 //
-// --wifi CH adds a 5 GHz Wi-Fi network in use on channel CH (802.11a OFDM, --wifi-db over the noise), --wifi-quiet CH
-// one that only sends its beacons, for the Spectrum tab's Wi-Fi (dsp/wifi.h). kp_sim takes the recording for one
-// centred on 5770 MHz and moves it without filtering, so keep the channel near the middle: 153 (5765 MHz) with
-// --centre 5770, and the VTX off it (--mhz 5785).
+// --wifi CH adds a 5 GHz Wi-Fi network in use on channel CH (802.11a OFDM, --wifi-db over the noise: digital_tx.h),
+// --wifi-quiet CH one that only sends its beacons, for the Spectrum tab's Wi-Fi (dsp/wifi.h). kp_sim takes the
+// recording for one centred on 5770 MHz and moves it without filtering, and the subcarriers past 18 MHz of the centre
+// are left out, so keep the channel near the middle: 153 (5765 MHz) with --centre 5770, and the VTX off it (--mhz 5785).
 #include <cmath>
 #include <complex>
 #include <cstdint>
@@ -30,7 +30,7 @@
 #include <string>
 #include <vector>
 
-#include "digital_tx.h"  // and spectrum.h (fft_inplace)
+#include "digital_tx.h"
 
 namespace {
 
@@ -217,17 +217,16 @@ int main(int argc, char **argv) {
   std::mt19937 rng(1);
   std::normal_distribution<double> nd(0, std::sqrt(noise_pow / 2));
 
-  // The Wi-Fi network: 52 subcarriers 312.5 kHz apart (+-1..26) around 5000 + 5 CH MHz, symbols of 4 us (128 samples
-  // and a cyclic prefix of 32), on for a beacon of 0.4 ms every 102.4 ms and, in use, in a quarter of its 0.5 ms frames
-  // at random. Each subcarrier's power is wifi_db over the noise in its 312.5 kHz.
-  std::vector<std::complex<float>> sym(160);
-  std::mt19937 wrng(2);
-  std::uniform_real_distribution<float> wu(0, 1);
-  const double wifi_off = (5000 + 5.0 * wifi_ch - centre_mhz) * 1e6;
-  const float wamp = static_cast<float>(std::sqrt(std::pow(10, wifi_db / 10) * noise_pow / 128));
-  double wph = 0;
-  long wframe = -1;
-  bool wframe_on = false;
+  // The Wi-Fi network (digital_tx.h): 52 subcarriers 312.5 kHz apart around 5000 + 5 CH MHz, symbols of 4 us, on for
+  // a beacon of 0.4 ms every 102.4 ms and, in use, in a quarter of its 0.5 ms frames at random; its density wifi_db
+  // over the noise's. Made a piece at a time on the recording's own clock, so that the pieces join up.
+  kp::tx::Ofdm wifi;
+  wifi.offset_hz = (5000 + 5.0 * wifi_ch - centre_mhz) * 1e6;
+  wifi.width_hz = 16.25e6;
+  wifi.snr_db = wifi_db;
+  wifi.wifi = true;
+  wifi.on = wifi_quiet ? kp::tx::beacons(0) : kp::tx::traffic(0.25, 2);
+  std::vector<kp::cf> piece(1 << 16);
   double phase = 0;
   const double w_sc = 2 * M_PI * S.fsc;
   const std::string extra = std::string("\"std\": \"") + (pal ? "PAL" : "NTSC") + "\"";
@@ -301,25 +300,13 @@ int main(int argc, char **argv) {
     if (phase > M_PI) phase -= 2 * M_PI * std::floor((phase + M_PI) / (2 * M_PI));
     double re = amp * std::cos(phase) + nd(rng), im = amp * std::sin(phase) + nd(rng);
     if (wifi_ch) {
-      if (i % 160 == 0) {
-        const double t_us = i / 40.0;
-        if (static_cast<long>(t_us / 500) != wframe) {
-          wframe = static_cast<long>(t_us / 500);
-          wframe_on = !wifi_quiet && wu(wrng) < 0.25f;
-        }
-        std::fill(sym.begin(), sym.end(), std::complex<float>(0, 0));
-        if (wframe_on || std::fmod(t_us, 102400.0) < 400) {
-          std::complex<float> x[128] = {};
-          for (int sc = -26; sc <= 26; sc++)
-            if (sc) x[(sc + 128) % 128] = std::conj(std::complex<float>(wu(wrng) < 0.5f ? wamp : -wamp, wu(wrng) < 0.5f ? wamp : -wamp)) * 0.7071f;
-          kp::fft_inplace(x, 128);  // the inverse, by conjugates
-          for (int k2 = 0; k2 < 160; k2++) sym[k2] = std::conj(x[(k2 + 96) % 128]);
-        }
+      if (i % piece.size() == 0) {
+        std::fill(piece.begin(), piece.end(), kp::cf(0, 0));
+        wifi.t0_s = i / fs;
+        kp::tx::add_ofdm(piece, wifi, std::sqrt(noise_pow / 2), rng);
       }
-      const std::complex<float> w = sym[i % 160] * std::complex<float>(std::cos(wph), std::sin(wph));
-      re += w.real();
-      im += w.imag();
-      wph = std::fmod(wph + 2 * M_PI * wifi_off / fs, 2 * M_PI);
+      re += piece[i % piece.size()].real();
+      im += piece[i % piece.size()].imag();
     }
     return std::complex<double>(re, im);
   });
