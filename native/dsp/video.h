@@ -58,6 +58,7 @@ struct DecoderStats {
   uint64_t fields = 0, frames = 0;        // since construction
   uint64_t acquisitions = 0, losses = 0;  // successful acquisitions, lock losses
   uint64_t rephases = 0;                  // line grid moved onto a jumped signal without re-acquiring
+  uint64_t level_jumps = 0;               // sync levels moved onto a signal that jumped up or down, likewise
   uint64_t clicks_repaired = 0;           // sparkle repair: FM clicks patched over ...
   uint64_t lines_mended = 0;              // ... and badly hit lines redrawn from the lines above and below
   double line_us = 0;                     // tracked line period

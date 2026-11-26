@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <vector>
@@ -242,6 +243,86 @@ static void frames_say_when_their_lines_were_taken() {
   CHECK(frames >= 8 && timed == 0);
 }
 
+// ---------------------------------------------------------------------------------------- level jumps
+
+// The whole signal, sync and picture alike, moved by by(seconds) MHz. A transmitter whose video input is AC-coupled
+// does that when the picture's brightness changes: seen from a camera pointed at a light flashing at 7 Hz, which
+// moved the sync by 1.3 times its depth with every flash (a Pixel 8 Pro's log, 2026-11-25).
+static Signal moved(Signal s, const std::function<double(double)> &by) {
+  for (size_t i = 0; i < s.d.size(); i++) s.d[i] += static_cast<float>(by(static_cast<double>(i) / kFs));
+  return s;
+}
+
+// by() for a light flashing at 7 Hz: the signal down by mhz while it is lit (the second half of each flash), and
+// each move taking tau seconds (an RC coupling's exponential; 0: at once).
+static std::function<double(double)> flashing(double mhz, double tau) {
+  return [=](double t) {
+    const double ph = t * 7 - std::floor(t * 7);  // 0..1 through a flash
+    if (t * 7 < 0.5) return 0.0;                  // not lit before the first flash
+    const bool lit = ph >= 0.5;
+    const double since = (lit ? ph - 0.5 : ph) / 7, to = lit ? -mhz : 0, from = lit ? 0 : -mhz;
+    return tau > 0 ? to + (from - to) * std::exp(-since / tau) : to;
+  };
+}
+
+static constexpr int kJumpsASecond = 13;  // at 7 Hz, the first after half a flash
+
+// The lock holds through them, whichever way the signal moves, by less or more than the sync depth, at once or
+// over a few milliseconds: the line grid stays, no field is started that is none, and all but a few lines at each
+// jump find their hsync. (A jump that lands on the lines of a vertical sync can still cost that one field: they
+// have no hsync to read the new levels from, and are over before the lines after them have said.)
+static void the_levels_jump_with_a_flashing_light() {
+  const Signal plain = video(1.0, on_the_grid, nullptr);
+  const DecoderStats steady = decode(plain);
+  CHECK(steady.acquisitions == 1 && steady.losses == 0);
+  for (const double depths : {0.6, 1.3, 2.0, -0.6, -1.3, -2.0})
+    for (const double tau : {0.0, 0.5e-3, 2e-3, 5e-3}) {
+      const DecoderStats st = decode(moved(plain, flashing(depths * (kBlank - kTip), tau)));
+      const long long missed = static_cast<long long>(steady.lines_locked) - static_cast<long long>(st.lines_locked);
+      const bool ok = st.acquisitions == 1 && st.losses == 0 && st.rephases == 0 && st.fields <= steady.fields &&
+                      st.fields + 1 >= steady.fields && missed <= kJumpsASecond * 8 &&
+                      (tau > 0 || st.level_jumps == kJumpsASecond);  // (a slow move is partly followed without)
+      CHECK(ok);
+      if (!ok || std::getenv("KP_TEST_VERBOSE"))
+        std::fprintf(stderr, "  %+.1f depths over %.1f ms: %llu acquisitions, %llu losses, %llu re-phases, %llu fields "
+                     "(steady: %llu), %lld lines without their hsync, %llu level jumps\n", depths, tau * 1e3,
+                     (unsigned long long)st.acquisitions, (unsigned long long)st.losses,
+                     (unsigned long long)st.rephases, (unsigned long long)st.fields,
+                     (unsigned long long)steady.fields, missed, (unsigned long long)st.level_jumps);
+    }
+}
+
+// And the picture keeps its brightness: its grey is drawn against the levels as they are after the jump, the lines
+// that showed the jump against their own.
+static void the_picture_keeps_its_grey_through_a_jump() {
+  const Signal plain = video(1.0, on_the_grid, nullptr);
+  const auto mid = [](const Picture &p, int row) { return p.px.data() + (static_cast<size_t>(row) * 720 + 360) * 4; };
+  const std::vector<Picture> steady = frames_of(plain, PictureOpts{});
+  CHECK(steady.size() >= 50);
+  if (steady.size() < 50) return;
+  const uint8_t grey[3] = {mid(steady[20], 240)[0], mid(steady[20], 240)[1], mid(steady[20], 240)[2]};
+  const auto off_rows = [&](const std::vector<Picture> &f) {
+    int off = 0;
+    for (size_t i = 4; i < f.size(); i++)
+      for (int row = 16; row < 464; row++)
+        for (int c = 0; c < 3; c++)
+          if (std::abs(mid(f[i], row)[c] - grey[c]) > 6) { off++; break; }
+    return off;
+  };
+  CHECK(off_rows(steady) == 0);
+  for (const double depths : {1.3, -1.3}) {
+    const std::vector<Picture> f = frames_of(moved(plain, flashing(depths * (kBlank - kTip), 0)), PictureOpts{});
+    const int off = off_rows(f);
+    // the line the jump is in is off from there on; a field's line is two of the frame's, and smooth lines spread
+    // it over one more either side
+    const bool ok = f.size() == steady.size() && off <= kJumpsASecond * 4;
+    CHECK(ok);
+    if (!ok || std::getenv("KP_TEST_VERBOSE"))
+      std::fprintf(stderr, "  %+.1f depths: %zu frames (steady: %zu), %d rows off their grey\n", depths, f.size(),
+                          steady.size(), off);
+  }
+}
+
 int main() {
   locks_on_a_clean_signal();
   a_dip_ahead_of_the_hsync();
@@ -249,6 +330,8 @@ int main() {
   a_step_in_the_line_timing();
   strips_add_up_to_the_frames();
   frames_say_when_their_lines_were_taken();
+  the_levels_jump_with_a_flashing_light();
+  the_picture_keeps_its_grey_through_a_jump();
   std::printf("%d checks, %d failed\n", g_checks, g_failed);
   return g_failed ? 1 : 0;
 }

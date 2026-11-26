@@ -432,14 +432,15 @@ void Radio::dsp_loop() {
       if (++_status_ticks % 5 == 0 && _mode == Mode::Watch)
         KP_LOGI("status: watch %.1f MHz, cpu demod %.0f%% decode %.0f%%, dropped stream %llu usb %llu decode %llu, "
                 "restarts %llu, unwedged %llu, %s %s lock %.2f fps %.0f, acq %llu lost %llu rephase %llu, "
-                "torn frames hidden %llu",
+                "level jumps %llu, torn frames hidden %llu",
                 _watch_hz / 1e6,
                 _load * 100, _dload * 100, (unsigned long long)rs.mid_drops,
                 (unsigned long long)_dropped.load(), (unsigned long long)_decq.dropped(),
                 (unsigned long long)rs.restarts, (unsigned long long)rs.unwedged, _vstats.std_name,
                 _vstats.colour ? "colour" : "grey", _vstats.lock_recent, _fps,
                 (unsigned long long)_vstats.acquisitions, (unsigned long long)_vstats.losses,
-                (unsigned long long)_vstats.rephases, (unsigned long long)_gate.hidden());
+                (unsigned long long)_vstats.rephases, (unsigned long long)_vstats.level_jumps,
+                (unsigned long long)_gate.hidden());
     }
   }
 }

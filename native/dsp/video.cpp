@@ -54,6 +54,7 @@ public:
     s.lock_recent = recent_n ? static_cast<float>(recent_locked) / recent_n : 0.f;
     s.std_name = std_->name;
     s.rephases = rephases;
+    s.level_jumps = level_jumps;
     s.colour = colour_on;
     s.burst_err = c_err;
     s.clicks_repaired = spark.clicks_repaired;
@@ -160,6 +161,8 @@ private:
   bool line_has_longrun = false;
   uint64_t line_longrun_start = 0;
   bool prev_line_vsync = false;
+  bool start_due = false, start_odd = false;  // a field start that waits for the lines after it (close_line) ...
+  int64_t start_line = 0;                     // ... and its first line
   std::vector<float> acq;
   size_t acq_n = 0;
   bool acquiring = true;
@@ -182,6 +185,23 @@ private:
   // measured on locked active lines and smoothed over ~64 lines. Picture content cannot move them (the
   // spike's histogram peaks could, and the threshold wandered with the scene).
   uint64_t gated_lines = 0;
+  // fpvDROID: ... and after a jump. A transmitter whose video input is AC-coupled moves the whole signal, sync
+  // and picture alike, when the picture's brightness changes: a camera pointed at a light flashing at 7 Hz moved
+  // it by 1.3 times the sync depth with every flash. The threshold is then outside the pulses, no line finds its
+  // hsync, and the gated levels, measured on lines that did, never hear of it: the lock went with every flash.
+  // So every line is looked at where its hsync is due, found or not (the grid freewheels on: it is the levels
+  // that moved, not the timing), and when kJumpLines of them in a row show a pulse of the same depth as before at
+  // the same new levels, the levels go there at once (levels_moved). That transmitter's signal took some
+  // milliseconds over each move: so for kFastLines lines after a jump the gated levels follow a quarter of the way
+  // a line, not a 64th, and the rest of the slide is followed line by line (else in steps, each a jump of its
+  // own, and the picture's brightness with them).
+  static constexpr int kJumpLines = 3, kFastLines = 128;
+  int fast_lines = 0;                  // lines the gated levels still follow fast for
+  int jump_run = 0, jump_gap = 0;      // lines that have said so, and lines since that could not say
+  float jump_tip = 0, jump_blank = 0;  // the levels they said (their mean)
+  bool line_moved = false;             // the line in hand is one of them ...
+  float line_tip = 0, line_blank = 0;  // ... with its sync at these levels: it is drawn against them
+  uint64_t level_jumps = 0;
   // fpvDROID: re-phase instead of re-acquire. After a jump in the signal (stream restart, a dropped bank)
   // the hsyncs keep coming, one line apart, but outside the PLL's window. A run of them on a steady grid
   // while the PLL freewheels moves the line grid onto them within a few lines.
@@ -240,6 +260,7 @@ private:
       const double ls = line_start;
       miss_run++;
       count_line(false);
+      line_moved = levels_moved(ls);
       render_line(ls, false);
       close_line(ls + T);
       check_lost();
@@ -355,6 +376,9 @@ private:
     recent_n = recent_locked = recent_pos = 0;
     line_start = -1;
     gated_lines = 0;
+    jump_run = jump_gap = fast_lines = 0;
+    line_moved = false;
+    start_due = false;
     miss_run = stray_run = 0;
     last_stray = -1;
     hs_len = 0;
@@ -560,8 +584,11 @@ private:
     l.k = k;
     l.field = cur_field;
     l.epoch = comb_epoch;
+    l.moved = line_moved;
+    l.tip = line_tip;
+    l.blank = line_blank;
     if (!in_picture(k)) return l;
-    if (locked) measure_levels(ls);
+    if (locked && !line_moved) measure_levels(ls);
     if (filt.luma_comb()) top_line(ls, k);
     l.hit = pic.repair && patch_line(ls);
     l.col = o.colour && locked && burst(ls, l.pal_v);
@@ -606,7 +633,8 @@ private:
   // below (comb_line).
   void draw_line(const LineInfo &l, bool up, bool dn) {
     uint32_t *row = reinterpret_cast<uint32_t *>((cur_field == 0 ? fieldA : fieldB).data()) + static_cast<size_t>(l.k) * o.width;
-    drawer.draw(row, R, l, up, dn, DrawParams{sign, tip, blank, T, filt.cdel()});
+    const float t = l.moved ? l.tip : tip, b = l.moved ? l.blank : blank;
+    drawer.draw(row, R, l, up, dn, DrawParams{sign, t, b, T, filt.cdel()});
   }
 
   // The top of the picture with the luma comb. The first picture line of a field has blanking above it, not
@@ -667,13 +695,66 @@ private:
     return true;
   }
 
+  // Does the line that began at ls (its hsync found there, or only due there) have its sync at other levels than
+  // the ones kept? It does when there is an hsync at ls by its shape (a pulse flat at its bottom, between two
+  // porches at one level, as deep as the sync was) and both its levels are off the kept ones the same way by more
+  // than a quarter of that depth. (A click moves one of the two, noise neither that far; where the grid is off
+  // the signal there is no such pulse, and a broad pulse has no porch behind it: one PAL transmitter's dip 2 us
+  // into its broad pulses, as deep again as the sync, would else pass for an hsync one depth down.) The
+  // kJumpLines-th such line in a row at the same new levels moves the kept levels onto them. A line with an hsync
+  // where the levels were ends the run at once, lines that cannot say (the vertical interval's) after a few.
+  bool levels_moved(double ls) {
+    const double us = 1e-6 * fs;
+    const float depth = blank - tip;
+    float t0, t1, b0, b1, front;
+    if (depth < 0.2f || !ring_mean(ls - 1.1 * us, ls - 0.4 * us, front) ||
+        !ring_mean(ls + 1.2 * us, ls + 2.4 * us, t0) || !ring_mean(ls + 2.4 * us, ls + 3.6 * us, t1) ||
+        !ring_mean(ls + 5.8 * us, ls + 7.3 * us, b0) || !ring_mean(ls + 7.3 * us, ls + 8.8 * us, b1)) {
+      jump_run = 0;
+      return false;
+    }
+    const float t = 0.5f * (t0 + t1), b = 0.5f * (b0 + b1);
+    const bool pulse = std::fabs(t1 - t0) < 0.2f * depth && std::fabs(b1 - b0) < 0.2f * depth &&
+                       std::fabs(front - b) < 0.3f * depth && std::fabs(b - t - depth) < 0.3f * depth;
+    if (!pulse || std::fabs(t - tip) <= 0.25f * depth || std::fabs(b - blank) <= 0.25f * depth) {
+      if (pulse || ++jump_gap > 4) jump_run = 0;
+      return false;
+    }
+    jump_gap = 0;
+    line_tip = t;
+    line_blank = b;
+    if (jump_run > 0 && std::fabs(t - jump_tip) < 0.25f * depth && std::fabs(b - jump_blank) < 0.25f * depth) {
+      jump_run++;
+      jump_tip += (t - jump_tip) / static_cast<float>(jump_run);
+      jump_blank += (b - jump_blank) / static_cast<float>(jump_run);
+    } else {
+      jump_run = 1;
+      jump_tip = t;
+      jump_blank = b;
+    }
+    if (jump_run >= kJumpLines) {
+      KP_LOGD("video: the levels moved by %+.2f MHz, to tip %.2f blank %.2f, at line %lld of the field",
+              jump_tip - tip, jump_tip, jump_blank,
+              cur_field < 0 ? -1LL : static_cast<long long>(line_idx) - static_cast<long long>(field_line0));
+      tip = jump_tip;
+      blank = jump_blank;
+      thr = 0.5f * (tip + blank);
+      jump_run = 0;
+      fast_lines = kFastLines;
+      level_jumps++;
+      start_due = false;  // the field start that waits (close_line) was the signal dropping
+    }
+    return true;
+  }
+
   void measure_levels(double ls) {
     const double us = 1e-6 * fs;
     float t, b;
     if (!ring_mean(ls + 1.2 * us, ls + 3.6 * us, t)) return;  // hsync is 4.7 us
     if (!ring_mean(ls + 5.8 * us, ls + 8.8 * us, b)) return;  // back porch (burst averages out)
     if (b - t < 0.05f) return;
-    const float a = gated_lines < 64 ? 0.1f : 1.f / 64;
+    const float a = gated_lines < 64 ? 0.1f : fast_lines > 0 ? 0.25f : 1.f / 64;
+    if (fast_lines > 0) fast_lines--;
     tip += a * (t - tip);
     blank += a * (b - blank);
     thr = 0.5f * (tip + blank);
@@ -741,25 +822,23 @@ private:
   }
 
   void close_line(double next_start) {
-    const bool vs = line_low > 0.5 * T;
-    if (vs && !prev_line_vsync && line_has_longrun) {
+    // A line whose levels have moved was low against a threshold that was no longer right: it starts no field.
+    // Nor does the line before the first of them, the one the signal dropped in, low from there to its end (the
+    // picture's black under the old threshold). So a field start waits for the line after it, in a vertical sync
+    // another of its lines, and while lines say the levels have moved: when they have (levels_moved), it is
+    // dropped.
+    const bool moved = line_moved, vs = line_low > 0.5 * T;
+    line_moved = false;
+    if (start_due && !moved) {
+      start_due = false;
+      start_field(start_odd, start_line);
+    } else if (vs && !moved && !start_due && !prev_line_vsync && line_has_longrun) {
       // field start: phase of the broad-pulse start inside this line
       double ph = (static_cast<double>(line_longrun_start) - line_start) / T;
       ph -= std::floor(ph + 0.25);  // -> [-0.25, 0.75)
-      const bool odd = std::fabs(ph) < 0.25;
-      // smooth lines: A is the lower field, B the upper one (B's line k is drawn above A's line k)
-      if (cur_field == 0) haveA = true;
-      if (cur_field == 1) haveB = true;
-      if (o.fields && cur_field >= 0) field_done();
-      if (!o.fields && haveA && haveB) {
-        emit(fieldA, fieldB);
-        haveA = haveB = false;
-      }
-      cur_field = odd ? 0 : 1;
-      field_line0 = static_cast<int64_t>(line_idx);
-      fields_seen++;
-      if (odd) haveB = false;  // a frame is A then B
-      begin_field();
+      start_due = true;
+      start_odd = std::fabs(ph) < 0.25;
+      start_line = static_cast<int64_t>(line_idx);
     }
     prev_line_vsync = vs;
     line_idx++;
@@ -767,6 +846,23 @@ private:
     line_has_longrun = false;
     line_start = next_start;
     refresh_switches();
+  }
+
+  // A field begins, at line line0 (the first of its vertical sync): the one before it is done.
+  void start_field(bool odd, int64_t line0) {
+    // smooth lines: A is the lower field, B the upper one (B's line k is drawn above A's line k)
+    if (cur_field == 0) haveA = true;
+    if (cur_field == 1) haveB = true;
+    if (o.fields && cur_field >= 0) field_done();
+    if (!o.fields && haveA && haveB) {
+      emit(fieldA, fieldB);
+      haveA = haveB = false;
+    }
+    cur_field = odd ? 0 : 1;
+    field_line0 = line0;
+    fields_seen++;
+    if (odd) haveB = false;  // a frame is A then B
+    begin_field();
   }
 
   // An hsync-width pulse has ended: it began at edge and was len samples long.
@@ -796,6 +892,7 @@ private:
       miss_run = 0;
       stray_run = 0;
       count_line(true);
+      line_moved = levels_moved(line_start);
       render_line(line_start, true);
       close_line(ns);
       check_lost();
