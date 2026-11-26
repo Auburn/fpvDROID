@@ -5,31 +5,59 @@
 
 namespace kp {
 
-void fft_inplace(cf *x, int n) {
-  for (int i = 1, j = 0; i < n; i++) {
-    int bit = n >> 1;
+Fft::Fft(int n) : _n(n), _rev(n), _tw(std::max(1, n - 1)) {
+  for (int i = 0, j = 0; i < n; i++) {
+    _rev[i] = j;
+    int bit = n >> 1;  // j: i with its bits the other way round, counted up from the top bit
     for (; j & bit; bit >>= 1) j ^= bit;
     j ^= bit;
-    if (i < j) std::swap(x[i], x[j]);
   }
-  for (int len = 2; len <= n; len <<= 1) {
-    const double a = -2 * M_PI / len;
-    const cf wl(static_cast<float>(std::cos(a)), static_cast<float>(std::sin(a)));
-    for (int i = 0; i < n; i += len) {
-      cf w(1, 0);
-      for (int k = 0; k < len / 2; k++) {
-        const cf u = x[i + k], v = x[i + k + len / 2] * w;
-        x[i + k] = u + v;
-        x[i + k + len / 2] = u - v;
-        w *= wl;
-      }
+  // each from its own angle, in double: none carries the rounding of the one before
+  for (int h = 1; h < n; h <<= 1)
+    for (int k = 0; k < h; k++) {
+      const double a = -M_PI * k / h;
+      _tw[h - 1 + k] = cf(static_cast<float>(std::cos(a)), static_cast<float>(std::sin(a)));
     }
+}
+
+void Fft::butterflies(cf *x) const {
+  // the first stage's twiddle is 1
+  for (int i = 0; i + 1 < _n; i += 2) {
+    const cf u = x[i], v = x[i + 1];
+    x[i] = u + v;
+    x[i + 1] = u - v;
+  }
+  for (int h = 2; h < _n; h <<= 1) {
+    const cf *w = &_tw[h - 1];
+    for (int i = 0; i < _n; i += 2 * h)
+      for (int k = 0; k < h; k++) {
+        const cf u = x[i + k], v = x[i + k + h] * w[k];
+        x[i + k] = u + v;
+        x[i + k + h] = u - v;
+      }
   }
 }
 
-Psd::Psd(int n) : _n(n), _win(n), _buf(n), _tmp(n), _acc(n, 0.0) {
-  for (int i = 0; i < n; i++) _win[i] = static_cast<float>(0.5 - 0.5 * std::cos(2 * M_PI * i / n));
+void Fft::run(cf *x) const {
+  for (int i = 0; i < _n; i++)
+    if (i < _rev[i]) std::swap(x[i], x[_rev[i]]);
+  butterflies(x);
 }
+
+void Fft::run(const cf *in, const float *win, cf *out) const {
+  for (int i = 0; i < _n; i++) out[_rev[i]] = in[i] * win[i];
+  butterflies(out);
+}
+
+void fft_inplace(cf *x, int n) { Fft(n).run(x); }
+
+std::vector<float> hann(int n) {
+  std::vector<float> w(n);
+  for (int i = 0; i < n; i++) w[i] = static_cast<float>(0.5 - 0.5 * std::cos(2 * M_PI * i / n));
+  return w;
+}
+
+Psd::Psd(int n) : _n(n), _fft(n), _win(hann(n)), _buf(n), _tmp(n), _acc(n, 0.0) {}
 
 void Psd::reset() {
   std::fill(_acc.begin(), _acc.end(), 0.0);
@@ -38,16 +66,20 @@ void Psd::reset() {
 }
 
 void Psd::add(const cf *x, size_t count) {
-  for (size_t i = 0; i < count; i++) {
-    _buf[_fill++] = x[i];
-    if (_fill < static_cast<size_t>(_n)) continue;
-    for (int k = 0; k < _n; k++) _tmp[k] = _buf[k] * _win[k];
-    fft_inplace(_tmp.data(), _n);
-    for (int k = 0; k < _n; k++) _acc[k] += std::norm(_tmp[k]);
+  const size_t n = static_cast<size_t>(_n);
+  while (count > 0) {
+    const size_t take = std::min(count, n - _fill);
+    std::copy(x, x + take, _buf.begin() + static_cast<long>(_fill));
+    x += take;
+    count -= take;
+    _fill += take;
+    if (_fill < n) return;
+    _fft.run(_buf.data(), _win.data(), _tmp.data());
+    for (size_t k = 0; k < n; k++) _acc[k] += std::norm(_tmp[k]);
     _frames++;
     // 50 % overlap
     std::copy(_buf.begin() + _n / 2, _buf.end(), _buf.begin());
-    _fill = _n / 2;
+    _fill = n / 2;
   }
 }
 

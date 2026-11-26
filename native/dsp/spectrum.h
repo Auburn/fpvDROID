@@ -9,6 +9,29 @@
 
 namespace kp {
 
+// A forward radix-2 FFT of one size (a power of two), its bit-reversed order and its twiddles worked out once: for
+// the many FFTs of one size a sweep step takes (Psd's ~940 of 1024 points, StepGrid's 1875 of 256).
+class Fft {
+public:
+  explicit Fft(int n);
+  int size() const { return _n; }
+  void run(cf *x) const;  // in place
+  // out = the FFT of in[i] * win[i] (n of each), the window put on as the samples are put in bit-reversed order
+  void run(const cf *in, const float *win, cf *out) const;
+
+private:
+  void butterflies(cf *x) const;
+  int _n;
+  std::vector<int> _rev;
+  std::vector<cf> _tw;  // stage by stage: a stage of span 2h has its h twiddles exp(-2 pi i k / 2h) from _tw[h - 1]
+};
+
+// An FFT now and then (the tools' transmitters): Fft(n).run(x), its plan made for the one call.
+void fft_inplace(cf *x, int n);
+
+// The Hann window of n points (periodic: 0.5 - 0.5 cos(2 pi i / n)), as every spectrum here takes it.
+std::vector<float> hann(int n);
+
 // Averaged power spectrum, fftshifted (bin 0 = -fs/2), in dB. Hann window, 50 % overlap.
 class Psd {
 public:
@@ -21,14 +44,13 @@ public:
 
 private:
   int _n;
+  Fft _fft;
   std::vector<float> _win;
   std::vector<cf> _buf, _tmp;
   std::vector<double> _acc;
   size_t _fill = 0;
   int _frames = 0;
 };
-
-void fft_inplace(cf *x, int n);  // radix-2, n a power of two, forward
 
 // A hump in the spectrum that looks like an FM video carrier (3.5..24 MHz wide at floor + 6 dB).
 struct Hump {
