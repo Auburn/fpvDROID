@@ -140,6 +140,7 @@ struct BurstBin {
   double mhz = 0;
   float peak_db = 0;  // the strongest slice of the last passes (it fades)
   float busy = 0;     // the share of the time it has been on, over the last kBusyPasses passes
+  float on = 0;       // ... in the last step that measured it (the most of the step's bins in it): a pilot's is ~1
 };
 
 // Each step of a sweep laid on the band's bins (TimedBins, as BandMap lays its levels): what each bin did over the
@@ -154,7 +155,7 @@ public:
   static constexpr int kBusyPasses = 10;
 
   BurstMap(double lo_hz, double hi_hz, double bin_hz)
-      : _bins(lo_hz, hi_hz, bin_hz), _peak(static_cast<size_t>(_bins.size())), _busy(_peak.size()) {}
+      : _bins(lo_hz, hi_hz, bin_hz), _peak(static_cast<size_t>(_bins.size())), _busy(_peak.size()), _on(_peak.size()) {}
   void add(const BurstStep &s, int64_t now_ms);
   void forget(double lo_hz, double hi_hz, int64_t older_than_ms) { _bins.forget(lo_hz, hi_hz, older_than_ms); }
   // The bins measured in lo..hi, in order.
@@ -162,23 +163,25 @@ public:
 
 private:
   TimedBins _bins;
-  std::vector<float> _peak, _busy;  // linear, and 0..1, while a bin is written
+  std::vector<float> _peak, _busy, _on;  // linear, 0..1 and 0..1, while a bin is written
 };
 
 void BurstMap::add(const BurstStep &s, int64_t now_ms) {
   const float decay = std::pow(10.f, -kPeakFadeDb / kPasses / 10);
   for (size_t i = 0; i < s.bins.size();) {
     const int j = _bins.nearest(s.bins[i].hz);
-    float peak = 0, duty = 0;
+    float peak = 0, duty = 0, most = 0;
     int n = 0;
     for (; i < s.bins.size() && _bins.nearest(s.bins[i].hz) == j; i++, n++) {
       peak += s.bins[i].peak;
       duty += s.bins[i].duty;
+      most = std::max(most, s.bins[i].duty);
     }
     if (j < 0 || j >= _bins.size()) continue;
     if (_bins.written(j) == 0) _peak[j] = _busy[j] = 0;  // never seen, or forgotten: from nothing
     _peak[j] = std::max(peak / n, _peak[j] * decay);
     _busy[j] += (duty / n - _busy[j]) / kBusyPasses;
+    _on[j] = most;
     _bins.write(j, now_ms);
   }
 }
@@ -189,7 +192,7 @@ std::vector<BurstBin> BurstMap::get(double lo_hz, double hi_hz) const {
   std::vector<BurstBin> out;
   for (int j = j0; j <= j1; j++)
     if (_bins.written(j) > 0)
-      out.push_back(BurstBin{_bins.hz(j) / 1e6, 10 * std::log10(std::max(_peak[j], 1e-6f)), _busy[j]});
+      out.push_back(BurstBin{_bins.hz(j) / 1e6, 10 * std::log10(std::max(_peak[j], 1e-6f)), _busy[j], _on[j]});
   return out;
 }
 
@@ -211,14 +214,29 @@ constexpr double kSidebandMhzPerDb = 1.5, kSidebandMinMhz = 6, kSidebandMaxMhz =
 // falls from 24 to 13 dB over the next 30 MHz.
 constexpr double kWifiShoulderMhz = 40;
 constexpr float kWifiShoulderDb = 10;
+// Not a product of the receiver's front end. Its third-order intermodulation of a pilot (on all the time, as a VTX is)
+// and a network lands at 2 fp - fw: it bursts when the network does and is as flat as the network's OFDM, so nothing
+// in a step's slices tells it from a network. Seen on the phone: a VTX on R3 (5732.7 MHz, 23 dB) and a busy network on
+// 149 (5745 MHz) lit channel 144 (2 x 5732.7 - 5745 = 5720.4 MHz) at 17 dB, idle, 6 dB under the VTX; the VTX alone
+// does not (its skirts reach only the top 1.3 MHz of 144). So a channel is taken for such a product when a network is
+// at least kIntermodBelowDb stronger and, within kIntermodMhz of halfway between the two (where a pilot has to be for
+// its product with the network to land on the channel), the burst picture has bins on all the time (kSteadyDuty) and
+// as much stronger. Their strongest slices, not the band picture's level: the same measure as the channel's, where a
+// VTX's few dwelling levels stand well over its averaged spectrum (and where a busy network beside it does not run into
+// it). The margin is small because a front end that is not overloaded makes the product far weaker than either. Not a
+// channel in the network's own 80 MHz block: it may be that network, wider.
+constexpr double kIntermodMhz = 2;
+constexpr float kIntermodBelowDb = 3;
 // In use: its bins on kWifiTrafficShare of the time or more (BurstBin::busy). Beacons take ~0.4 ms every 102.4 ms:
 // under 2 % even for an AP that announces four networks.
 constexpr float kWifiTrafficShare = 0.05f;
 // A network seen within kWifiRecentMs is recent: a new one is weighed against those too.
 constexpr int64_t kWifiRecentMs = 10000;
 
-double sideband_reach(const Carrier &c) {
-  return std::clamp((c.snr_db - kSidebandFromDb) * kSidebandMhzPerDb, kSidebandMinMhz, kSidebandMaxMhz);
+// Is w in pilot p's sidebands: within its reach, and much weaker?
+bool sideband_of(const Wifi &w, const Carrier &p) {
+  const double reach = std::clamp((p.snr_db - kSidebandFromDb) * kSidebandMhzPerDb, kSidebandMinMhz, kSidebandMaxMhz);
+  return std::fabs(w.mhz - p.mhz) < p.width_mhz / 2 + reach && w.peak_db + kSidebandBelowDb <= p.snr_db;
 }
 
 // Is weak the shoulder of strong: another channel close by, much stronger?
@@ -227,10 +245,21 @@ bool shoulder_of(const Wifi &weak, const Wifi &strong) {
          strong.peak_db >= weak.peak_db + kWifiShoulderDb;
 }
 
-// The networks one sweep step shows (step: measure_bursts), against the burst picture over the span swept (bins), the
-// networks seen in the last few seconds (recent) and what the band picture has on the air (carriers: find_carriers).
-std::vector<Wifi> find_wifi(const BurstStep &step, const std::vector<BurstBin> &bins, const std::vector<Wifi> &recent,
-                            const std::vector<Carrier> &carriers) {
+// Is w the front end's product of network net and a pilot halfway between them in the burst picture (bins, in order)?
+bool intermod_of(const Wifi &w, const Wifi &net, const std::vector<BurstBin> &bins) {
+  if (net.ch == w.ch || block_of(kBlocks80, net.ch) == block_of(kBlocks80, w.ch) ||
+      w.peak_db + kIntermodBelowDb > net.peak_db)
+    return false;
+  const double mid = (w.mhz + net.mhz) / 2;
+  auto it = std::lower_bound(bins.begin(), bins.end(), mid - kIntermodMhz, [](const BurstBin &b, double mhz) { return b.mhz < mhz; });
+  for (; it != bins.end() && it->mhz <= mid + kIntermodMhz; ++it)
+    if (it->on >= kSteadyDuty && it->peak_db >= w.peak_db + kIntermodBelowDb) return true;
+  return false;
+}
+
+// The channels one sweep step shows lit as a network would light them (step: measure_bursts), against the burst
+// picture over the span swept (bins), each in use or not.
+std::vector<Wifi> candidates(const BurstStep &step, const std::vector<BurstBin> &bins) {
   std::vector<Wifi> seen;
   float lit_at = kWifiPeakMin;  // what a network's strongest slices have to reach
   if (!bins.empty()) {
@@ -253,26 +282,35 @@ std::vector<Wifi> find_wifi(const BurstStep &step, const std::vector<BurstBin> &
     w.traffic = median_of(std::move(busy)) >= kWifiTrafficShare;
     seen.push_back(w);
   }
-  const std::vector<Wifi> *lists[] = {&seen, &recent};
-  // a carrier centred on a network (this step's or a recent one) is that network, not a pilot
-  const auto on_network = [&](double mhz) {
-    for (const auto *list : lists)
-      for (const auto &w : *list)
-        if (std::fabs(mhz - w.mhz) <= half) return true;
-    return false;
-  };
+  return seen;
+}
+
+// The pilots among what the band picture has on the air (carriers: find_carriers): the carriers not centred on a
+// network of seen or recent, which are those networks.
+std::vector<Carrier> pilots_of(const std::vector<Carrier> &carriers, const std::vector<Wifi> &seen,
+                               const std::vector<Wifi> &recent) {
+  std::vector<Carrier> out;
+  for (const auto &c : carriers) {
+    bool on = false;
+    for (const auto *list : {&seen, &recent})
+      for (const auto &w : *list) on = on || std::fabs(c.mhz - w.mhz) <= kOccupiedHz / 2e6;
+    if (!on) out.push_back(c);
+  }
+  return out;
+}
+
+// Of the channels a step has seen lit, the networks: not a pilot's sidebands, nor the shoulder of another network or
+// the product of one and a pilot (another of seen, or one of recent: the networks seen in the last few seconds; bins:
+// the burst picture).
+std::vector<Wifi> networks_of(const std::vector<Wifi> &seen, const std::vector<Wifi> &recent,
+                              const std::vector<Carrier> &pilots, const std::vector<BurstBin> &bins) {
   std::vector<Wifi> out;
   for (const auto &w : seen) {
-    bool sideband = false;
-    for (const auto &p : carriers) {
-      if (on_network(p.mhz)) continue;
-      const double d = std::fabs(w.mhz - p.mhz);
-      sideband = sideband || (d < p.width_mhz / 2 + sideband_reach(p) && w.peak_db + kSidebandBelowDb <= p.snr_db);
-    }
-    bool shoulder = false;
-    for (const auto *list : lists)
-      for (const auto &o : *list) shoulder = shoulder || shoulder_of(w, o);
-    if (!sideband && !shoulder) out.push_back(w);
+    bool not_one = false;
+    for (const auto &p : pilots) not_one = not_one || sideband_of(w, p);
+    for (const auto *list : {&seen, &recent})
+      for (const auto &o : *list) not_one = not_one || shoulder_of(w, o) || intermod_of(w, o, bins);
+    if (!not_one) out.push_back(w);
   }
   return out;
 }
@@ -280,9 +318,10 @@ std::vector<Wifi> find_wifi(const BurstStep &step, const std::vector<BurstBin> &
 // The networks seen, each kept kWifiHoldMs from the last time. A network once seen in use stays so while it is kept.
 class WifiMemory {
 public:
-  // What a step showed at t_ms. A network kept that is now the shoulder of one of these is forgotten: a step lower in
-  // the band may have seen the shoulder before the step of the network itself.
-  void update(const std::vector<Wifi> &now, int64_t t_ms);
+  // What a step showed at t_ms, with the burst picture it was weighed against. A network kept that is now the shoulder
+  // of one of these, or its product with a pilot, is forgotten: a step lower in the band may have seen the shoulder or
+  // the product before the step of the network itself.
+  void update(const std::vector<Wifi> &now, const std::vector<BurstBin> &bins, int64_t t_ms);
   std::vector<Wifi> known(int64_t t_ms, int64_t within_ms = kWifiHoldMs) const;  // by channel
 
 private:
@@ -293,12 +332,12 @@ private:
   std::vector<Entry> _nets;
 };
 
-void WifiMemory::update(const std::vector<Wifi> &now, int64_t t_ms) {
+void WifiMemory::update(const std::vector<Wifi> &now, const std::vector<BurstBin> &bins, int64_t t_ms) {
   _nets.erase(std::remove_if(_nets.begin(), _nets.end(),
                              [&](const Entry &e) {
                                if (t_ms - e.last_ms > kWifiHoldMs) return true;
                                for (const auto &w : now)
-                                 if (shoulder_of(e.w, w)) return true;
+                                 if (shoulder_of(e.w, w) || intermod_of(e.w, w, bins)) return true;
                                return false;
                              }),
               _nets.end());
@@ -403,8 +442,10 @@ void WifiWatch::add(const BurstStep &s, double lo_hz, double hi_hz, const std::v
                     int64_t now_ms) {
   _s->last_ms = now_ms;
   _s->map.add(s, now_ms);
-  const auto seen = find_wifi(s, _s->map.get(lo_hz, hi_hz), _s->memory.known(now_ms, kWifiRecentMs), carriers);
-  _s->memory.update(seen, now_ms);
+  const std::vector<BurstBin> bins = _s->map.get(lo_hz, hi_hz);
+  const std::vector<Wifi> seen = candidates(s, bins);
+  const std::vector<Wifi> recent = _s->memory.known(now_ms, kWifiRecentMs);
+  _s->memory.update(networks_of(seen, recent, pilots_of(carriers, seen, recent), bins), bins, now_ms);
 }
 
 std::vector<WifiNet> WifiWatch::networks(double lo_hz, double hi_hz) const {

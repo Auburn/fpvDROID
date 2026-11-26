@@ -83,9 +83,20 @@ struct Fm {
   double grey = 50;
 };
 
+// The receiver's front end, third-order (y = x + a3 |x|^2 x), on a pilot p and a network w: its product p^2 w* at
+// 2 fp - fw, which bursts when the network does and is as flat as its OFDM (the other one away from them, w^2 p* at
+// 2 fw - fp, is the network's spectrum doubled in width: no flat block). a3 is given by the product's level: db over
+// (or, negative, under) the network's.
+struct Intermod {
+  Fm p;
+  Ofdm w;
+  double db;
+};
+
 struct Air {
   std::vector<Ofdm> ofdm;
   std::vector<Fm> fm;
+  std::vector<Intermod> intermod;
 };
 
 // The level of an NTSC picture at t (s on the transmitter's clock).
@@ -102,6 +113,44 @@ static double ire_at(const Fm &f, double t) {
   return 15;
 }
 
+// f's amplitude, as its db says against the noise.
+static float fm_amplitude(const Fm &f) {
+  const double noise_density = 2 * kNoiseSigma * kNoiseSigma / kFs;
+  return static_cast<float>(std::sqrt(noise_density * 9e6 * std::pow(10.0, f.db / 10)));
+}
+
+// f, offset_hz from the samples' centre, from t0_s on: x.size() samples, added to x. What would go past the chip's
+// filter (19.5 MHz) is left out.
+static void add_fm(std::vector<cf> &x, const Fm &f, double offset_hz, double t0_s) {
+  const float a = fm_amplitude(f);
+  double ph = 0;
+  for (size_t i = 0; i < x.size(); i++) {
+    const double fi = offset_hz + f.dev_mhz * 1e6 * ((ire_at(f, t0_s + i / kFs) + 40) / 140.0 - 0.5);
+    ph += 2 * M_PI * fi / kFs;
+    if (ph > M_PI) ph -= 2 * M_PI;
+    if (ph < -M_PI) ph += 2 * M_PI;
+    if (std::fabs(fi) > 19.5e6) continue;
+    x[i] += a * cf(static_cast<float>(std::cos(ph)), static_cast<float>(std::sin(ph)));
+  }
+}
+
+// im's product in a capture centred on centre_hz, made from the pilot and the network each centred on its own (so that
+// both are whole) and moved to where it lands. Left out where its bulk (the network's width, and the pilot's levels
+// doubled in frequency about the middle of the picture: the sync tip's rare excursions past that are the chip's
+// filter's) would reach past the edge of the samples, rather than folded over.
+static void add_intermod(std::vector<cf> &x, const Intermod &im, double centre_hz, double t0_s, std::mt19937 &rng) {
+  const double at = (2 * im.p.mhz - im.w.mhz) * 1e6 - centre_hz;
+  if (std::fabs(at) + im.w.tx.width_hz / 2 + im.p.dev_mhz * 0.5e6 > 20e6) return;
+  std::vector<cf> p(x.size()), w(x.size());
+  add_fm(p, im.p, 0, t0_s);
+  tx::Ofdm o = im.w.tx;
+  o.t0_s = t0_s;
+  tx::add_ofdm(w, o, kNoiseSigma, rng);
+  const float ap = fm_amplitude(im.p), a3 = static_cast<float>(std::pow(10.0, im.db / 20)) / (ap * ap);
+  for (size_t i = 0; i < x.size(); i++)
+    x[i] += a3 * p[i] * p[i] * std::conj(w[i]) * std::polar(1.f, static_cast<float>(2 * M_PI * std::fmod(at * i / kFs, 1.0)));
+}
+
 // What a sweep step hears: kStepSamples at 40 MS/s centred on centre_hz from t0_s on, noise of kNoiseSigma.
 static std::vector<cf> capture(const Air &air, double centre_hz, double t0_s, uint64_t seed) {
   std::mt19937 rng(static_cast<unsigned>(seed));
@@ -116,19 +165,9 @@ static std::vector<cf> capture(const Air &air, double centre_hz, double t0_s, ui
   }
   for (const auto &f : air.fm) {
     const double off = f.mhz * 1e6 - centre_hz;
-    if (std::fabs(off) > 20e6 + f.dev_mhz * 0.5e6) continue;
-    const double noise_density = 2 * kNoiseSigma * kNoiseSigma / kFs;
-    const float a = static_cast<float>(std::sqrt(noise_density * 9e6 * std::pow(10.0, f.db / 10)));
-    double ph = 0;
-    for (size_t i = 0; i < x.size(); i++) {
-      const double fi = off + f.dev_mhz * 1e6 * ((ire_at(f, t0_s + i / kFs) + 40) / 140.0 - 0.5);
-      ph += 2 * M_PI * fi / kFs;
-      if (ph > M_PI) ph -= 2 * M_PI;
-      if (ph < -M_PI) ph += 2 * M_PI;
-      if (std::fabs(fi) > 19.5e6) continue;  // outside what the chip's filter passes
-      x[i] += a * cf(static_cast<float>(std::cos(ph)), static_cast<float>(std::sin(ph)));
-    }
+    if (std::fabs(off) <= 20e6 + f.dev_mhz * 0.5e6) add_fm(x, f, off, t0_s);
   }
+  for (const auto &im : air.intermod) add_intermod(x, im, centre_hz, t0_s, rng);
   return x;
 }
 
@@ -217,12 +256,12 @@ static void a_step_tells_bursts_from_steady_signals() {
   for (const auto &c : s.channels) none = none && c.full == 0;
   CHECK(none && !s.channels.empty());
 
-  Air beacon{{wifi(5765, 20, 18, tx::beacons(4e-3))}, {}};  // channel 153, a beacon 4 ms into the capture
+  Air beacon{{wifi(5765, 20, 18, tx::beacons(4e-3))}, {}, {}};  // channel 153, a beacon 4 ms into the capture
   s = measure_bursts(grid_of(capture(beacon, 5770e6, 0, 7)), 5770e6, 15e6);
   const BurstStep::Channel *c153 = channel(s, 153);
   CHECK(c153 && c153->full == kMinSlices && c153->empty > 100 && std::fabs(c153->level_db - 18) < 3);
 
-  Air steady{{link(5765, 20, 18)}, {}};  // a 20 MHz link on channel 153, never off
+  Air steady{{link(5765, 20, 18)}, {}, {}};  // a 20 MHz link on channel 153, never off
   s = measure_bursts(grid_of(capture(steady, 5770e6, 0, 7)), 5770e6, 15e6);
   bool burst = false;
   for (const auto &c : s.channels) burst = burst || (c.full >= kMinSlices && c.empty >= kMinSlices);
@@ -346,6 +385,39 @@ static void a_strong_networks_shoulders_are_not_wifi() {
   CHECK(is(nets, {{149, 161}}));
 }
 
+// What the phone showed beside a weak VTX on R3 (5732.7 MHz, 23 dB, a still picture) with a busy network on 149: a
+// network on 144, idle, at 17 dB: 6 dB under the VTX, so not its sidebands, and under the 10 dB that makes it 149's
+// shoulder. The VTX alone does not light 144: its skirts reach only the top 1.3 MHz of the channel, at most a tenth of
+// its bins at once. What lights all of it at once, flat and in bursts, is the front end's third-order product of the
+// two, 2 x 5732.7 - 5745 = 5720.4 MHz: the network on 149 alone. A real network on 144, as strong as the VTX, is still
+// seen beside them.
+static void a_front_end_product_is_not_a_network() {
+  const Fm r3{5732.7, 34, 8, Fm::kStill, 50};
+  const Ofdm w149 = wifi(5745, 20, 25, tx::traffic(0.04, 51));
+  Sim alone(5635, 5955);
+  alone.air.fm = {r3};
+  alone.passes(4);
+  std::fprintf(stderr, "  a VTX on R3: %s\n", labels(alone.nets()).c_str());
+  CHECK(alone.nets().empty());
+
+  Sim sim(5635, 5955);
+  sim.air.fm = {r3};
+  sim.air.ofdm = {w149};
+  sim.air.intermod = {{r3, w149, -8}};
+  sim.passes(8);
+  auto nets = sim.nets();
+  std::fprintf(stderr, "  ... a network on 149, and their product on 144: %s\n", labels(nets).c_str());
+  CHECK(is(nets, {{149, 149}}));
+
+  Sim real(5635, 5955);
+  real.air = sim.air;
+  real.air.ofdm.push_back(wifi(5720, 20, 26, tx::traffic(0.1, 52)));
+  real.passes(8);
+  nets = real.nets();
+  std::fprintf(stderr, "  ... and a network on 144 at 26 dB: %s\n", labels(nets).c_str());
+  CHECK(is(nets, {{144, 144}, {149, 149}}));
+}
+
 // The networks as the tab names them: channels side by side within an 80 MHz block are one network, two whole 80 MHz
 // blocks within a 160 MHz one too, but nothing across the grid's gaps.
 static void networks_are_grouped_by_the_wifi_grid() {
@@ -389,9 +461,9 @@ static void time_it() {
   };
   const Case cases[] = {
       {"noise only", {}},
-      {"analog FM (R4)", {{}, {{5769, 30}}}},
-      {"Wi-Fi in use (153)", {{wifi(5765, 20, 25, tx::traffic(0.3, 11))}, {}}},
-      {"Wi-Fi 80 MHz in use", {{wifi(5775, 80, 22, tx::traffic(0.5, 22))}, {}}},
+      {"analog FM (R4)", {{}, {{5769, 30}}, {}}},
+      {"Wi-Fi in use (153)", {{wifi(5765, 20, 25, tx::traffic(0.3, 11))}, {}, {}}},
+      {"Wi-Fi 80 MHz in use", {{wifi(5775, 80, 22, tx::traffic(0.5, 22))}, {}, {}}},
   };
   std::printf("a sweep step: %zu samples (12 ms at 40 MS/s), ms\n", kStepSamples);
   std::printf("%-24s %8s %8s | %8s\n", "", "grid", "bursts", "step");
@@ -421,6 +493,7 @@ int main(int argc, char **argv) {
   analog_video_and_steady_digital_links_are_not_wifi();
   a_strong_vtxs_sidebands_are_not_wifi();
   a_strong_networks_shoulders_are_not_wifi();
+  a_front_end_product_is_not_a_network();
   std::fprintf(stderr, "kp_wifi_tests: %d checks, %d failed\n", g_checks, g_failed);
   return g_failed ? 1 : 0;
 }
