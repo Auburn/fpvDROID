@@ -61,7 +61,7 @@ class SpectrumView(ctx: Context) : View(ctx) {
         typeface = Skin.REGULAR; textSize = sp(13f); color = Skin.TEXT_2; textAlign = Paint.Align.CENTER
     }
     private val wifiText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        typeface = Skin.MEDIUM; textSize = sp(11f); color = Skin.WARN; textAlign = Paint.Align.CENTER
+        typeface = Skin.MEDIUM; textSize = sp(11f); color = Skin.WIFI; textAlign = Paint.Align.CENTER
     }
     private val wifiEdge = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = dp(1f) }
     private val dashes = DashPathEffect(floatArrayOf(dp(4f), dp(4f)), 0f)
@@ -125,24 +125,13 @@ class SpectrumView(ctx: Context) : View(ctx) {
     internal fun shownNames(): List<String> = names().map { it.first.name }
 
     /**
-     * Where each channel's name goes under the plot: the first row, unless it would run into a name already there
-     * (channels 5 to 10 MHz apart: HDZero's, DJI O4's), then the second.
+     * Where each channel's name goes under the plot (channels 5 to 10 MHz apart, HDZero's and DJI O4's, take two rows:
+     * [twoRows]).
      */
     private fun names(): List<Pair<Marker, Int>> = names ?: run {
-        val gap = dp(6f)
-        val ends = floatArrayOf(-1e9f, -1e9f)   // where the last name in each row ends
-        shown().sortedBy { it.mhz }.map { m ->
-            val half = name.measureText(m.name) / 2 + if (m.mhz == chosenMhz) dp(7f) else 0f
-            val x = xOf(m.mhz)
-            val row = when {
-                x - half >= ends[0] + gap -> 0
-                x - half >= ends[1] + gap -> 1
-                ends[0] <= ends[1] -> 0
-                else -> 1
-            }
-            ends[row] = x + half
-            m to row
-        }.also { names = it }
+        val ms = shown().sortedBy { it.mhz }
+        val rows = twoRows(ms.map { m -> xOf(m.mhz) to name.measureText(m.name) / 2 + if (m.mhz == chosenMhz) dp(7f) else 0f }, dp(6f))
+        ms.zip(rows).also { names = it }
     }
 
     /** Room under the plot for the channel names (one or two rows) and the frequencies. */
@@ -284,33 +273,31 @@ class SpectrumView(ctx: Context) : View(ctx) {
      * used is not known yet).
      */
     private fun drawWifiSpans(c: Canvas, bottom: Float) {
-        val r = Color.red(Skin.WARN)
-        val g = Color.green(Skin.WARN)
-        val b = Color.blue(Skin.WARN)
         for (n in wifi) {
             val x0 = max(0f, xOf(n.loMhz))
             val x1 = min(width.toFloat(), xOf(n.hiMhz))
-            paint.color = Color.argb(if (n.active) 30 else 14, r, g, b)
+            paint.color = Skin.alpha(Skin.WIFI, if (n.active) 30 else 14)
             c.drawRect(x0, plotTop, x1, bottom, paint)
-            wifiEdge.color = Color.argb(if (n.active) 130 else 90, r, g, b)
+            wifiEdge.color = Skin.alpha(Skin.WIFI, if (n.active) 130 else 90)
             wifiEdge.pathEffect = if (n.active) null else dashes
             for (x in floatArrayOf(x0, x1)) c.drawLine(x, plotTop, x, bottom, wifiEdge)
         }
     }
 
-    /** Each network's name in a tag at the top of its span, over the spectrum: a second row for one that would run into the first. */
+    /** Each network's name in a tag at the top of its span, over the spectrum, in two rows as the channels' names are. */
     private fun drawWifiNames(c: Canvas) {
-        val gap = dp(6f)
-        var end = -1e9f   // where the last tag in the first row ends
-        for (n in wifi) {
+        val tags = wifi.map { n ->
             val half = wifiText.measureText(n.label) / 2 + dp(7f)
             val x = ((xOf(max(n.loMhz, span.first.toDouble())) + xOf(min(n.hiMhz, span.second.toDouble()))) / 2)
                 .coerceIn(half + dp(3f), max(half + dp(3f), width - half - dp(3f)))
-            val row = if (x - half >= end + gap) 0 else 1
-            if (row == 0) end = x + half
-            val top = plotTop + dp(6f) + row * dp(20f)
+            x to half
+        }
+        val rows = twoRows(tags, dp(6f))
+        for ((i, n) in wifi.withIndex()) {
+            val (x, half) = tags[i]
+            val top = plotTop + dp(6f) + rows[i] * dp(20f)
             box.set(x - half, top, x + half, top + dp(17f))
-            paint.color = Color.argb(215, Color.red(Skin.PANEL), Color.green(Skin.PANEL), Color.blue(Skin.PANEL))
+            paint.color = Skin.alpha(Skin.PANEL, 215)
             c.drawRoundRect(box, box.height() / 2, box.height() / 2, paint)
             c.drawText(n.label, x, box.centerY() - (wifiText.descent() + wifiText.ascent()) / 2, wifiText)
         }
@@ -363,16 +350,38 @@ class SpectrumView(ctx: Context) : View(ctx) {
         onPick?.invoke(to)
     }
 
-    /** The graph in words, for a screen reader: the span, whose channels, what is in use, and the Wi-Fi seen. */
+    /**
+     * The graph in words, for a screen reader: the span, whose channels, what is in use, and the Wi-Fi seen (a busy
+     * network's own carrier is said with it, not apart).
+     */
     private fun describe() {
         val sp = spectrum
-        val used = onAir.map { it.spot.name }
+        val used = onAir.filter { it.carrier.kind != SignalKind.WIFI }.map { it.spot.name }
         contentDescription = "Spectrum, ${span.first} to ${span.second} megahertz, ${plan.title} channels. " +
             (if (sp == null || sp.empty) "Nothing measured yet" else if (used.isEmpty()) "No signals" else "In use: ${used.joinToString()}") +
             if (wifi.isEmpty()) "" else ". Wi-Fi: ${wifi.joinToString { it.label + if (it.active) ", in use" else ", idle" }}"
     }
 
     companion object {
+        /**
+         * Rows for labels laid left to right, each centred on its x and half wide as given: the first row, unless the
+         * label would come within [gap] of one already there, then the second; with room in neither, the row that
+         * ends sooner.
+         */
+        internal fun twoRows(labels: List<Pair<Float, Float>>, gap: Float): List<Int> {
+            val ends = floatArrayOf(-1e9f, -1e9f)   // where the last label in each row ends
+            return labels.map { (x, half) ->
+                val row = when {
+                    x - half >= ends[0] + gap -> 0
+                    x - half >= ends[1] + gap -> 1
+                    ends[0] <= ends[1] -> 0
+                    else -> 1
+                }
+                ends[row] = x + half
+                row
+            }
+        }
+
         const val BOTTOM_DB = -5f
         /** A tap this close to a carrier picks it. */
         const val PICK_CARRIER_MHZ = 10.0

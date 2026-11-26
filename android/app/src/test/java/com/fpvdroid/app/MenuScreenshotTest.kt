@@ -285,17 +285,20 @@ class MenuScreenshotTest {
 
     private fun wifi(lo: Double, hi: Double, label: String, active: Boolean) = Signal(lo, hi, SignalKind.WIFI, label, active)
 
-    /** Wi-Fi seen beside analog on R1 and R4: a network in use on 149 (on the air on A7 too), an idle one on 173+177. */
+    /**
+     * Wi-Fi seen beside analog on R1 and R4: a network in use on 149 (on the air on A7 too, a carrier the radio tags as
+     * the network's: no chip of its own), an idle one on 173+177.
+     */
     @Test @Config(qualifiers = PHONE)
     fun spectrumWifi() = shoot("spectrum_wifi", Tab.SPECTRUM, sweeping.copy(spectrum = spectrumOf(
-        Carrier(5658.4, 11.0, 18f), Carrier(5745.2, 17.5, 21f), Carrier(5769.2, 13.0, 31f), at = 5805.0,
+        Carrier(5658.4, 11.0, 18f), Carrier(5745.2, 17.5, 21f, SignalKind.WIFI), Carrier(5769.2, 13.0, 31f), at = 5805.0,
         signals = listOf(wifi(5735.0, 5755.0, "Wi-Fi 149", true), wifi(5855.0, 5895.0, "Wi-Fi 173\u2013177", false)))),
         2400, 1080, tuned)
 
     /** Two networks side by side on a small phone (80 MHz on 132-144, 20 on 149): the second name drops a row. */
     @Test @Config(qualifiers = SMALL)
     fun smallSpectrumWifi() = shoot("small_spectrum_wifi", Tab.SPECTRUM, sweeping.copy(spectrum = spectrumOf(
-        Carrier(5690.1, 72.0, 24f), Carrier(5769.2, 13.0, 31f),
+        Carrier(5690.1, 72.0, 24f, SignalKind.WIFI), Carrier(5769.2, 13.0, 31f),
         signals = listOf(wifi(5650.0, 5730.0, "Wi-Fi 132\u2013144", true), wifi(5735.0, 5755.0, "Wi-Fi 149", false)))),
         1600, 720, tuned)
 

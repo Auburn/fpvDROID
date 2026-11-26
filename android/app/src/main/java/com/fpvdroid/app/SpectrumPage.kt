@@ -1,23 +1,17 @@
 package com.fpvdroid.app
 
-import android.content.Context
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.Paint
-import android.graphics.RectF
 import android.os.SystemClock
 import android.view.Gravity
 import android.view.View
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
-import kotlin.math.roundToInt
 
 /**
  * The menu's Spectrum tab, in [page]: whose channels are marked along the top (an analog band, a DJI model or
  * HDZero), the graph ([SpectrumView]) under it, and at the foot Sweep and a chip for each thing on the air and each
- * Wi-Fi network. Like the
- * rest of the menu it changes [Settings] itself and tells the [MenuView.Listener] what it did; it knows nothing of
- * the radio. [syncChannel]: the menu's own, for a change the Channel tab shows too (the band, the channel).
+ * Wi-Fi network. Like the rest of the menu it changes [Settings] itself and tells the [MenuView.Listener] what it did;
+ * it knows nothing of the radio. [syncChannel]: the menu's own, for a change the Channel tab shows too (the band, the
+ * channel).
  */
 internal class SpectrumPage(
     private val page: LinearLayout,
@@ -109,10 +103,13 @@ internal class SpectrumPage(
 
     /**
      * The chips under the graph: what is on the air, left to right as in the graph, each named where it puts it (after
-     * the digital system the radio judged it to be, if any: [Spot.name]); then the Wi-Fi networks.
+     * the digital system the radio judged it to be, if any: [Spot.name]); then the Wi-Fi networks, each saying whether
+     * it is in use. A busy network is on the air too, as a carrier the radio tags as the network's: it has no chip of
+     * its own beside the network's, which already says that it is in use.
      */
     private fun showChips() {
-        val chips = graph.onAir.map { it.spot.name to barsFor(it.carrier.snrDb).coerceAtLeast(1) }
+        val chips = graph.onAir.filter { it.carrier.kind != SignalKind.WIFI }
+            .map { it.spot.name to barsFor(it.carrier.snrDb).coerceAtLeast(1) }
         val wifi = graph.wifi
         if (chips == chipsShown && wifi == wifiShown) return
         chipsShown = chips
@@ -125,7 +122,8 @@ internal class SpectrumPage(
             chipRow.addView(chip, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dpi(8f) })
         }
         for (n in wifi) {
-            val chip = WifiChip(ctx, n.label, n.active)
+            val chip = FoundChip(ctx, n.label, note = if (n.active) "in use" else "idle",
+                edge = Skin.alpha(Skin.WIFI, if (n.active) 150 else 80))
             // there is no picture to be had from a network either
             chip.setOnClickListener {
                 analogOnlyAt = SystemClock.uptimeMillis()
@@ -150,7 +148,8 @@ internal class SpectrumPage(
         val words = when {
             SystemClock.uptimeMillis() - analogOnlyAt < ANALOG_ONLY_MS -> "Only analog video can be shown"
             !st.radioReady -> ""
-            !sp?.carriers.isNullOrEmpty() || graph.wifi.isNotEmpty() -> "In use"
+            !sp?.carriers.isNullOrEmpty() || graph.wifi.any { it.active } -> "In use"
+            graph.wifi.isNotEmpty() -> "Only idle Wi-Fi"
             st.scanning -> "Waiting for the scan"
             st.sweeping && (sp == null || sp.sweeps == 0) -> "$lo–$hi MHz"
             sp != null && !sp.empty -> "No signals"
@@ -164,45 +163,5 @@ internal class SpectrumPage(
     companion object {
         /** How long the tab says that a digital channel cannot be watched. */
         const val ANALOG_ONLY_MS = 3000L
-    }
-}
-
-/**
- * A Wi-Fi network under the Spectrum tab's graph: its name, and in plain words whether it has been seen in use or only
- * heard sending its beacons ("idle"). A chip like [FoundChip], edged in the graph's Wi-Fi colour, with no bars: how
- * strong a network is says less than whether it is in use.
- */
-internal class WifiChip(ctx: Context, private val title: String, busy: Boolean) : View(ctx) {
-    private val words = if (busy) "in use" else "idle"
-    private val edge = Color.argb(if (busy) 150 else 80, Color.red(Skin.WARN), Color.green(Skin.WARN), Color.blue(Skin.WARN))
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = Skin.MEDIUM; textSize = sp(13.5f); color = Skin.TEXT }
-    private val small = Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = Skin.REGULAR; textSize = sp(12.5f); color = Skin.TEXT_3 }
-    private val box = RectF()
-
-    init { isClickable = true; contentDescription = "$title, $words" }
-
-    override fun onMeasure(w: Int, h: Int) =
-        setMeasuredDimension((text.measureText(title) + small.measureText(words) + dp(36f)).roundToInt(), dpi(36f))
-
-    override fun onDraw(c: Canvas) {
-        val h = height.toFloat()
-        box.set(dp(0.75f), dp(0.75f), width - dp(0.75f), h - dp(0.75f))
-        paint.style = Paint.Style.FILL
-        paint.color = if (isPressed) Skin.FILL_STRONG else Skin.FILL
-        c.drawRoundRect(box, h / 2, h / 2, paint)
-        paint.style = Paint.Style.STROKE
-        paint.strokeWidth = dp(1f)
-        paint.color = edge
-        c.drawRoundRect(box, h / 2, h / 2, paint)
-        paint.style = Paint.Style.FILL
-        val base = h / 2 - (text.descent() + text.ascent()) / 2
-        c.drawText(title, dp(14f), base, text)
-        c.drawText(words, dp(14f) + text.measureText(title) + dp(8f), base, small)
-    }
-
-    override fun drawableStateChanged() {
-        super.drawableStateChanged()
-        invalidate()
     }
 }
