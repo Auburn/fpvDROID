@@ -29,6 +29,11 @@ public:
   bool done() const { return _at >= _plan.size(); }
   size_t at() const { return _at; }
   double hz() const { return _plan[_at]; }  // the step to retune to (not done())
+  // Steps to take right after the one under way (not done()), before the rest of the plan, in this order: a scan's
+  // extra steps (cut_steps.h). size() counts them from here on.
+  void insert(const std::vector<double> &hz);
+  bool inserted() const { return _at < _inserted.size() && _inserted[_at]; }  // the step under way is one of those
+  size_t size() const { return _plan.size(); }
 
   // One bank of the step's retune (path A; the hardware centre on centre_hz): true once need() samples are in.
   bool take(const std::vector<cf> &bank, uint64_t seq, uint32_t gen, double centre_hz);
@@ -40,6 +45,7 @@ public:
 
 private:
   std::vector<double> _plan;
+  std::vector<bool> _inserted;  // per step of _plan: insert() put it there
   size_t _at = 0;
   size_t _first_need = 0, _need = 0;
   int _settle = -1;  // banks still to let go by; < 0: the step's first bank is still to come

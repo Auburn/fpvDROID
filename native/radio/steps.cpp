@@ -1,14 +1,23 @@
 #include "steps.h"
 
+#include <algorithm>
+#include <cstddef>
 #include <utility>
 
 namespace kp {
 
 void Steps::start(std::vector<double> plan, size_t need) {
   _plan = std::move(plan);
+  _inserted.assign(_plan.size(), false);
   _at = 0;
   _first_need = need;
   _settle = -1;
+}
+
+void Steps::insert(const std::vector<double> &hz) {
+  const size_t at = std::min(_at + 1, _plan.size());
+  _plan.insert(_plan.begin() + static_cast<std::ptrdiff_t>(at), hz.begin(), hz.end());
+  _inserted.insert(_inserted.begin() + static_cast<std::ptrdiff_t>(at), hz.size(), true);
 }
 
 bool Steps::next() {

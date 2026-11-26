@@ -1,13 +1,16 @@
 // kp_radio_tests: the radio's rules that need no adapter (ctest: "radio"). Plain checks, no framework: each
 // failed CHECK prints its line, and the program's exit status says whether any did.
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <random>
+#include <string>
 #include <vector>
 
 #include "combine.h"
+#include "cut_steps.h"
 #include "decode_queue.h"
 #include "fallback_policy.h"
 #include "frame_gate.h"
@@ -498,6 +501,222 @@ static void steps_start_over_after_a_gap_but_not_for_ever() {
   CHECK(!t.take(bank_of(0), 0, 2, 5650e6) && t.iq().size() == 100 && t.iq().front().real() == 0);
 }
 
+// Steps inserted come right after the one under way, in their order, before the rest of the plan, and say so; size()
+// counts them. At the plan's last step they go on its end. A new plan has none.
+static void steps_take_inserted_steps_next() {
+  Steps s;
+  s.start({5650e6, 5670e6}, 100);
+  CHECK(s.size() == 2 && !s.inserted());
+  s.insert({5660e6, 5661e6});
+  CHECK(s.size() == 4 && s.at() == 0 && s.hz() == 5650e6 && !s.inserted());
+  CHECK(s.next() && s.hz() == 5660e6 && s.inserted());
+  uint64_t seq = 0;  // captured like any other step
+  bool whole = false;
+  for (; seq <= Steps::kSettleBanks; seq++) whole = s.take(bank_of(seq), seq, 1, 5660e6);
+  CHECK(whole && s.iq().size() == 100 && s.centre_hz() == 5660e6);
+  CHECK(s.next() && s.hz() == 5661e6 && s.inserted());
+  CHECK(s.next() && s.hz() == 5670e6 && !s.inserted() && s.at() == 3);
+  s.insert({5680e6});
+  CHECK(s.size() == 5);
+  CHECK(s.next() && s.hz() == 5680e6 && s.inserted());
+  CHECK(!s.next() && s.done());
+  s.start({5700e6}, 100);
+  CHECK(s.size() == 1 && !s.inserted());
+}
+
+// --------------------------------------------------------------------------------------------- CutSteps
+static constexpr double kEdge = 16.5e6;  // radio.cpp's: what a scan step sees either side of its hardware centre
+
+// A signal on the air from lo to hi MHz, snr_db over the floor.
+struct Air {
+  double lo, hi;
+  float snr_db = 30;
+};
+
+// What a step with the hardware centre c (Hz) makes of the air: the humps find_humps takes (whole inside +-kEdge,
+// 3.5 to 24 MHz wide) and the signals find_cut_signals lists (cut by one edge, at least 3.5 MHz of them inside). One
+// past both edges leaves nothing over the floor.
+static void look(double c, const std::vector<Air> &air, std::vector<Hump> &whole, std::vector<CutSignal> &cut) {
+  whole.clear();
+  cut.clear();
+  for (const auto &a : air) {
+    const double f0 = a.lo * 1e6 - c, f1 = a.hi * 1e6 - c;
+    const bool lo = f0 <= -kEdge, hi = f1 >= kEdge;
+    if (!lo && !hi) {
+      if (f1 - f0 >= 3.5e6 && f1 - f0 <= 24e6) whole.push_back(Hump{(f0 + f1) / 2, f1 - f0, a.snr_db, a.snr_db});
+    } else if (lo != hi) {
+      CutSignal s;
+      s.f0_hz = std::max(f0, -kEdge);
+      s.f1_hz = std::min(f1, kEdge);
+      s.cut_hi = hi;
+      s.snr_db = a.snr_db;
+      if (s.f1_hz - s.f0_hz >= 3.5e6) cut.push_back(s);
+    }
+  }
+}
+
+// A scan as handle_scan runs one: the steps of the plan, each on the chip's 5 MHz grid, and after each the steps
+// CutSteps asks for. What it did: the hardware centres in order (MHz), the middles of the signals seen whole (MHz),
+// the extra steps.
+struct Scan {
+  std::vector<double> steps, whole;
+  std::vector<CutSteps::Extra> extra;
+};
+static Scan scan_over(const std::vector<double> &plan, const std::vector<Air> &air) {
+  Steps s;
+  s.start(plan, 1);
+  CutSteps cut;
+  cut.start();
+  Scan out;
+  std::vector<Hump> whole;
+  std::vector<CutSignal> cuts;
+  do {
+    const double c = std::round(s.hz() / 5e6) * 5e6;
+    out.steps.push_back(c / 1e6);
+    look(c, air, whole, cuts);
+    for (const auto &h : whole) out.whole.push_back((c + h.offset_hz) / 1e6);
+    std::vector<double> hz;
+    for (const auto &e : cut.step(c, kEdge, whole, cuts, s.inserted(), s.at() + 1 >= s.size())) {
+      hz.push_back(e.hz);
+      out.extra.push_back(e);
+    }
+    s.insert(hz);
+  } while (s.next());
+  CHECK(out.extra.size() == cut.given());
+  return out;
+}
+
+static bool seen_whole(const Scan &sc, double mhz) {
+  for (double w : sc.whole)
+    if (std::fabs(w - mhz) < 0.5) return true;
+  return false;
+}
+
+static CutSignal cut_part(double f0_mhz, double f1_mhz, bool cut_hi, float snr_db = 30) {
+  CutSignal c;
+  c.f0_hz = f0_mhz * 1e6;
+  c.f1_hz = f1_mhz * 1e6;
+  c.cut_hi = cut_hi;
+  c.snr_db = snr_db;
+  return c;
+}
+
+// F2 (5751-5769 MHz) halfway between two steps: the 5750 one sees its bottom end, the 5770 one its top end, neither
+// sees it whole. One step centred on it, right after the 5770 one, sees it whole.
+static void cut_steps_centre_one_step_on_a_signal_cut_by_two() {
+  const Scan sc = scan_over({5730e6, 5750e6, 5770e6, 5790e6}, {{5751, 5769}});
+  CHECK((sc.steps == std::vector<double>{5730, 5750, 5770, 5760, 5790}));
+  CHECK(sc.extra.size() == 1);
+  if (sc.extra.size() == 1)
+    CHECK(sc.extra[0].hz == 5760e6 && sc.extra[0].lo_hz == 5751e6 && sc.extra[0].hi_hz == 5769e6);
+  CHECK(seen_whole(sc, 5760));
+  // as wide as find_humps takes one, 24 MHz, still fits (F2 and A7, 5 MHz off a step)
+  CHECK(seen_whole(scan_over({5730e6, 5750e6, 5770e6, 5790e6}, {{5748, 5772}}), 5760));
+  CHECK(seen_whole(scan_over({5710e6, 5730e6, 5750e6, 5770e6}, {{5733, 5757}}), 5745));
+}
+
+// A signal cut by one step that the next sees whole (R4 at 5760-5778, cut by the 5750 step's top edge, whole in the
+// 5770 one) gets no step, nor does one seen whole before a step cuts it (R3 at 5723-5741: whole in the 5730 step,
+// its top cut by the 5750 one's bottom edge).
+static void cut_steps_none_for_a_signal_seen_whole() {
+  Scan sc = scan_over({5750e6, 5770e6, 5790e6}, {{5760, 5778}});
+  CHECK(sc.extra.empty() && seen_whole(sc, 5769));
+  sc = scan_over({5710e6, 5730e6, 5750e6}, {{5723, 5741}});
+  CHECK(sc.extra.empty() && seen_whole(sc, 5732));
+}
+
+// Cut by the plan's last step, or by a step after which the plan jumps to another band, a signal gets its step at
+// once, kReach inside the end seen: E8 (5936-5954), cut by the top edge of the highest step (5930). So does one cut
+// by the first step of a band, which the next does not reach: L1 at 19 MHz wide (5352.5-5371.5).
+static void cut_steps_from_the_one_end_seen() {
+  Scan sc = scan_over({5910e6, 5930e6}, {{5936, 5954}});
+  CHECK((sc.steps == std::vector<double>{5910, 5930, 5950}));
+  CHECK(sc.extra.size() == 1);
+  if (sc.extra.size() == 1) CHECK(sc.extra[0].hz == 5948e6 && sc.extra[0].lo_hz == 5936e6 && sc.extra[0].hi_hz == 0);
+  CHECK(seen_whole(sc, 5945));
+  sc = scan_over({5910e6, 5930e6, 5370e6, 5390e6}, {{5936, 5954}});
+  CHECK((sc.steps == std::vector<double>{5910, 5930, 5370, 5950, 5390}));
+  CHECK(seen_whole(sc, 5945));
+  sc = scan_over({5370e6, 5390e6, 5410e6}, {{5352.5, 5371.5}});
+  CHECK((sc.steps == std::vector<double>{5370, 5390, 5360, 5410}));
+  CHECK(sc.extra.size() == 1);
+  if (sc.extra.size() == 1) CHECK(sc.extra[0].hi_hz == 5371.5e6 && sc.extra[0].lo_hz == 0);
+  CHECK(seen_whole(sc, 5362));
+}
+
+// A signal inside a step already given gets no other, even one that step did not see whole; and two steps would
+// not be given within 5 MHz of each other.
+static void cut_steps_none_inside_a_step_given() {
+  CutSteps c;
+  c.start();
+  CHECK(c.step(5930e6, kEdge, {}, {cut_part(6, 16.5, true)}, false, false).empty());  // waits for the next step
+  const auto e = c.step(5370e6, kEdge, {}, {}, false, false);                          // which jumps away
+  CHECK(e.size() == 1 && e[0].hz == 5948e6);
+  CHECK(c.step(5950e6, kEdge, {}, {}, true, false).empty());  // the extra step, which (say) saw nothing whole
+  // a later step sees the same signal's top cut by its bottom edge: inside the step given, no other
+  CHECK(c.step(5965e6, kEdge, {}, {cut_part(-16.5, -11, false)}, false, true).empty());
+  CHECK(c.given() == 1);
+}
+
+// At most kMax extra steps a scan: on the scan's own plan, with a VTX halfway between every two steps of the upper
+// bands (15 of them, F1-F8 and R7 among them), the first kMax get one each, in the order the scan meets them.
+static void cut_steps_at_most_kmax() {
+  std::vector<Air> air;
+  for (double mhz = 5660; mhz <= 5940; mhz += 20) air.push_back({mhz - 9, mhz + 9});
+  const auto plan = scan_plan();
+  const Scan sc = scan_over(plan, air);
+  CHECK(sc.extra.size() == CutSteps::kMax);
+  CHECK(sc.steps.size() == plan.size() + CutSteps::kMax);
+  for (size_t i = 0; i < air.size(); i++) CHECK(seen_whole(sc, 5660 + 20.0 * i) == (i < CutSteps::kMax));
+}
+
+// What an extra step sees cut asks for nothing (even at the plan's end), and does not stand in for the next step of
+// the plan: a signal cut by the step before it is still looked for there.
+static void cut_steps_ask_nothing_of_extra_steps() {
+  CutSteps c;
+  c.start();
+  CHECK(c.step(5750e6, kEdge, {}, {cut_part(1, 16.5, true)}, false, false).empty());
+  CHECK(c.step(5900e6, kEdge, {}, {cut_part(-16.5, -2, false), cut_part(4, 16.5, true)}, true, true).empty());
+  CHECK(c.given() == 0);
+  const auto e = c.step(5770e6, kEdge, {}, {cut_part(-16.5, -1, false)}, false, false);
+  CHECK(e.size() == 1 && e[0].hz == 5760e6);
+}
+
+// A cut signal under kMinSnrDb gets no step (a wide Wi-Fi's skirts, noise); a weak part still counts as one end of
+// a signal whose other part is strong enough.
+static void cut_steps_leave_weak_signals_alone() {
+  CHECK(scan_over({5730e6, 5750e6, 5770e6, 5790e6}, {{5751, 5769, 8}}).extra.empty());
+  CHECK(scan_over({5910e6, 5930e6}, {{5936, 5954, 9}}).extra.empty());
+  CutSteps c;
+  c.start();
+  CHECK(c.step(5750e6, kEdge, {}, {cut_part(1, 16.5, true, 8)}, false, false).empty());
+  const auto e = c.step(5770e6, kEdge, {}, {cut_part(-16.5, -1, false, 14)}, false, false);
+  CHECK(e.size() == 1 && e[0].hz == 5760e6 && e[0].snr_db == 14);
+}
+
+// Both ends of a signal over 24 MHz wide seen (find_humps would not take it whole anywhere): no step. One over 23 MHz
+// wide can be cut by the same edge of two steps in a row (5760-5790 MHz: its bottom end by the top edge of the 5750
+// and of the 5770 step); it waits for its other end all the same.
+static void cut_steps_none_for_a_signal_too_wide() {
+  CHECK(scan_over({5730e6, 5750e6, 5770e6, 5790e6}, {{5745, 5775}}).extra.empty());
+  CHECK(scan_over({5730e6, 5750e6, 5770e6, 5790e6, 5810e6}, {{5760, 5790}}).extra.empty());
+}
+
+// On the scan's own plan, every channel of every band is seen whole in some step, the plan's or one extra step, at
+// any width up to the 24 MHz find_humps takes. One under 13 MHz wide needs no extra step, but for E8 (5945 MHz),
+// past the top edge of the highest step (5930).
+static void the_scan_sees_every_channel_whole() {
+  const auto plan = scan_plan();
+  for (double width : {6.6, 12.5, 15.0, 17.0, 19.0, 21.0, 24.0})
+    for (const auto &ch : fpv_channels()) {
+      const Scan sc = scan_over(plan, {{ch.mhz - width / 2, ch.mhz + width / 2}});
+      const size_t most = width < 13 && std::string(ch.name) != "E8" ? 0 : 1;
+      const bool ok = seen_whole(sc, ch.mhz) && sc.extra.size() <= most;
+      if (!ok) std::fprintf(stderr, "%s at %.1f MHz wide: %zu extra steps\n", ch.name, width, sc.extra.size());
+      CHECK(ok);
+    }
+}
+
 // ---------------------------------------------------------------------------------------- Combiner
 
 // Two antennas' worth of one transmitter, n samples at 40 MS/s. A carrier of constant envelope whose frequency
@@ -654,6 +873,16 @@ int main() {
   queue_full_loses_the_oldest_and_keeps_its_gap();
   queue_buffers_go_round();
   queue_pop_gives_up_when_told_to_stop();
+  steps_take_inserted_steps_next();
+  cut_steps_centre_one_step_on_a_signal_cut_by_two();
+  cut_steps_none_for_a_signal_seen_whole();
+  cut_steps_from_the_one_end_seen();
+  cut_steps_none_inside_a_step_given();
+  cut_steps_at_most_kmax();
+  cut_steps_ask_nothing_of_extra_steps();
+  cut_steps_leave_weak_signals_alone();
+  cut_steps_none_for_a_signal_too_wide();
+  the_scan_sees_every_channel_whole();
   std::fprintf(stderr, "kp_radio_tests: %d checks, %d failed\n", g_checks, g_failed);
   return g_failed ? 1 : 0;
 }

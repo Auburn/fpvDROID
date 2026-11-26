@@ -39,6 +39,19 @@ struct Hump {
 // Humps fully inside +-edge_hz of the centre.
 std::vector<Hump> find_humps(const std::vector<float> &db, double fs, double edge_hz);
 
+// A signal that runs past one edge of +-edge_hz, which find_humps leaves out: with scan steps 20 MHz apart a signal
+// is sure to be whole in one only up to 13 MHz wide, and a VTX close by is 15-20. The same runs over the same floor
+// as find_humps, at least 3.5 MHz of each inside the span; f0..f1 that part (relative to the centre), snr_db its
+// median over the floor. One past both edges, wider than the span, is not a VTX and is left out; with the scan's
+// span (+-16.5 MHz at 40 MS/s) there is none anyway: it would hold over three quarters of the bins, and the floor is
+// their lower quartile. A signal that wide (a 40 or 80 MHz Wi-Fi channel) leaves nothing over the floor.
+struct CutSignal {
+  double f0_hz = 0, f1_hz = 0;
+  bool cut_hi = false;  // it goes on past the top edge; else past the bottom one
+  float snr_db = 0;
+};
+std::vector<CutSignal> find_cut_signals(const std::vector<float> &db, double fs, double edge_hz);
+
 // Live SNR of the carrier being watched (dB): the strongest point of the smoothed spectrum against the noise
 // floor (10th percentile) inside +-span_hz of the carrier, which sits carrier_hz from the stream centre (0 unless
 // the hardware centre is put beside it). pass_hz > 0 also keeps the span inside +-pass_hz of the stream centre, the

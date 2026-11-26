@@ -24,7 +24,6 @@ int64_t now_ms() {
 namespace {
 constexpr double kFs = 40e6;
 constexpr double kEdge = 16.5e6;     // usable +- span at 40 MS/s (BW40 DFIR is flat to ~17 MHz)
-constexpr double kStep = 20e6;       // a hump up to ~13 MHz wide is fully inside some step's span
 constexpr double kCapture = 0.09;    // s of IQ per scan step (60 ms acquisition + ~300 lines)
 constexpr double kPsdSpan = 0.012;   // s of it for the spectrum
 constexpr int64_t kSnrEveryMs = 500;  // live SNR while watching (~2 % of a core at 20 MS/s)
@@ -32,14 +31,6 @@ constexpr double kSnrSpan = 8e6;      // +- span the BW20 RX filter passes flat 
 // Off-centre tuning at 40 MS/s: how far beside the pilot the hardware centre goes (Radio::offset_centre). The
 // video swings about +-2.5 MHz around its carrier; this keeps that clear of the DC point and inside the flat band.
 constexpr double kOffsetAim40 = 6e6;
-
-std::vector<double> scan_plan() {
-  std::vector<double> p;
-  // the common analog bands first (A, B, E, F, R: 5645..5945), then the low band (L: 5362..5621)
-  for (double c = 5652e6; c <= 5940e6; c += kStep) p.push_back(c);
-  for (double c = 5370e6; c <= 5630e6; c += kStep) p.push_back(c);
-  return p;
-}
 
 // A step's samples as a spectrum (Psd::db(): fftshifted, kFs wide, dB).
 std::vector<float> spectrum_db(const std::vector<cf> &x) {
@@ -469,6 +460,7 @@ void Radio::begin_scan() {
   _plan_n = plan.size();
   _step = 0;
   KP_LOGI("radio: scan, %zu steps", plan.size());
+  _cut.start();
   start_steps(std::move(plan));
 }
 
@@ -771,12 +763,39 @@ void Radio::handle_scan(Bank &b) {
     const std::vector<float> db = spectrum_db(_steps.iq());
     add_spectrum(db, _steps.centre_hz());
     _humps = find_humps(db, kFs, kEdge);
+    add_cut_steps(db);  // now, while the next retune is still to come: it may be one of them
     if (!_humps.empty()) {
       _steps.want(static_cast<size_t>(kCapture * kFs));
       return;
     }
   }
   scan_step_done();
+}
+
+// A signal that the scan's steps have only seen cut by an edge of one (cut_steps.h) gets a step of its own, taken
+// right after this one. The spectrum page's sweep needs none: it finds signals in the band picture, which joins
+// its steps.
+void Radio::add_cut_steps(const std::vector<float> &db) {
+  const bool extra = _steps.inserted(), last = _steps.at() + 1 >= _steps.size();
+  const double centre = _steps.centre_hz();
+  const std::vector<CutSignal> cut = extra ? std::vector<CutSignal>() : find_cut_signals(db, kFs, kEdge);
+  const auto add = _cut.step(centre, kEdge, _humps, cut, extra, last);
+  if (add.empty()) return;
+  std::vector<double> hz;
+  for (const auto &e : add) {
+    hz.push_back(e.hz);
+    if (e.lo_hz > 0 && e.hi_hz > 0)
+      KP_LOGI("scan: %.1f MHz step: extra step at %.1f MHz, for a signal at %.1f..%.1f MHz (%.1f dB) cut by two "
+              "steps", centre / 1e6, e.hz / 1e6, e.lo_hz / 1e6, e.hi_hz / 1e6, e.snr_db);
+    else
+      KP_LOGI("scan: %.1f MHz step: extra step at %.1f MHz, for a signal from %.1f MHz %s (%.1f dB) that no step "
+              "saw whole", centre / 1e6, e.hz / 1e6, (e.lo_hz > 0 ? e.lo_hz : e.hi_hz) / 1e6,
+              e.lo_hz > 0 ? "up" : "down", e.snr_db);
+  }
+  _steps.insert(hz);
+  // the status counts them from now on, unless a mode call came since this bank's mode was read (scan_step_done)
+  std::lock_guard<std::mutex> l(_m);
+  if (_mode_epoch == _epoch_seen) _plan_n = _steps.size();
 }
 
 void Radio::handle_sweep(Bank &b) {
@@ -850,7 +869,8 @@ void Radio::scan_step_done() {
             break;
           }
       if (next_watch == 0 && _resume_hz > 0) next_watch = _resume_hz;
-      KP_LOGI("scan: done, %zu pilot(s)%s", _pilots.size(), next_watch > 0 ? ", watching" : "");
+      KP_LOGI("scan: done, %zu pilot(s), %zu extra step(s)%s", _pilots.size(), _cut.given(),
+              next_watch > 0 ? ", watching" : "");
       if (next_watch > 0) {
         _watch_hz = next_watch;
         _mode = Mode::Watch;

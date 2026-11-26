@@ -1,5 +1,6 @@
 // kp_spectrum_tests: the Spectrum tab's sweep plan (Sweep) and band picture (BandMap, find_carriers) from sweep steps
-// made here (ctest: "spectrum"). Plain checks, as in radio_tests.cpp.
+// made here, and what a scan step finds whole or cut (find_humps, find_cut_signals) (ctest: "spectrum"). Plain checks,
+// as in radio_tests.cpp.
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -28,14 +29,32 @@ struct Signal {
   bool flat;  // digital (a flat top, steep sides); else an FM video hump
 };
 
-// What the radio's sweep does (radio.cpp: handle_sweep), pass after pass of the radio's own plan (Sweep), each step
-// a 40 MS/s spectrum of 1024 bins (fftshifted, dB) with a gain of its own (the chip's AGC), the RX filter rolling
-// off past 17 MHz, and noise. Its +-16.5 MHz (radio.cpp's kEdge) go into the map.
-static BandMap swept(const std::vector<Signal> &air, int passes, unsigned seed = 3) {
-  constexpr double kFs = 40e6, kUse = 16.5e6;
+static constexpr double kFs = 40e6, kUse = 16.5e6;  // a step's sample rate and the span of it used (radio.cpp's kEdge)
+
+// One retune's spectrum as the radio takes it: 40 MS/s, 1024 bins (fftshifted, dB), centred on the hardware centre
+// centre_hz, with a gain of its own (the chip's AGC), the RX filter rolling off past 17 MHz, and noise.
+static std::vector<float> step_db(const std::vector<Signal> &air, double centre_hz, float gain, std::mt19937 &rng) {
   constexpr int kN = 1024;
-  std::mt19937 rng(seed);
   std::normal_distribution<float> noise(0, 1);
+  std::vector<float> db(kN);
+  for (int i = 0; i < kN; i++) {
+    const double off = (i - kN / 2) * kFs / kN, f = (centre_hz + off) / 1e6;
+    double p = 1.0;  // the noise, linear
+    for (const auto &s : air) {
+      const double x = (f - s.mhz) / (s.width_mhz / 2), lvl = std::pow(10.0, s.db / 10);
+      p += s.flat ? (std::fabs(x) < 1 ? lvl : 0) : lvl * std::exp(-x * x * 1.6);
+    }
+    double v = 10 * std::log10(p) + gain + 0.3 * noise(rng);
+    if (std::fabs(off) > 17e6) v -= (std::fabs(off) - 17e6) / 1e6 * 6;
+    db[i] = static_cast<float>(v);
+  }
+  return db;
+}
+
+// What the radio's sweep does (radio.cpp: handle_sweep), pass after pass of the radio's own plan (Sweep), each step's
+// +-16.5 MHz into the map.
+static BandMap swept(const std::vector<Signal> &air, int passes, unsigned seed = 3) {
+  std::mt19937 rng(seed);
   std::uniform_real_distribution<float> gain(-6, 6);
   BandMap map(Sweep::kBandLo, Sweep::kBandHi, Sweep::kBandBin);
   Sweep sweep;
@@ -43,20 +62,8 @@ static BandMap swept(const std::vector<Signal> &air, int passes, unsigned seed =
   int64_t t = 1000;
   for (int pass = 0; pass < passes; pass++, sweep.pass_done()) {
     for (double c : sweep.pass()) {
-      std::vector<float> db(kN);
       const float g = gain(rng);
-      for (int i = 0; i < kN; i++) {
-        const double off = (i - kN / 2) * kFs / kN, f = (c + off) / 1e6;
-        double p = 1.0;  // the noise, linear
-        for (const auto &s : air) {
-          const double x = (f - s.mhz) / (s.width_mhz / 2), lvl = std::pow(10.0, s.db / 10);
-          p += s.flat ? (std::fabs(x) < 1 ? lvl : 0) : lvl * std::exp(-x * x * 1.6);
-        }
-        double v = 10 * std::log10(p) + g + 0.3 * noise(rng);
-        if (std::fabs(off) > 17e6) v -= (std::fabs(off) - 17e6) / 1e6 * 6;
-        db[i] = static_cast<float>(v);
-      }
-      map.add(db, kFs, c, kUse, t);
+      map.add(step_db(air, c, g, rng), kFs, c, kUse, t);
       t += 180;  // ~2 s a pass
     }
   }
@@ -134,6 +141,58 @@ static void forget_and_bridge() {
   CHECK(none);
 }
 
+// A scan step's signals (radio.cpp: handle_scan): find_humps takes the ones it sees whole, find_cut_signals those an
+// edge of its +-16.5 MHz cuts. F2 (5760 MHz, 18 MHz wide) halfway between the 5750 and 5770 steps is cut in both: by
+// the 5750 one's top edge, then by the 5770 one's bottom edge, and neither sees it whole.
+static void a_signal_between_two_steps_is_cut_in_both() {
+  std::mt19937 rng(5);
+  const std::vector<Signal> f2 = {{5760, 18, 30, true}};
+  auto db = step_db(f2, 5750e6, 4, rng);
+  CHECK(find_humps(db, kFs, kUse).empty());
+  auto cut = find_cut_signals(db, kFs, kUse);
+  CHECK(cut.size() == 1);
+  if (cut.size() == 1) {
+    CHECK(cut[0].cut_hi);
+    CHECK(std::fabs(cut[0].f0_hz - 1e6) < 0.3e6 && cut[0].f1_hz == kUse);  // its bottom end, 5751 MHz, is seen
+    CHECK(std::fabs(cut[0].snr_db - 30) < 1.5);
+  }
+  db = step_db(f2, 5770e6, -5, rng);
+  CHECK(find_humps(db, kFs, kUse).empty());
+  cut = find_cut_signals(db, kFs, kUse);
+  CHECK(cut.size() == 1);
+  if (cut.size() == 1) {
+    CHECK(!cut[0].cut_hi);
+    CHECK(cut[0].f0_hz == -kUse && std::fabs(cut[0].f1_hz + 1e6) < 0.3e6);  // its top end, 5769 MHz
+    CHECK(std::fabs(cut[0].snr_db - 30) < 1.5);
+  }
+  // an FM video hump (soft sides: 6 dB over the floor from about 5752 to 5776 MHz) is cut the same way
+  cut = find_cut_signals(step_db({{5764, 16, 20, false}}, 5750e6, 0, rng), kFs, kUse);
+  CHECK(cut.size() == 1);
+  if (cut.size() == 1) CHECK(cut[0].cut_hi && cut[0].f0_hz > 1e6 && cut[0].f0_hz < 3.5e6);
+}
+
+// Whole inside a step is find_humps' alone. A signal wider than the step (an 80 MHz Wi-Fi channel) leaves nothing over
+// the floor, and a sliver of one inside an edge (under 3.5 MHz) is not listed, nor is the noise; one cut at each edge
+// of a step, both.
+static void cut_signals_whole_wide_and_slivers() {
+  std::mt19937 rng(6);
+  auto db = step_db({{5769, 18, 35, true}}, 5770e6, 0, rng);  // R4
+  CHECK(find_humps(db, kFs, kUse).size() == 1);
+  CHECK(find_cut_signals(db, kFs, kUse).empty());
+  db = step_db({{5775, 80, 15, true}}, 5770e6, 0, rng);
+  CHECK(find_humps(db, kFs, kUse).empty() && find_cut_signals(db, kFs, kUse).empty());
+  CHECK(find_cut_signals(step_db({{5785, 18, 30, true}}, 5760e6, 0, rng), kFs, kUse).empty());  // 5776..: 0.5 MHz in
+  CHECK(find_cut_signals(step_db({{5783, 18, 30, true}}, 5760e6, 0, rng), kFs, kUse).empty());  // 5774..: 2.5 MHz in
+  CHECK(find_cut_signals(step_db({}, 5760e6, 3, rng), kFs, kUse).empty());
+  const auto cut = find_cut_signals(step_db({{5750, 18, 25, true}, {5790, 18, 12, true}}, 5770e6, 0, rng), kFs, kUse);
+  CHECK(cut.size() == 2);
+  if (cut.size() == 2) {
+    CHECK(!cut[0].cut_hi && std::fabs(cut[0].f1_hz + 11e6) < 0.3e6);  // 5741..5759: its top end
+    CHECK(cut[1].cut_hi && std::fabs(cut[1].f0_hz - 11e6) < 0.3e6);   // 5781..5799: its bottom end
+    CHECK(std::fabs(cut[0].snr_db - 25) < 1.5 && std::fabs(cut[1].snr_db - 12) < 1.5);
+  }
+}
+
 // The sweep's plan: steps 30 MHz apart on the 5 MHz grid across the whole span, every other pass on a grid half a
 // step over, a new sweep from the first grid; the span kept inside the band picture, and a span of nothing still a
 // step (the DSP thread retunes to the first at once).
@@ -169,6 +228,8 @@ int main() {
   signals_are_found_where_and_as_wide_as_they_are();
   a_signal_wider_than_a_step_is_found_whole();
   forget_and_bridge();
+  a_signal_between_two_steps_is_cut_in_both();
+  cut_signals_whole_wide_and_slivers();
   std::printf("%d checks, %d failed\n", g_checks, g_failed);
   return g_failed ? 1 : 0;
 }
