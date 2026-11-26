@@ -34,7 +34,7 @@ internal class SpectrumPage(
     private val sweepText = label(ctx, "", 12.5f, Skin.TEXT_2)
     private val chipRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
     private var chipsShown: List<Pair<String, Int>>? = null   // name, bars
-    private var wifiShown: List<Wifi>? = null
+    private var wifiShown: List<Signal>? = null
     private var analogOnlyAt = -ANALOG_ONLY_MS                // when a digital channel was last picked (uptimeMillis)
     private var state = MenuState()
 
@@ -108,8 +108,8 @@ internal class SpectrumPage(
     }
 
     /**
-     * The chips under the graph: what is on the air, left to right as in the graph, each named where it puts it; then
-     * the Wi-Fi networks.
+     * The chips under the graph: what is on the air, left to right as in the graph, each named where it puts it (after
+     * the digital system the radio judged it to be, if any: [Spot.name]); then the Wi-Fi networks.
      */
     private fun showChips() {
         val chips = graph.onAir.map { it.spot.name to barsFor(it.carrier.snrDb).coerceAtLeast(1) }
@@ -125,7 +125,7 @@ internal class SpectrumPage(
             chipRow.addView(chip, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dpi(8f) })
         }
         for (n in wifi) {
-            val chip = WifiChip(ctx, n.label, n.busy)
+            val chip = WifiChip(ctx, n.label, n.active)
             // there is no picture to be had from a network either
             chip.setOnClickListener {
                 analogOnlyAt = SystemClock.uptimeMillis()
@@ -150,7 +150,7 @@ internal class SpectrumPage(
         val words = when {
             SystemClock.uptimeMillis() - analogOnlyAt < ANALOG_ONLY_MS -> "Only analog video can be shown"
             !st.radioReady -> ""
-            !sp?.carriers.isNullOrEmpty() || !sp?.wifi.isNullOrEmpty() -> "In use"
+            !sp?.carriers.isNullOrEmpty() || graph.wifi.isNotEmpty() -> "In use"
             st.scanning -> "Waiting for the scan"
             st.sweeping && (sp == null || sp.sweeps == 0) -> "$lo–$hi MHz"
             sp != null && !sp.empty -> "No signals"

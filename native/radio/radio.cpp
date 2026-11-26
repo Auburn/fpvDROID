@@ -59,7 +59,7 @@ FallbackPolicy::Stopped stopped_of(wsdr::RxGaveUp g) {
 }
 }  // namespace
 
-Radio::Radio(FrameSink frames) : _band(Sweep::kBandLo, Sweep::kBandHi, Sweep::kBandBin), _gate(std::move(frames)) {}
+Radio::Radio(FrameSink frames) : _gate(std::move(frames)) {}
 
 Radio::~Radio() { close(); }
 
@@ -480,11 +480,11 @@ void Radio::begin_sweep() {
     lo = _sweep.lo();
     hi = _sweep.hi();
     plan = _sweep.pass();
-    _band.forget(lo, hi, now_ms() - Sweep::kStaleMs);
-    _wifi.forget(lo, hi, now_ms() - Sweep::kStaleMs);
+    _band.sweep_started(lo, hi, now_ms());
   }
   KP_LOGI("radio: sweep %.0f..%.0f MHz, %zu steps a pass", lo / 1e6, hi / 1e6, plan.size());
   start_steps(std::move(plan));
+  _analysers.sweep_started();
 }
 
 void Radio::begin_test() {
@@ -793,24 +793,17 @@ void Radio::handle_sweep(Bank &b) {
     }
     start_steps(std::move(plan));
   }
-  // the step just taken, while the chip retunes: its spectrum, then its bursts against the picture with it in
-  const std::vector<cf> x = _steps.iq();
-  const double centre = _steps.centre_hz();
-  add_spectrum(spectrum_db(x), centre);
-  add_bursts(measure_bursts(x.data(), x.size(), kFs, centre, Sweep::kStep / 2, kEdge));
+  // the step just taken, while the chip retunes: measured with no lock held (its 12 ms of IQ in a row, which a TDD
+  // frame or a burst shows in), then into the band picture
+  const StepFindings f = _analysers.step(_steps.iq(), kFs, _steps.centre_hz(), kEdge);
+  std::lock_guard<std::mutex> l(_m);
+  _band.add(f, now_ms());
 }
 
 void Radio::add_spectrum(const std::vector<float> &db, double centre_hz) {
+  const std::vector<float> sm = smooth_db(db, kFs / db.size());
   std::lock_guard<std::mutex> l(_m);
-  _band.add(db, kFs, centre_hz, kEdge, now_ms());
-}
-
-// A sweep step's bursts: what the band picture has on the air over the span tells pilots from networks.
-void Radio::add_bursts(const BurstStep &s) {
-  std::lock_guard<std::mutex> l(_m);
-  double first = 0;
-  const auto db = _band.get(_sweep.lo(), _sweep.hi(), &first);
-  _wifi.add(s, _sweep.lo(), _sweep.hi(), find_carriers(db, first, _band.bin_hz()), now_ms());
+  _band.add_levels(sm, kFs, centre_hz, kEdge, now_ms());
 }
 
 void Radio::scan_step_done() {
@@ -976,19 +969,9 @@ std::string Radio::status_json() {
 }
 
 std::string Radio::spectrum_json(double lo_hz, double hi_hz) {
-  double first = 0, at = 0;
-  std::vector<float> db;
-  uint64_t sweeps;
-  std::vector<WifiNet> wifi;
-  {
-    std::lock_guard<std::mutex> l(_m);
-    db = _band.get(lo_hz, hi_hz, &first);
-    if (_mode == Mode::Sweep || _mode == Mode::Scan) at = _req_hz;
-    sweeps = _mode == Mode::Sweep ? _sweep.passes() : 0;
-    wifi = _wifi.networks(lo_hz, hi_hz, now_ms());
-  }
-  // the bin size is fixed: no lock needed
-  return band_json(db, first, _band.bin_hz(), at, 2 * kEdge, sweeps, wifi);
+  std::lock_guard<std::mutex> l(_m);
+  const double at = _mode == Mode::Sweep || _mode == Mode::Scan ? _req_hz : 0;
+  return _band.json(lo_hz, hi_hz, at, 2 * kEdge, _mode == Mode::Sweep ? _sweep.passes() : 0);
 }
 
 }  // namespace kp

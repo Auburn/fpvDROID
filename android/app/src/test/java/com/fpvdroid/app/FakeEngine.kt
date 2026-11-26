@@ -192,10 +192,13 @@ class FakeEngine : Engine {
     // ------------------------------------------------------------------------------------- the spectrum page
     /** What the band picture shows on the air (dB over the floor at their peak), for [spectrum]. */
     val carriers = ArrayList<Carrier>()
+    /**
+     * What the radio has recognised besides the carriers with a kind (each of which is on a signal of its own, unless it
+     * is on one of these: a Wi-Fi network's).
+     */
+    val signals = ArrayList<Signal>()
     /** Passes the sweep has finished ("sweeps" in the spectrum). */
     var sweeps = 0
-    /** The Wi-Fi networks the radio has seen ("wifi" in the spectrum, those that reach into the span asked for). */
-    val wifi = ArrayList<Wifi>()
 
     @Synchronized override fun sweep(loHz: Double, hiHz: Double) {
         rec("sweep", loHz, hiHz)
@@ -206,8 +209,8 @@ class FakeEngine : Engine {
 
     /**
      * As Radio::spectrum_json: half-MHz bins over the span, the floor at 0 dB and each of [carriers] a hump as wide
-     * as it says; "at_mhz" the middle of the span while sweeping; [wifi] in the span. Nothing seen (every bin null)
-     * until open.
+     * as it says; "at_mhz" the middle of the span while sweeping. A carrier with a kind is on a signal of that kind as
+     * wide as it is, listed in "signals" before [signals] (what has no carrier). Nothing seen (every bin null) until open.
      */
     @Synchronized override fun spectrum(loHz: Double, hiHz: Double): String {
         rec("spectrum", loHz, hiHz)
@@ -229,11 +232,16 @@ class FakeEngine : Engine {
                 }
             })
             put("carriers", JSONArray().apply {
-                if (isOpen) for (c in carriers) put(JSONObject().put("mhz", c.mhz).put("width", c.widthMhz).put("snr", c.snrDb.toDouble()))
+                if (isOpen) for (c in carriers) put(JSONObject().put("mhz", c.mhz).put("width", c.widthMhz).put("snr", c.snrDb.toDouble())
+                    .apply { c.kind?.let { put("kind", it.code) } })
             })
-            put("wifi", JSONArray().apply {
-                if (isOpen) for (w in wifi) if (w.hiMhz > lo && w.loMhz < hiHz / 1e6)
-                    put(JSONObject().put("lo_mhz", w.loMhz).put("hi_mhz", w.hiMhz).put("label", w.label).put("busy", w.busy))
+            put("signals", JSONArray().apply {
+                if (!isOpen) return@apply
+                // a carrier on one of [signals] (a busy Wi-Fi network's) is that one
+                val all = carriers.filter { c -> signals.none { it.kind == c.kind && c.mhz in it.loMhz..it.hiMhz } }
+                    .mapNotNull { c -> c.kind?.let { Signal(c.mhz - c.widthMhz / 2, c.mhz + c.widthMhz / 2, it, it.label) } } + signals
+                for (s in all) put(JSONObject().put("lo_mhz", s.loMhz).put("hi_mhz", s.hiMhz).put("kind", s.kind.code)
+                    .put("label", s.label).put("active", s.active))
             })
         }.toString()
     }

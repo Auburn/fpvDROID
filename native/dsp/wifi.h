@@ -173,8 +173,11 @@ struct WifiNet {
 // 149-161, 165-177) are taken for one network, and two such blocks lit whole within a 160 MHz one (36-64, 100-128,
 // 149-177) too. Two networks of 20 MHz side by side read as one of 40: the tab only says that the span is Wi-Fi.
 std::vector<WifiNet> group_wifi(const std::vector<Wifi> &wifi);
+// The network a carrier of the band picture (find_carriers) is, or nullptr: one whose span holds its centre, the carrier
+// no wider than it (a busy network's bursts, averaged, read as a carrier as wide as the network).
+const WifiNet *wifi_for(const std::vector<WifiNet> &nets, const Carrier &c);
 
-// The Spectrum tab's Wi-Fi, step by step of the sweep (Radio::handle_sweep): the burst picture and the networks
+// The Spectrum tab's Wi-Fi, step by step of the sweep (BandPicture::add): the burst picture and the networks
 // remembered. Not thread-safe.
 class WifiWatch {
 public:
@@ -182,12 +185,13 @@ public:
   void forget(double lo_hz, double hi_hz, int64_t older_than_ms) { _map.forget(lo_hz, hi_hz, older_than_ms); }
   // A step of a sweep over lo..hi (measure_bursts); carriers: what the band picture has on the air over lo..hi now.
   void add(const BurstStep &s, double lo_hz, double hi_hz, const std::vector<Carrier> &carriers, int64_t now_ms);
-  // The networks remembered that reach into lo..hi.
-  std::vector<WifiNet> networks(double lo_hz, double hi_hz, int64_t now_ms) const;
+  // The networks remembered that reach into lo..hi, as of the last step: once the sweep stops, they stay as last seen.
+  std::vector<WifiNet> networks(double lo_hz, double hi_hz) const;
 
 private:
   BurstMap _map;
   WifiMemory _memory;
+  int64_t _last_ms = 0;  // the last step's time
 };
 
 }  // namespace kp

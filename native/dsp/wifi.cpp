@@ -321,15 +321,22 @@ std::vector<WifiNet> group_wifi(const std::vector<Wifi> &wifi) {
   return nets;
 }
 
+const WifiNet *wifi_for(const std::vector<WifiNet> &nets, const Carrier &c) {
+  for (const auto &n : nets)
+    if (c.mhz >= n.lo_mhz && c.mhz <= n.hi_mhz && c.width_mhz <= n.hi_mhz - n.lo_mhz) return &n;
+  return nullptr;
+}
+
 void WifiWatch::add(const BurstStep &s, double lo_hz, double hi_hz, const std::vector<Carrier> &carriers,
                     int64_t now_ms) {
+  _last_ms = now_ms;
   _map.add(s, now_ms);
   _memory.update(find_wifi(s, _map.get(lo_hz, hi_hz), _memory.known(now_ms, kWifiRecentMs), carriers), now_ms);
 }
 
-std::vector<WifiNet> WifiWatch::networks(double lo_hz, double hi_hz, int64_t now_ms) const {
+std::vector<WifiNet> WifiWatch::networks(double lo_hz, double hi_hz) const {
   std::vector<WifiNet> out;
-  for (const auto &n : group_wifi(_memory.known(now_ms)))
+  for (const auto &n : group_wifi(_memory.known(_last_ms)))
     if (n.hi_mhz > lo_hz / 1e6 && n.lo_mhz < hi_hz / 1e6) out.push_back(n);
   return out;
 }

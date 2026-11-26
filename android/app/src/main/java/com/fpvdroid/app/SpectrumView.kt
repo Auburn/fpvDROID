@@ -35,8 +35,8 @@ class SpectrumView(ctx: Context) : View(ctx) {
     /** What is on the air, left to right, each where [plan] puts it: what the graph lights, and the tab lists. */
     var onAir: List<OnAir> = emptyList()
         private set
-    /** The Wi-Fi networks seen in the span, left to right. */
-    var wifi: List<Wifi> = emptyList()
+    /** The Wi-Fi networks seen in the span, left to right (the radio's signals of kind [SignalKind.WIFI]). */
+    var wifi: List<Signal> = emptyList()
         private set
     /** The channel being watched, if it is one of [plan]'s (MHz; 0: none). */
     var chosenMhz = 0.0
@@ -81,10 +81,14 @@ class SpectrumView(ctx: Context) : View(ctx) {
         describe()
     }
 
-    /** The spectrum, the plan or the band changed: what is on the air is put on the plan's channels again. */
+    /**
+     * The spectrum, the plan or the band changed: what is on the air is put on the plan's channels again, each with
+     * what the radio recognised it to be.
+     */
     private fun place() {
-        onAir = spectrum?.carriers.orEmpty().sortedBy { it.mhz }.map { OnAir(it, plan.spot(it.mhz, it.widthMhz, band)) }
-        wifi = spectrum?.wifi.orEmpty().filter { it.hiMhz > span.first && it.loMhz < span.second }.sortedBy { it.loMhz }
+        onAir = spectrum?.carriers.orEmpty().sortedBy { it.mhz }.map { OnAir(it, plan.spot(it.mhz, it.widthMhz, band).copy(kind = it.kind)) }
+        wifi = spectrum?.signals.orEmpty().filter { it.kind == SignalKind.WIFI && it.hiMhz > span.first && it.loMhz < span.second }
+            .sortedBy { it.loMhz }
         names = null
         describe()
         invalidate()
@@ -286,10 +290,10 @@ class SpectrumView(ctx: Context) : View(ctx) {
         for (n in wifi) {
             val x0 = max(0f, xOf(n.loMhz))
             val x1 = min(width.toFloat(), xOf(n.hiMhz))
-            paint.color = Color.argb(if (n.busy) 30 else 14, r, g, b)
+            paint.color = Color.argb(if (n.active) 30 else 14, r, g, b)
             c.drawRect(x0, plotTop, x1, bottom, paint)
-            wifiEdge.color = Color.argb(if (n.busy) 130 else 90, r, g, b)
-            wifiEdge.pathEffect = if (n.busy) null else dashes
+            wifiEdge.color = Color.argb(if (n.active) 130 else 90, r, g, b)
+            wifiEdge.pathEffect = if (n.active) null else dashes
             for (x in floatArrayOf(x0, x1)) c.drawLine(x, plotTop, x, bottom, wifiEdge)
         }
     }
@@ -365,7 +369,7 @@ class SpectrumView(ctx: Context) : View(ctx) {
         val used = onAir.map { it.spot.name }
         contentDescription = "Spectrum, ${span.first} to ${span.second} megahertz, ${plan.title} channels. " +
             (if (sp == null || sp.empty) "Nothing measured yet" else if (used.isEmpty()) "No signals" else "In use: ${used.joinToString()}") +
-            if (wifi.isEmpty()) "" else ". Wi-Fi: ${wifi.joinToString { it.label + if (it.busy) ", in use" else ", idle" }}"
+            if (wifi.isEmpty()) "" else ". Wi-Fi: ${wifi.joinToString { it.label + if (it.active) ", in use" else ", idle" }}"
     }
 
     companion object {

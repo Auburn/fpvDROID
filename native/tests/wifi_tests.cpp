@@ -1,7 +1,7 @@
 // kp_wifi_tests: the Spectrum tab's Wi-Fi networks (dsp/wifi.h) from sweep steps made here as raw IQ: noise, Wi-Fi
 // networks as OFDM (802.11a/ac subcarriers, on when their schedule says), analog video as FM and DJI-like links as
-// OFDM that never stops, swept on the radio's own plan (Sweep) and taken the way Radio::handle_sweep takes them
-// (ctest: "wifi"). Plain checks, as in radio_tests.cpp.
+// OFDM that never stops, swept on the radio's own plan (Sweep), each step taken as Radio::handle_sweep takes it
+// (StepAnalysers::step, then BandPicture::add: sweep.h) (ctest: "wifi"). Plain checks, as in radio_tests.cpp.
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -164,38 +164,41 @@ static std::vector<cf> capture(const Air &air, double centre_hz, double t0_us, s
 }
 
 // ---------------------------------------------------------------------------------------- the sweep
-// What Radio::handle_sweep does with each step: its spectrum into the band picture, its bursts (and what the band
-// picture has on the air) into the Wi-Fi watch. A step every 180 ms, each capture 12 ms (radio.cpp's kPsdSpan).
+// The radio's sweep on the Spectrum tab, each step taken as Radio::handle_sweep takes it: measured
+// (StepAnalysers::step), then into the band picture (BandPicture::add), which weighs its bursts against the carriers
+// of the span. A step every 180 ms, each capture 12 ms (radio.cpp's kPsdSpan). blind: the bursts go into a WifiWatch
+// of its own with no carriers to go by (no pilots), to show what those carriers keep out.
 struct Sim {
   Air air;
-  bool carriers = true;  // false: the band picture's carriers are not handed on (no pilots)
-  BandMap band{Sweep::kBandLo, Sweep::kBandHi, Sweep::kBandBin};
-  WifiWatch wifi;
+  bool blind = false;
+  StepAnalysers analysers;
+  BandPicture picture;
+  WifiWatch alone;  // blind's
   Sweep sweep;
   int64_t t_ms = 1000;
   uint64_t seed = 1;
 
-  explicit Sim(double lo_mhz = 5700, double hi_mhz = 5850) { sweep.start(lo_mhz * 1e6, hi_mhz * 1e6); }
+  explicit Sim(double lo_mhz = 5700, double hi_mhz = 5850) {
+    sweep.start(lo_mhz * 1e6, hi_mhz * 1e6);
+    picture.sweep_started(sweep.lo(), sweep.hi(), t_ms);
+    analysers.sweep_started();
+  }
   void step(double c) {
     const auto x = capture(air, c, static_cast<double>(t_ms) * 1000, static_cast<size_t>(0.012 * kFs), seed++);
-    Psd psd(1024);
-    psd.add(x.data(), x.size());
-    band.add(psd.db(), kFs, c, kEdge, t_ms);
-    const BurstStep b = measure_bursts(x.data(), x.size(), kFs, c, Sweep::kStep / 2, kEdge);
-    double first = 0;
-    const auto db = band.get(sweep.lo(), sweep.hi(), &first);
-    wifi.add(b, sweep.lo(), sweep.hi(), carriers ? find_carriers(db, first, band.bin_hz()) : std::vector<Carrier>(), t_ms);
+    const StepFindings f = analysers.step(x, kFs, c, kEdge);
+    if (blind) alone.add(f.bursts, sweep.lo(), sweep.hi(), {}, t_ms);
+    else picture.add(f, t_ms);
     t_ms += 180;
   }
   void passes(int n) {
     for (int i = 0; i < n; i++, sweep.pass_done())
       for (double c : sweep.pass()) step(c);
   }
-  std::vector<WifiNet> nets() const { return wifi.networks(sweep.lo(), sweep.hi(), t_ms); }
+  std::vector<WifiNet> nets() const { return (blind ? alone : picture.wifi()).networks(sweep.lo(), sweep.hi()); }
   std::vector<Carrier> on_air() const {
     double first = 0;
-    const auto db = band.get(sweep.lo(), sweep.hi(), &first);
-    return find_carriers(db, first, band.bin_hz());
+    const auto db = picture.band().get(sweep.lo(), sweep.hi(), &first);
+    return find_carriers(db, first, picture.band().bin_hz());
   }
 };
 
@@ -258,6 +261,11 @@ static void a_network_in_use_is_found() {
   std::fprintf(stderr, "  in use on 157: %s\n", labels(nets).c_str());
   CHECK(is(nets, {{157, 157}}));
   CHECK(nets.size() == 1 && nets[0].busy && nets[0].lo_mhz == 5775 && nets[0].hi_mhz == 5795 && nets[0].label() == "Wi-Fi 157");
+  // as the app reads it: a signal of kind "wifi", and the carrier its bursts make tagged with it
+  const std::string j = sim.picture.json(sim.sweep.lo(), sim.sweep.hi(), 0, 2 * kEdge, 3);
+  CHECK(j.find("\"signals\":[{\"lo_mhz\":5775.0,\"hi_mhz\":5795.0,\"kind\":\"wifi\",\"label\":\"Wi-Fi 157\","
+               "\"active\":true}]") != std::string::npos);
+  CHECK(j.find(",\"kind\":\"wifi\"}") != std::string::npos);
 }
 
 // An AP with no traffic on channel 149: only its beacons, caught now and then. Once caught it is kept (not busy) while
@@ -330,7 +338,7 @@ static void a_strong_vtxs_sidebands_are_not_wifi() {
 
   Sim blind(5635, 5760);
   blind.air = air;
-  blind.carriers = false;
+  blind.blind = true;
   blind.passes(6);
   std::fprintf(stderr, "  ... with no carriers to go by: %s\n", labels(blind.nets()).c_str());
   CHECK(!blind.nets().empty());
@@ -376,21 +384,19 @@ static void networks_are_grouped_by_the_wifi_grid() {
   CHECK(g.size() == 2 && g[0].last == 112 && g[1].first == 116 && g[1].last == 120);
 }
 
-// The band picture as the app reads it carries the networks in an array of their own.
-static void the_band_picture_carries_the_networks() {
-  WifiNet a{149, 149, 5735, 5755, false}, b{100, 112, 5490, 5570, true};
-  const std::string j = band_json(std::vector<float>(3, 0.f), 5735e6, 0.5e6, 0, 33e6, 2, {a, b});
-  CHECK(j.find("\"carriers\":[]") != std::string::npos);
-  CHECK(j.find("\"wifi\":[{\"lo_mhz\":5735.0,\"hi_mhz\":5755.0,\"label\":\"Wi-Fi 149\",\"busy\":false},"
-               "{\"lo_mhz\":5490.0,\"hi_mhz\":5570.0,\"label\":\"Wi-Fi 100\xe2\x80\x93" "112\",\"busy\":true}]}") !=
-        std::string::npos);
-  CHECK(band_json(std::vector<float>(3, 0.f), 5735e6, 0.5e6, 0, 33e6, 2).find("\"wifi\":[]") != std::string::npos);
+// A carrier of the band picture is a network's when the network's span holds its centre and it is no wider.
+static void a_carrier_on_a_network_is_that_network() {
+  const std::vector<WifiNet> nets = {{149, 149, 5735, 5755, false}, {100, 112, 5490, 5570, true}};
+  CHECK(wifi_for(nets, Carrier{5745.2, 16.5, 18}) == &nets[0]);
+  CHECK(wifi_for(nets, Carrier{5530, 70, 15}) == &nets[1]);
+  CHECK(wifi_for(nets, Carrier{5732.7, 6.5, 23}) == nullptr);  // beside 149's span
+  CHECK(wifi_for(nets, Carrier{5745, 30, 25}) == nullptr);     // run together with something else
 }
 
 int main() {
   a_capture_tells_bursts_from_steady_signals();
   networks_are_grouped_by_the_wifi_grid();
-  the_band_picture_carries_the_networks();
+  a_carrier_on_a_network_is_that_network();
   a_network_in_use_is_found();
   a_quiet_network_is_remembered_then_forgotten();
   wide_networks_read_as_one();
