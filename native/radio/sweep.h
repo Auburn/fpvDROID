@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#include "digital.h"
+
 namespace kp {
 
 // A sweep over lo..hi, pass after pass. A pass retunes every kStep, the centres on the 5 MHz grid where the chip
@@ -48,8 +50,9 @@ private:
 
 // The band picture over a span, as Radio::spectrum_json gives it (the format is there): db from BandMap::get, its
 // first bin at first_hz, bin_hz apart; at_hz the step being taken now (0: none), at_width_hz what a step covers;
-// sweeps: passes finished. The carriers in it are found here (find_carriers).
+// sweeps: passes finished. The carriers in it are found here (find_carriers), each with the kind of digital signal
+// the sweep judged it to be, if any (digital: DigitalMap::all(), matched by digital_for).
 std::string band_json(const std::vector<float> &db, double first_hz, double bin_hz, double at_hz, double at_width_hz,
-                      uint64_t sweeps);
+                      uint64_t sweeps, const std::vector<DigitalSignal> &digital = {});
 
 }  // namespace kp
