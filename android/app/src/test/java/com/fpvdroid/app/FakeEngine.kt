@@ -226,7 +226,8 @@ class FakeEngine : Engine {
                 }
             })
             put("carriers", JSONArray().apply {
-                if (isOpen) for (c in carriers) put(JSONObject().put("mhz", c.mhz).put("width", c.widthMhz).put("snr", c.snrDb.toDouble()))
+                if (isOpen) for (c in carriers) put(JSONObject().put("mhz", c.mhz).put("width", c.widthMhz).put("snr", c.snrDb.toDouble())
+                    .apply { c.kind?.let { put("kind", it.code) } })
             })
         }.toString()
     }

@@ -3,8 +3,28 @@ package com.fpvdroid.app
 import org.json.JSONException
 import org.json.JSONObject
 
-/** Something on the air: a hump in the spectrum (any kind of transmitter, not only analog video). */
-data class Carrier(val mhz: Double, val widthMhz: Double, val snrDb: Float)
+/**
+ * Something on the air: a hump in the spectrum (any kind of transmitter, not only analog video). [kind]: the digital
+ * system the radio has judged it to be by itself, or null (not judged, or analog).
+ */
+data class Carrier(val mhz: Double, val widthMhz: Double, val snrDb: Float, val kind: SignalKind? = null)
+
+/**
+ * A digital system the radio tells apart by itself while it sweeps (Radio::spectrum_json's "kind", native/dsp/digital.h):
+ * DJI by its 2.5 ms TDD frame, HDZero by a flat block sent without a break on one of its channels, 27 MHz wide or
+ * 17 in its narrow mode, and any other flat, wide one as plain digital. [label]: what the Spectrum tab calls it.
+ */
+enum class SignalKind(val code: String, val label: String) {
+    DJI("dji", "DJI"),
+    HDZERO("hdzero", "HDZero"),
+    HDZERO_NARROW("hdzero_narrow", "HDZero narrow"),
+    DIGITAL("digital", "Digital");
+
+    companion object {
+        /** The kind the radio named, or null (none, or one this app does not know). */
+        fun of(code: String?): SignalKind? = entries.firstOrNull { it.code == code }
+    }
+}
 
 /**
  * What the radio has seen of the bands (native/radio/radio.h, Radio::spectrum_json): [db] is dB over the noise floor
@@ -32,7 +52,8 @@ class Spectrum(
                     for (i in 0 until cs.length()) {
                         val c = cs.optJSONObject(i) ?: continue
                         val mhz = c.optDouble("mhz", Double.NaN)
-                        if (mhz.isFinite() && mhz > 0) add(Carrier(mhz, c.optDouble("width", 0.0), c.optDouble("snr", 0.0).toFloat()))
+                        if (mhz.isFinite() && mhz > 0) add(Carrier(mhz, c.optDouble("width", 0.0), c.optDouble("snr", 0.0).toFloat(),
+                            SignalKind.of(c.optString("kind"))))
                     }
                 },
                 atMhz = o.optDouble("at_mhz", 0.0).let { if (it.isFinite()) it else 0.0 },

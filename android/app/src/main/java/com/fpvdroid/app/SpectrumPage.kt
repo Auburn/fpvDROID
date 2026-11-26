@@ -99,7 +99,10 @@ internal class SpectrumPage(
         on.onTune()
     }
 
-    /** The chips under the graph: what is on the air, left to right as in the graph, each named where it puts it. */
+    /**
+     * The chips under the graph: what is on the air, left to right as in the graph, each named where it puts it (after
+     * the digital system the radio judged it to be, if any: [Spot.name]).
+     */
     private fun showChips() {
         val chips = graph.onAir.map { it.spot.name to barsFor(it.carrier.snrDb).coerceAtLeast(1) }
         if (chips == chipsShown) return

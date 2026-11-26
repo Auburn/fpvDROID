@@ -265,6 +265,19 @@ class MenuScreenshotTest {
     fun spectrumHdzero() = shoot("spectrum_hdzero", Tab.SPECTRUM, sweeping.copy(spectrum = spectrumOf(*mixed, at = 5700.0)),
         2400, 1080, { tuned(); spectrumSystem = ChannelSystem.HDZERO })
 
+    /** The same field as the radio judges it by itself: DJI by its frame, HDZero in its narrow mode by its flat block. */
+    private val judged = arrayOf(Carrier(5658.4, 11.0, 18f), Carrier(5735.1, 19.0, 26f, SignalKind.DJI),
+        Carrier(5768.6, 19.0, 22f, SignalKind.DJI), Carrier(5800.3, 17.0, 29f, SignalKind.HDZERO_NARROW),
+        Carrier(5839.2, 19.0, 15f, SignalKind.DJI), Carrier(5880.4, 17.0, 24f, SignalKind.HDZERO_NARROW))
+
+    @Test @Config(qualifiers = PHONE)
+    fun spectrumJudged() = shoot("spectrum_judged", Tab.SPECTRUM, sweeping.copy(spectrum = spectrumOf(*judged, at = 5700.0)),
+        2400, 1080, tuned)
+
+    @Test @Config(qualifiers = PHONE)
+    fun spectrumJudgedHdzero() = shoot("spectrum_judged_hdzero", Tab.SPECTRUM,
+        sweeping.copy(spectrum = spectrumOf(*judged, at = 5700.0)), 2400, 1080, { tuned(); spectrumSystem = ChannelSystem.HDZERO })
+
     @Test @Config(qualifiers = SMALL)
     fun smallSpectrumHdzero() = shoot("small_spectrum_hdzero", Tab.SPECTRUM, sweeping.copy(spectrum = spectrumOf(*mixed)),
         1600, 720, { tuned(); spectrumSystem = ChannelSystem.HDZERO })

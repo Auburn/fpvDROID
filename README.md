@@ -43,6 +43,24 @@ it, a picture that has stopped), full size or in the preview, colour bars show t
   too, since DJI numbers its wide modes apart: 30 MHz or wider is V1/V2 at 50 Mbps (its CH1–CH3 are the 25 Mbps
   CH2, CH4 and CH6, per Oscar Liang's chart; DJI publishes only the 25 Mbps table) or the O3's or O4's widest
   channel. Only analog video can be watched, so picking a digital channel tunes nothing.
+
+  The sweep also tells digital signals apart by itself, whichever channels are marked, from each retune's 12 ms
+  of samples, and the signal's chip says so before its channel's name ("DJI R2", "HDZero R4", "DJI CH3" with
+  DJI's channels marked): **DJI** by its TDD frame of 2.5 ms (it sends in bursts, with the goggles' uplink in the
+  gaps), **HDZero** by a flat block that is sent without a break, 22–31 MHz wide and within 2 MHz of one of its
+  channels (R1–R8, E1, F1, F2, F4, L1–L8), **HDZero narrow** the same 14–22 MHz wide (its 17 MHz mode), and
+  **Digital** any other flat block 12–31 MHz wide that is there all the time or in a regular frame of its own.
+  Analog video (its spectrum is not flat), Wi-Fi (bursts with no rhythm), and anything narrower than 12 MHz
+  (DJI's 10 MHz channels) or wider than 31 (DJI's 40 and 60 MHz modes: wider than a retune can see) are not
+  judged and keep their channel's name alone. A chip that says DJI, HDZero or Digital tunes nothing either. A
+  signal does not always fit in one retune's 33 MHz: one cut between two neighbouring retunes is put back
+  together, and since the two grids of passes cut a signal in different places, it may be judged on one of them
+  only. So a verdict is kept until the passes over it have not found it again for 8 s, and it stays with the
+  rest of the picture when the sweep stops. The detector comes from FPVDesktopWiFiReceiver. Its DJI frame was
+  measured there on recordings of a real DJI transmitter (20 MHz on R2); its HDZero side has been tested only on
+  synthetic signals (continuous OFDM 27 and 17 MHz wide, as Divimath describes HDZero), so a real HDZero may go
+  unnamed, or be named Digital, until it has been tried. fpvDROID's own tests are synthetic too: none of it has
+  been tried yet with the adapter on a real DJI or HDZero transmitter.
 - **View** — aspect ratio (4:3, or 16:9 for a widescreen camera), scaling (**Fit** the whole picture,
   **Stretch** it to the screen, or **Crop** it to fill the screen), size (50–150 %), and **Goggles**: the
   picture twice, side by side, for goggles that hold a phone. Goggles have a size of their own (in place of
@@ -106,19 +124,19 @@ On screen: the OSD pill (channel, frequency, SNR, decode → screen latency) can
 
 - `native/dsp/` — video decoder (`video.cpp`: FM discriminator, sync, fields; the luma and colour filters,
   line drawing, sparkle repair and deinterlacing in files of their own), spectrum + pilot finding, the band picture the Spectrum tab draws
-  (`BandMap`). No hardware.
+  (`BandMap`), DJI, HDZero and other digital signals told apart (`digital.cpp`). No hardware.
 - `native/radio/` — the adapter (wifi-sdr `Receiver`) + a DSP thread: scan, watch, sweep, stream test; antenna
   combining (`combine.cpp`); when 40 MS/s gives way to 20 (`fallback_policy.cpp`); torn frames kept off the
   screen (`frame_gate.cpp`); the retunes of a scan or sweep and each one's capture (`steps.cpp`); the sweep's
   passes and the band picture as the app reads it (`sweep.cpp`).
-- `native/tests/` — unit tests of the radio's rules, the decoder's sync and the Spectrum tab's band picture, no
-  hardware (`ctest`; `scripts/build-desktop.sh` runs them).
+- `native/tests/` — unit tests of the radio's rules, the decoder's sync, the Spectrum tab's band picture and its
+  telling digital signals apart, no hardware (`ctest`; `scripts/build-desktop.sh` runs them).
 - `native/render/` — the picture on screen (OpenGL ES 3): layout, side-by-side view, the menu's preview,
   the NO SIGNAL card.
 - `native/jni/` — the app's native side; a render thread draws each frame on the video Surface as it is decoded.
 - `native/tools/` — desktop: `kp_replay` (recordings), `kp_live` (adapter on this PC), `kp_sim` (kp_live
-  against a recording played back as a tunable adapter), `kp_gen` (a synthetic transmitter: recordings to
-  test with), `kp_render` (the app's renderer off screen, to a picture file).
+  against a recording played back as a tunable adapter), `kp_gen` (a synthetic transmitter, analog or digital:
+  recordings to test with), `kp_render` (the app's renderer off screen, to a picture file).
 - `android/` — the app (Kotlin, plain Views): `MainActivity` (the screen), `MenuView` + `Widgets` (the menu),
   `UsbLink` (the adapter's life: permission, USB 3 switch, open, watch over, reopen), `Settings`.
 - `patches/` — Play RX's changes to wifi-sdr and devourer, applied to the submodules by the build
@@ -189,6 +207,9 @@ build/desktop/kp_replay rec/r4.cs16 --luma-comb --adaptive --smooth --repair   #
 KP_SIM_FILE=rec/r4.cs16 build/desktop/kp_sim --scan --offset-tune --diversity   # the radio's switches, no hardware
 KP_SIM_FILE=rec/r4.cs16 KP_SIM_LEAD_NS=146 build/desktop/kp_sim --watch 5769 --diversity   # path B 146 ns ahead of A: the combiner measures and undoes it
 KP_SIM_FILE=rec/r4.cs16 build/desktop/kp_sim --sweep 5635 5955   # the Spectrum tab's sweep: its band picture every second
+build/desktop/kp_gen rec/dji --digital dji --mhz 5770 --centre 5770   # a digital one: hdzero, narrow, dji, dji_idle, wifi, ofdm
+KP_SIM_FILE=rec/dji.cs16 build/desktop/kp_sim --sweep 5635 5955   # ... its carrier in the band picture with "kind":"dji"
+build/desktop/kp_digital_tests --time   # what telling digital signals apart costs a sweep step, against its spectrum
 KP_SIM_FILE=rec/r4.cs16 KP_SIM_DROP_EVERY=700 build/desktop/kp_sim --watch 5769   # a link that loses every 700th block: falls back to 20 MS/s (after the 10 s grace)
 KP_SIM_FILE=rec/r4.cs16 KP_SIM_RESTART_EVERY_MS=1500 build/desktop/kp_sim --watch 5769   # a stream that restarts every 1.5 s: torn frames hidden, then 20 MS/s
 KP_SIM_FILE=rec/r4.cs16 build/desktop/kp_sim --watch 5769 --msps 20               # watch at 20 MS/s (kp_live takes --msps too)
