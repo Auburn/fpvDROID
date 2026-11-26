@@ -23,7 +23,7 @@ void Sweep::start(double lo_hz, double hi_hz) {
 }
 
 std::string band_json(const std::vector<float> &db, double first_hz, double bin_hz, double at_hz, double at_width_hz,
-                      uint64_t sweeps) {
+                      uint64_t sweeps, const std::vector<WifiNet> &wifi) {
   const auto carriers = find_carriers(db, first_hz, bin_hz);
   std::ostringstream o;
   o.setf(std::ios::fixed);
@@ -39,6 +39,12 @@ std::string band_json(const std::vector<float> &db, double first_hz, double bin_
   for (size_t i = 0; i < carriers.size(); i++) {
     const auto &c = carriers[i];
     o << (i ? "," : "") << "{\"mhz\":" << c.mhz << ",\"width\":" << c.width_mhz << ",\"snr\":" << c.snr_db << "}";
+  }
+  o << "],\"wifi\":[";
+  for (size_t i = 0; i < wifi.size(); i++) {
+    const auto &w = wifi[i];
+    o << (i ? "," : "") << "{\"lo_mhz\":" << w.lo_mhz << ",\"hi_mhz\":" << w.hi_mhz << ",\"label\":\"" << w.label()
+      << "\",\"busy\":" << (w.busy ? "true" : "false") << "}";
   }
   o << "]}";
   return o.str();

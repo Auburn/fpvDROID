@@ -481,6 +481,7 @@ void Radio::begin_sweep() {
     hi = _sweep.hi();
     plan = _sweep.pass();
     _band.forget(lo, hi, now_ms() - Sweep::kStaleMs);
+    _wifi.forget(lo, hi, now_ms() - Sweep::kStaleMs);
   }
   KP_LOGI("radio: sweep %.0f..%.0f MHz, %zu steps a pass", lo / 1e6, hi / 1e6, plan.size());
   start_steps(std::move(plan));
@@ -792,12 +793,24 @@ void Radio::handle_sweep(Bank &b) {
     }
     start_steps(std::move(plan));
   }
-  add_spectrum(spectrum_db(_steps.iq()), _steps.centre_hz());  // the step just taken, while the chip retunes
+  // the step just taken, while the chip retunes: its spectrum, then its bursts against the picture with it in
+  const std::vector<cf> x = _steps.iq();
+  const double centre = _steps.centre_hz();
+  add_spectrum(spectrum_db(x), centre);
+  add_bursts(measure_bursts(x.data(), x.size(), kFs, centre, Sweep::kStep / 2, kEdge));
 }
 
 void Radio::add_spectrum(const std::vector<float> &db, double centre_hz) {
   std::lock_guard<std::mutex> l(_m);
   _band.add(db, kFs, centre_hz, kEdge, now_ms());
+}
+
+// A sweep step's bursts: what the band picture has on the air over the span tells pilots from networks.
+void Radio::add_bursts(const BurstStep &s) {
+  std::lock_guard<std::mutex> l(_m);
+  double first = 0;
+  const auto db = _band.get(_sweep.lo(), _sweep.hi(), &first);
+  _wifi.add(s, _sweep.lo(), _sweep.hi(), find_carriers(db, first, _band.bin_hz()), now_ms());
 }
 
 void Radio::scan_step_done() {
@@ -966,14 +979,16 @@ std::string Radio::spectrum_json(double lo_hz, double hi_hz) {
   double first = 0, at = 0;
   std::vector<float> db;
   uint64_t sweeps;
+  std::vector<WifiNet> wifi;
   {
     std::lock_guard<std::mutex> l(_m);
     db = _band.get(lo_hz, hi_hz, &first);
     if (_mode == Mode::Sweep || _mode == Mode::Scan) at = _req_hz;
     sweeps = _mode == Mode::Sweep ? _sweep.passes() : 0;
+    wifi = _wifi.networks(lo_hz, hi_hz, now_ms());
   }
   // the bin size is fixed: no lock needed
-  return band_json(db, first, _band.bin_hz(), at, 2 * kEdge, sweeps);
+  return band_json(db, first, _band.bin_hz(), at, 2 * kEdge, sweeps, wifi);
 }
 
 }  // namespace kp

@@ -69,7 +69,8 @@ public:
   void watch(double hz);
   void stream_test(int rate_sel, double seconds);
   // Sweep lo..hi at 40 MS/s until the next mode call (sweep.h: a retune every 30 MHz), each step's spectrum into the
-  // band picture (spectrum_json). One pass over 300 MHz is 11 or 12 retunes. Scans add their steps to it too.
+  // band picture (spectrum_json). One pass over 300 MHz is 11 or 12 retunes. Scans add their steps to it too. Each step
+  // of a sweep also says what came and went in its 12 ms, from which the Wi-Fi networks are found (wifi.h).
   void sweep(double lo_hz, double hi_hz);
   void idle();
   // The three setters below only take effect at the next watch() (the next tune). Each returns true when it
@@ -115,7 +116,9 @@ public:
   // The band picture over lo..hi, for the spectrum page (polled while it is shown):
   //   {"first_mhz", "bin_mhz", "db": [dB over the noise floor, null where nothing has been seen],
   //    "carriers": [{"mhz", "width", "snr"}], "at_mhz": the step being taken now (0: not sweeping or scanning),
-  //    "at_width_mhz", "sweeps": passes finished since sweep() (0 while the first is under way)}
+  //    "at_width_mhz", "sweeps": passes finished since sweep() (0 while the first is under way),
+  //    "wifi": [{"lo_mhz", "hi_mhz", "label": "Wi-Fi 149" or "Wi-Fi 100-112" (an en dash), "busy": seen in use}]:
+  //    the Wi-Fi networks seen by sweeps in the last 5 minutes that reach into lo..hi (WifiWatch)}
   std::string spectrum_json(double lo_hz, double hi_hz);
 
 private:
@@ -160,6 +163,7 @@ private:
   void handle_test(Bank &b);
   void scan_step_done();
   void add_spectrum(const std::vector<float> &db, double centre_hz);
+  void add_bursts(const BurstStep &s);
   static void unpack(const Bank &b, Path path, std::vector<cf> &out);
   void note_faults(const wsdr::RxStatus &st);  // log each stream restart the receiver has made since the last call
 
@@ -190,6 +194,7 @@ private:
   std::vector<Pilot> _pilots;
   BandMap _band;  // what scans and sweeps have seen (Sweep::kBandLo..kBandHi)
   Sweep _sweep;   // the span and the passes of the sweep asked for last
+  WifiWatch _wifi;  // the Wi-Fi networks sweeps have seen
   bool _superspeed = false, _open = false;
   std::string _chip;
 
