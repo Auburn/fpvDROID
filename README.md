@@ -31,8 +31,8 @@ it, a picture that has stopped), full size or in the preview, colour bars show t
   optional: it sweeps every band, marks the channels with video on them and tunes the strongest it found (or the
   one you were on, if it found that one again). It retunes every 20 MHz and sees 33 MHz at each, so a transmitter
   close by (15–20 MHz wide) may never be whole in one: F1–F8 and R7 sit halfway between two retunes, E8 past the
-  highest. Such a transmitter gets a retune of its own (up to eight a scan, each one more in the count under
-  Scan). The channel is remembered for the next start.
+  highest. Such a transmitter gets a retune of its own as soon as the scan knows where it is (up to eight a scan,
+  each one more in the count under Scan). The channel is remembered for the next start.
 - **Spectrum** — a spectrum analyser: the band swept over and over (5635–5955 MHz, or 5340–5640 for Lowband),
   each channel of the chosen band marked under it, the ones with something on the air lit and listed (any
   transmitter, analog or not, at least 2 MHz wide and 6 dB over the noise). A pass takes about two seconds

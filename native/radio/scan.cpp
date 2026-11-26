@@ -75,7 +75,8 @@ std::vector<ScanPlan::Extra> ScanPlan::step(double centre_hz, const std::vector<
     _owed--;
     return out;
   }
-  const bool next = _at + 1 < _plan.size();  // the plan has a step after this one, which may see more of what it cuts
+  // only the plan's next step kStep up can see more of what this one cuts: past the last step of a band, none does
+  const bool next = _at + 1 < _plan.size() && std::fabs(_plan[_at + 1] - _plan[_at] - kStep) < 1;
   _at++;
   std::vector<Part> now;
   for (const auto &c : cut) now.push_back(Part{centre_hz + c.f0_hz, centre_hz + c.f1_hz, c.cut_hi, c.snr_db});
@@ -85,9 +86,9 @@ std::vector<ScanPlan::Extra> ScanPlan::step(double centre_hz, const std::vector<
     size_t i = 0;
     while (i < now.size() && (used[i] || overlap(p.f0, p.f1, now[i].f0, now[i].f1) < kOverlap)) i++;
     if (i == now.size()) {
-      // not seen here: the plan has gone on in another band, or cut by the plan's step before at its bottom edge, it
-      // ends below this one (or it came and went, or it is wider than this step, which then took all of it for the
-      // floor: a wasted step, kMax at most, rather than a VTX missed because a crowded step lost it the same way)
+      // not seen here: cut by the plan's step before at its bottom edge, it ends below this one (or it came and
+      // went, or it is wider than this step, which then took all of it for the floor: a wasted step, kMax at most,
+      // rather than a VTX missed because a crowded step lost it the same way)
       if (p.snr_db >= kMinSnrDb) give(one_end(p), out);
       continue;
     }

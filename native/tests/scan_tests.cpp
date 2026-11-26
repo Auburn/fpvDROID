@@ -312,12 +312,13 @@ static void no_extra_step_for_a_signal_seen_whole() {
   CHECK(sc.extra.empty() && seen_whole(sc, 5732));
 }
 
-// Cut by the plan's last step, a signal gets its step at once, kReach inside the end seen. One that the next step does
-// not see at all gets its step after that one: E8 (5936-5954), cut by the top edge of the highest step (5930), after
-// which the plan goes on to the low band; L1 at 19 MHz wide (5352.5-5371.5), cut by the first step of a band.
+// Cut by the last step of a band, a signal gets its step at once, kReach inside the end seen: E8 (5936-5954), cut by
+// the top edge of the highest step (5930), before the plan goes on to the low band; and at the plan's last step. One
+// cut by the first step of a band, which the next does not see at all, gets its step after that one: L1 at 19 MHz
+// wide (5352.5-5371.5).
 static void extra_step_from_the_one_end_seen() {
   Scan sc = scan_over({{5936, 5954}});
-  CHECK(after(sc, 5930) == 5370 && after(sc, 5370) == 5950 && after(sc, 5950) == 5390);
+  CHECK(after(sc, 5930) == 5950 && after(sc, 5950) == 5370);
   CHECK(sc.extra.size() == 1);
   if (sc.extra.size() == 1) CHECK(sc.extra[0].hz == 5948e6 && sc.extra[0].lo_hz == 5936e6 && sc.extra[0].hi_hz == 0);
   CHECK(seen_whole(sc, 5945));

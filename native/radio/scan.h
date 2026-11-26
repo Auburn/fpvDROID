@@ -18,13 +18,13 @@ namespace kp {
 // signal that a step's edge cuts, at most 8 a scan and none for one seen whole, is FPVDesktopWiFiReceiver's
 // (github.com/Pwn3dP4nd4/fpvdesktopwifireceiver, GPL-2.0: Radio::add_cut_steps).
 //
-// Unlike there, what a step sees cut first waits for the next step of the plan. It may see the signal whole after all
-// (no extra step), or its other end, cut by its other edge (then both ends are known, and the extra step is centred
-// between them; a signal wider than kHumpMaxHz gets none, as no step would take it whole). One cut at the plan's last
-// step gets its step at once, from the one end seen; one that the next step does not see at all (the plan goes on in
-// another band) gets it then. A signal seen whole in any step, or inside an extra step already given, gets none; at
-// most kMax a scan, so that a band full of Wi-Fi does not make a scan much longer. The extra steps are taken right
-// after the step that gave them, and what they see cut asks for nothing more.
+// Unlike there, what a step sees cut first waits for the next step of the plan, when that one is kStep higher. It may
+// see the signal whole after all (no extra step), or its other end, cut by its other edge (then both ends are known,
+// and the extra step is centred between them; a signal wider than kHumpMaxHz gets none, as no step would take it
+// whole). One cut at the last step of a band (the plan goes on in another, or ends) gets its step at once, from the one
+// end seen; one that the next step does not see at all gets it then. A signal seen whole in any step, or inside an
+// extra step already given, gets none; at most kMax a scan, so that a band full of Wi-Fi does not make a scan much
+// longer. The extra steps are taken right after the step that gave them, and what they see cut asks for nothing more.
 //
 // The DSP thread's alone; plain values in and out, so that it is tested without an adapter.
 class ScanPlan {
