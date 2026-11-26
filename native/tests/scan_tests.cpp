@@ -117,6 +117,22 @@ static void pilots_the_chosen_channel_stays() {
   CHECK(mhz_of(l) == Mhz({5731.4}));
 }
 
+// A copy kept because it is on the chosen channel hides nothing either: what else is listed is what would be with no
+// channel chosen. A third pilot near the copy but kCopyMhz or more from the VTX stays, in the copy's step or a later
+// one.
+static void pilots_a_chosen_copy_hides_nothing() {
+  Pilots l;
+  l.add({seen(5731.4, 35), seen(5743.4, 32), seen(5755, 29)}, 0);
+  CHECK(mhz_of(l) == Mhz({5731.4, 5755}));
+  l.begin_scan();
+  CHECK(l.add({seen(5731.4, 35), seen(5743.4, 32), seen(5755, 29)}, 5743.4).empty());
+  CHECK(mhz_of(l) == Mhz({5731.4, 5743.4, 5755}));
+  l.begin_scan();
+  l.add({seen(5731.4, 35), seen(5743.4, 32)}, 5743.4);
+  CHECK(l.add({seen(5755, 29)}, 5743.4).empty());
+  CHECK(mhz_of(l) == Mhz({5731.4, 5743.4, 5755}));
+}
+
 // ----------------------------------------------------------------------------------------- after the scan
 // The channel watched before (or asked for) if the scan saw it, within kSameMhz, however weak; of several, the last in
 // the list (the weakest), not the nearest.
@@ -168,6 +184,7 @@ int main() {
   pilots_close_together();
   pilots_a_copy_hides_nothing();
   pilots_the_chosen_channel_stays();
+  pilots_a_chosen_copy_hides_nothing();
   after_scan_the_channel_seen();
   after_scan_the_strongest_else_the_channel();
   after_scan_a_copy();

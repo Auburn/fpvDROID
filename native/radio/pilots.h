@@ -25,10 +25,10 @@ struct PilotCopy {
 // add() takes each step's pilots. One within kSameMhz of a listed pilot is that pilot seen again (the steps overlap):
 // it takes the listed one's place unless it is more than kWeakerDb weaker. Then a pilot within kCopyMhz of one at least
 // kCopyDb stronger is taken as that one's copy (a strong analog VTX shows one beside itself: README) and leaves the
-// list. They are weighed strongest first, each against the pilots kept before it, so a copy hides nothing, and one
-// seen before its VTX is listed until the VTX is seen. The pilot within kSameMhz of keep_mhz (the channel the user is
-// on, or chose; 0: none) is never taken as a copy: whether it is one cannot be told for sure, and a scan does not move
-// the user to another VTX.
+// list. They are weighed strongest first, each against the pilots kept before it that are not copies, so a copy hides
+// nothing, and one seen before its VTX is listed until the VTX is seen. The pilot within kSameMhz of keep_mhz (the
+// channel the user is on, or chose; 0: none) is never taken as a copy: whether it is one cannot be told for sure, and
+// a scan does not move the user to another VTX. Kept so beside its VTX, it hides nothing either.
 //
 // Not thread-safe: the Radio keeps it under its lock.
 class Pilots {

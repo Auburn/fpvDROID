@@ -22,17 +22,23 @@ void Pilots::merge(const std::vector<Pilot> &found) {
 }
 
 std::vector<PilotCopy> Pilots::drop_copies(double keep_mhz) {
-  std::vector<Pilot> kept;
+  std::vector<Pilot> out, keepers;  // keepers: those kept that are not copies, which the weaker are weighed against
   std::vector<PilotCopy> copies;
   for (const auto &p : _list) {
-    const auto of = std::find_if(kept.begin(), kept.end(), [&](const Pilot &k) {
+    const auto of = std::find_if(keepers.begin(), keepers.end(), [&](const Pilot &k) {
       return std::fabs(k.mhz - p.mhz) < kCopyMhz && k.snr_db >= p.snr_db + kCopyDb;
     });
     const bool chosen = keep_mhz > 0 && std::fabs(p.mhz - keep_mhz) < kSameMhz;
-    if (of != kept.end() && !chosen) copies.push_back({p.mhz, of->mhz});
-    else kept.push_back(p);
+    if (of == keepers.end()) {
+      out.push_back(p);
+      keepers.push_back(p);
+    } else if (chosen) {
+      out.push_back(p);  // listed, but hides nothing
+    } else {
+      copies.push_back({p.mhz, of->mhz});
+    }
   }
-  _list.swap(kept);
+  _list.swap(out);
   return copies;
 }
 
