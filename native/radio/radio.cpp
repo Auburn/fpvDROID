@@ -432,7 +432,7 @@ void Radio::dsp_loop() {
       if (++_status_ticks % 5 == 0 && _mode == Mode::Watch)
         KP_LOGI("status: watch %.1f MHz, cpu demod %.0f%% decode %.0f%%, dropped stream %llu usb %llu decode %llu, "
                 "restarts %llu, unwedged %llu, %s %s lock %.2f fps %.0f, acq %llu lost %llu rephase %llu, "
-                "level jumps %llu, torn frames hidden %llu",
+                "level jumps %llu, fields coasted %llu put right %llu, torn frames hidden %llu",
                 _watch_hz / 1e6,
                 _load * 100, _dload * 100, (unsigned long long)rs.mid_drops,
                 (unsigned long long)_dropped.load(), (unsigned long long)_decq.dropped(),
@@ -440,6 +440,7 @@ void Radio::dsp_loop() {
                 _vstats.colour ? "colour" : "grey", _vstats.lock_recent, _fps,
                 (unsigned long long)_vstats.acquisitions, (unsigned long long)_vstats.losses,
                 (unsigned long long)_vstats.rephases, (unsigned long long)_vstats.level_jumps,
+                (unsigned long long)_vstats.fields_coasted, (unsigned long long)_vstats.starts_put_right,
                 (unsigned long long)_gate.hidden());
     }
   }
@@ -513,7 +514,10 @@ void Radio::note_faults(const wsdr::RxStatus &st) {
 // A new carrier or rate: a new decoder. No weights or noise estimates from the last one either, and the paths'
 // time offset is measured again (it is a number of samples, so it depends on the rate).
 void Radio::new_front_end(const Bank &b) {
-  _fe = std::make_shared<FrontEnd>(b.fs, b.shift_hz, _gate.sink(), DecoderOpts{}, _picture.load());
+  DecoderOpts o;
+  o.follow_levels = _follow_levels.load(std::memory_order_relaxed);
+  o.flywheel = _flywheel.load(std::memory_order_relaxed);
+  _fe = std::make_shared<FrontEnd>(b.fs, b.shift_hz, _gate.sink(), o, _picture.load());
   _fe_fs = b.fs;
   _fe_shift = b.shift_hz;
   _combiner.reset(b.fs);

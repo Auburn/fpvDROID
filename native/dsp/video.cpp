@@ -55,6 +55,8 @@ public:
     s.std_name = std_->name;
     s.rephases = rephases;
     s.level_jumps = level_jumps;
+    s.fields_coasted = fields_coasted;
+    s.starts_put_right = starts_put_right;
     s.colour = colour_on;
     s.burst_err = c_err;
     s.clicks_repaired = spark.clicks_repaired;
@@ -163,6 +165,24 @@ private:
   bool prev_line_vsync = false;
   bool start_due = false, start_odd = false;  // a field start that waits for the lines after it (close_line) ...
   int64_t start_line = 0;                     // ... and its first line
+  // fpvDROID: the vertical flywheel. Lines freewheel when their hsync is not found; fields did not: without its
+  // vertical sync a field was not begun, and its lines, found or not, went undrawn (a weak signal that kept 86 %
+  // of its hsyncs showed a third of its pictures). The fields come at a fixed rhythm, though: so many lines from
+  // an odd field's start to the next field's, so many from an even one's, and which kind follows. The standard's
+  // interlace is taken as read from the first start found; a source with another rhythm shows it, and that is
+  // then learnt (seen twice running). With a rhythm, a field whose vertical sync has not shown kNear lines after
+  // it was due is begun where it was due, and a start found up to kNear lines late or as the other kind (a
+  // vertical sync damaged at its start) is put there. A start found early or far off is put right or passed over
+  // too, but kOff of those in a row, with none where the rhythm said, show that the source has another rhythm. A
+  // jump in the stream (re-phase) loses the count of lines: the next start found is taken as it is.
+  static constexpr int kNear = 2, kOff = 3;
+  int64_t fw_len[2] = {0, 0};  // lines from a field's start to the next field's, by its kind (0 odd, 1 even) ...
+  int fw_next[2] = {0, 0};     // ... and the kind of that one
+  int fw_seen[2] = {0, 0};     // times running that this has been seen (2: believed)
+  int fw_off = 0;              // starts found in a row that were not where the rhythm said
+  bool fw_coasted = false;     // the field in hand was begun by the flywheel
+  bool fw_plain = false;       // the source has shown a rhythm that is not the standard's
+  uint64_t fields_coasted = 0, starts_put_right = 0;
   std::vector<float> acq;
   size_t acq_n = 0;
   bool acquiring = true;
@@ -260,7 +280,7 @@ private:
       const double ls = line_start;
       miss_run++;
       count_line(false);
-      line_moved = levels_moved(ls);
+      line_moved = o.follow_levels && levels_moved(ls);
       render_line(ls, false);
       close_line(ls + T);
       check_lost();
@@ -312,6 +332,8 @@ private:
 
   void set_std(const VideoStd &s) {
     std_ = &s;
+    forget_fields();
+    fw_plain = false;
     T = s.T_us * 1e-6 * fs;
     fieldA.assign(static_cast<size_t>(o.width) * s.active * 4, 0);
     fieldB = fieldA;
@@ -379,6 +401,8 @@ private:
     jump_run = jump_gap = fast_lines = 0;
     line_moved = false;
     start_due = false;
+    forget_fields();
+    fw_plain = false;
     miss_run = stray_run = 0;
     last_stray = -1;
     hs_len = 0;
@@ -831,7 +855,7 @@ private:
     line_moved = false;
     if (start_due && !moved) {
       start_due = false;
-      start_field(start_odd, start_line);
+      found_start(start_odd, start_line);
     } else if (vs && !moved && !start_due && !prev_line_vsync && line_has_longrun) {
       // field start: phase of the broad-pulse start inside this line
       double ph = (static_cast<double>(line_longrun_start) - line_start) / T;
@@ -839,6 +863,13 @@ private:
       start_due = true;
       start_odd = std::fabs(ph) < 0.25;
       start_line = static_cast<int64_t>(line_idx);
+    }
+    // the flywheel: no vertical sync where the field in hand should end, and none waited on
+    if (!start_due && cur_field >= 0 && believed(cur_field) &&
+        static_cast<int64_t>(line_idx) >= field_line0 + fw_len[cur_field] + kNear) {
+      const int kind = cur_field;
+      fields_coasted++;
+      start_field(fw_next[kind] == 0, field_line0 + fw_len[kind], true);
     }
     prev_line_vsync = vs;
     line_idx++;
@@ -848,8 +879,80 @@ private:
     refresh_switches();
   }
 
+  bool believed(int kind) const { return o.flywheel && fw_seen[kind] >= 2; }
+  void forget_fields() {
+    fw_seen[0] = fw_seen[1] = 0;
+    fw_off = 0;
+  }
+
+  // A field start has been found, its first line s: the field begins there, or where the flywheel says, or it is
+  // passed over (see fw_len).
+  void found_start(bool odd, int64_t s) {
+    const int kind = cur_field, next = odd ? 0 : 1;
+    if (!o.flywheel) return start_field(odd, s);
+    // the standard's rhythm: an odd field of so many lines, then an even one of one more
+    const int64_t half = std_ == &kPal ? 312 : 262;
+    if (kind < 0 || !believed(kind)) {
+      // (no field is begun by the flywheel without a rhythm: the field in hand is the last one found)
+      const int64_t len = kind < 0 ? 0 : s - field_line0;
+      const int64_t n = std::llround(static_cast<double>(len) / (static_cast<double>(half) + 0.5));  // fields
+      bool standard = !fw_plain;
+      if (!standard && kind >= 0) {  // does the standard's rhythm lead from the last start found to this one?
+        int64_t at = 0;
+        int k = kind;
+        for (int i = 0; i < 16 && at < len; i++) {
+          at += half + k;
+          k = 1 - k;
+        }
+        standard = at == len && k == next;
+      }
+      if (standard) {
+        // the standard's rhythm: taken as read from the first start found, until the source shows another
+        fw_plain = false;
+        for (int k = 0; k < 2; k++) {
+          fw_len[k] = half + k;
+          fw_next[k] = 1 - k;
+          fw_seen[k] = 2;
+        }
+      } else if (kind >= 0 && n >= 1 && n <= 16 && (n == 1 || next == kind) && len % n == 0 &&
+                 std::llabs(len / n - half) <= 3) {
+        // another, seen twice running: the next field's start found (about a field on), or a later one of the same
+        // kind a whole number of fields on, which says how long each is where the fields are all alike
+        if (fw_seen[kind] > 0 && fw_len[kind] == len / n && fw_next[kind] == next) {
+          fw_seen[kind] = 2;
+        } else {
+          fw_len[kind] = len / n;
+          fw_next[kind] = next;
+          fw_seen[kind] = 1;
+        }
+      }
+      return start_field(odd, s);
+    }
+    const int64_t due = field_line0 + fw_len[kind];
+    const bool due_odd = fw_next[kind] == 0;
+    if (s == due && odd == due_odd) {
+      fw_off = 0;
+      start_field(odd, s);
+    } else if (s >= due && s <= due + kNear) {
+      // late by a line or two, or as the other kind: what a vertical sync damaged at its start looks like
+      starts_put_right++;
+      start_field(due_odd, due);
+    } else if (++fw_off >= kOff) {
+      // early, or far off, kOff times running: the source's rhythm is another
+      KP_LOGD("video: the fields' rhythm is forgotten (a start %lld lines from where it was due)",
+              static_cast<long long>(s - due));
+      forget_fields();
+      fw_plain = true;
+      start_field(odd, s);
+    } else if (s >= due - kNear && s < due) {
+      starts_put_right++;
+      start_field(due_odd, due);
+    }
+  }
+
   // A field begins, at line line0 (the first of its vertical sync): the one before it is done.
-  void start_field(bool odd, int64_t line0) {
+  void start_field(bool odd, int64_t line0, bool coasted = false) {
+    fw_coasted = coasted;
     // smooth lines: A is the lower field, B the upper one (B's line k is drawn above A's line k)
     if (cur_field == 0) haveA = true;
     if (cur_field == 1) haveB = true;
@@ -892,7 +995,7 @@ private:
       miss_run = 0;
       stray_run = 0;
       count_line(true);
-      line_moved = levels_moved(line_start);
+      line_moved = o.follow_levels && levels_moved(line_start);
       render_line(line_start, true);
       close_line(ns);
       check_lost();
@@ -905,6 +1008,7 @@ private:
     if (stray_run >= 6 && miss_run >= 4) {
       rephases++;
       comb_epoch++;
+      forget_fields();
       // In the log every time, with how far the grid moved (the shorter way round), because that says why. A
       // block of samples lost on the way here (the decode queue drops 4096 at a time, the stream a bank, which
       // is as many) moves it by that many samples less whole lines: -14.1 us for each at 20 MS/s NTSC, -12.8 us
