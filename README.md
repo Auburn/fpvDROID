@@ -195,8 +195,8 @@ picture's delay.
 
 ```sh
 build/desktop/kp_gen rec/r4 --mhz 5769 --label R4 --cnr 12   # a synthetic transmitter: rec/r4.cs16 + .json
-build/desktop/kp_gen rec/cp --mhz 5764 --centre 5770 --dev 5 --cnr 35 --copy 12 4   # + a copy 12 MHz up, 4 dB under (--mirror DB: its mirror image)
-KP_SIM_FILE=rec/cp.cs16 build/desktop/kp_sim --scan   # "5776.4 MHz taken as a copy of 5764.4 MHz": one pilot found
+build/desktop/kp_gen rec/cp --mhz 5764 --centre 5770 --dev 5 --cnr 35 --copy 5776 4   # + a copy at 5776, 4 dB under (--mirror DB: its mirror image)
+KP_SIM_FILE=rec/cp.cs16 build/desktop/kp_sim --scan   # "5776.2 MHz taken as a copy of 5764.2 MHz": one pilot found
 build/desktop/kp_replay rec/r4.cs16 --luma-comb --adaptive --smooth --repair   # the picture switches (--comb: colour comb)
 KP_SIM_FILE=rec/r4.cs16 build/desktop/kp_sim --scan --offset-tune --diversity   # the radio's switches, no hardware
 KP_SIM_FILE=rec/r4.cs16 KP_SIM_LEAD_NS=146 build/desktop/kp_sim --watch 5769 --diversity   # path B 146 ns ahead of A: the combiner measures and undoes it

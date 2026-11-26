@@ -5,12 +5,11 @@
 //              [--copy MHZ DB] [--mirror DB]
 //
 // Writes OUT.cs16 (int16 I,Q at 40 MS/s, 12-bit values << 4, like wsdr_probe) and OUT.json (sample_rate,
-// centre_hz), which kp_replay and the simulated receiver (kp_sim, KP_SIM_FILE) read.
+// centre_hz, and what is on the air), which kp_replay and the simulated receiver (kp_sim, KP_SIM_FILE) read.
 //
-// --copy puts a second, weaker transmitter of the same picture MHZ away (negative: below), DB under the first: the
-// copy a strong analog VTX shows beside itself (radio/pilots.h). --mirror puts the signal's mirror image about the
-// centre DB under it (frequency and modulation turned over, as a receiver's IQ imbalance makes one). Either way the
-// first transmitter keeps the CNR asked for, and the sum stays inside the 12-bit range.
+// --copy adds the same picture at MHZ, DB under the transmitter: the copy a strong analog VTX shows beside itself
+// (radio/pilots.h). --mirror adds its mirror image about the centre, DB under it, as a receiver's IQ imbalance makes
+// one. The transmitter keeps the CNR asked for, and the sum stays inside the 12-bit range.
 //
 // Picture: 75 % colour bars (top two thirds), a grey ramp, and a white box that moves across the bottom band
 // once per loop, so a frozen picture is obvious; --label puts big text over the bars. Composite levels in IRE
@@ -97,7 +96,7 @@ int main(int argc, char **argv) {
   }
   const std::string out = argv[1];
   double vtx_mhz = 5769, centre_mhz = NAN, dev_mhz = 8, cnr_db = 25;
-  double copy_mhz = 0, copy_db = NAN, mirror_db = NAN;  // NAN: none
+  double copy_mhz = NAN, copy_db = NAN, mirror_db = NAN;  // NAN: none
   int frames = 30;
   bool pal = false;
   std::string label;  // big text over the bars (a channel name), so feeds are easy to tell apart
@@ -116,12 +115,17 @@ int main(int argc, char **argv) {
     else { std::fprintf(stderr, "unknown option %s\n", k.c_str()); return 2; }
   }
   if (std::isnan(centre_mhz)) centre_mhz = vtx_mhz;  // the recording centred on its transmitter
+  if (std::fabs(copy_mhz - centre_mhz) >= 20) {  // false for NAN: no copy
+    std::fprintf(stderr, "--copy %.1f: outside the recording (%.1f MHz +-20)\n", copy_mhz, centre_mhz);
+    return 2;
+  }
   const Std &S = pal ? kPal : kNtsc;
   const double fs = 40e6;
   const double H = S.H_us * 1e-6, half = H / 2;
   const double frame_s = H * S.half_lines / 2;
   const size_t n = static_cast<size_t>(std::llround(frames * frame_s * fs));
   const double offset_hz = (vtx_mhz - centre_mhz) * 1e6;
+  const double copy_shift_hz = (copy_mhz - vtx_mhz) * 1e6;  // the copy from the transmitter
 
   // 75 % bars: white, yellow, cyan, green, magenta, red, blue, black
   const double bars[8][3] = {{.75, .75, .75}, {.75, .75, 0}, {0, .75, .75}, {0, .75, 0},
@@ -141,7 +145,7 @@ int main(int argc, char **argv) {
 
   std::vector<int16_t> buf;
   buf.reserve(1 << 20);
-  double phase = 0, copy_phase = 0;
+  double phase = 0;
   const double w_sc = 2 * M_PI * S.fsc;
   for (size_t i = 0; i < n; i++) {
     const double t = i / fs;
@@ -211,10 +215,18 @@ int main(int argc, char **argv) {
     const double fi = offset_hz + dev_mhz * 1e6 * ((ire + 40) / 140.0 - 0.5);
     phase += 2 * M_PI * fi / fs;
     if (phase > M_PI) phase -= 2 * M_PI * std::floor((phase + M_PI) / (2 * M_PI));
-    copy_phase = std::remainder(copy_phase + 2 * M_PI * (fi + copy_mhz * 1e6) / fs, 2 * M_PI);
     const double cp = std::cos(phase), sp = std::sin(phase);
-    const double re = amp * (cp + copy_gain * std::cos(copy_phase) + mirror_gain * cp) + nd(rng);
-    const double im = amp * (sp + copy_gain * std::sin(copy_phase) - mirror_gain * sp) + nd(rng);
+    double x = cp, y = sp;
+    if (copy_gain > 0) {  // the same modulation, copy_shift_hz away
+      const double c = phase + 2 * M_PI * copy_shift_hz * t;
+      x += copy_gain * std::cos(c);
+      y += copy_gain * std::sin(c);
+    }
+    if (mirror_gain > 0) {  // the conjugate: frequency and modulation turned over
+      x += mirror_gain * cp;
+      y -= mirror_gain * sp;
+    }
+    const double re = amp * x + nd(rng), im = amp * y + nd(rng);
     auto q = [](double v) { return static_cast<int16_t>(std::lround(std::max(-2047.0, std::min(2047.0, v))) * 16); };
     buf.push_back(q(re));
     buf.push_back(q(im));
@@ -226,13 +238,17 @@ int main(int argc, char **argv) {
   std::fwrite(buf.data(), 2, buf.size(), f);
   std::fclose(f);
   if (FILE *j = std::fopen((out + ".json").c_str(), "w")) {
-    std::fprintf(j, "{\"sample_rate\": %.0f, \"centre_hz\": %.0f, \"vtx_hz\": %.0f, \"std\": \"%s\", \"synthetic\": true}\n",
+    std::fprintf(j, "{\"sample_rate\": %.0f, \"centre_hz\": %.0f, \"vtx_hz\": %.0f, \"std\": \"%s\", \"synthetic\": true",
                  fs, centre_mhz * 1e6, vtx_mhz * 1e6, pal ? "PAL" : "NTSC");
+    if (copy_gain > 0) std::fprintf(j, ", \"copy_hz\": %.0f, \"copy_db\": %g", copy_mhz * 1e6, copy_db);
+    if (mirror_gain > 0)
+      std::fprintf(j, ", \"mirror_hz\": %.0f, \"mirror_db\": %g", (2 * centre_mhz - vtx_mhz) * 1e6, mirror_db);
+    std::fprintf(j, "}\n");
     std::fclose(j);
   }
   std::fprintf(stderr, "wrote %s.cs16: %zu samples (%.3f s, %d %s frames), VTX %.1f MHz, centre %.1f MHz, CNR %.0f dB\n",
                out.c_str(), n, n / fs, frames, pal ? "PAL" : "NTSC", vtx_mhz, centre_mhz, cnr_db);
-  if (copy_gain > 0) std::fprintf(stderr, "  a copy at %.1f MHz, %.1f dB under it\n", vtx_mhz + copy_mhz, copy_db);
+  if (copy_gain > 0) std::fprintf(stderr, "  a copy at %.1f MHz, %.1f dB under it\n", copy_mhz, copy_db);
   if (mirror_gain > 0)
     std::fprintf(stderr, "  its mirror at %.1f MHz, %.1f dB under it\n", 2 * centre_mhz - vtx_mhz, mirror_db);
   return 0;
