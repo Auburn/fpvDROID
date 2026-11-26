@@ -55,8 +55,10 @@ it, a picture that has stopped), full size or in the preview, colour bars show t
   judged and keep their channel's name alone. A chip that says DJI, HDZero or Digital tunes nothing either. A
   signal does not always fit in one retune's 33 MHz: one cut between two neighbouring retunes is put back
   together, and since the two grids of passes cut a signal in different places, it may be judged on one of them
-  only. So a verdict is kept until the passes over it have not found it again for 8 s, and it stays with the
-  rest of the picture when the sweep stops. The detector comes from FPVDesktopWiFiReceiver. Its DJI frame was
+  only. So a verdict is kept until the retunes over it (those at the ends reach 16.5 MHz past the band shown) have
+  not found it again for 8 s, and it stays with the rest of the picture when the sweep stops. Each retune's
+  samples are cut up once for all of this (its spectrum, and its 12 ms in 6.4 µs frames), in about half the time
+  the spectrum alone took before (on a PC: `kp_digital_tests --time`). The detector comes from FPVDesktopWiFiReceiver. Its DJI frame was
   measured there on recordings of a real DJI transmitter (20 MHz on R2); its HDZero side has been tested only on
   synthetic signals (continuous OFDM 27 and 17 MHz wide, as Divimath describes HDZero), so a real HDZero may go
   unnamed, or be named Digital, until it has been tried. fpvDROID's own tests are synthetic too: none of it has
@@ -124,13 +126,15 @@ On screen: the OSD pill (channel, frequency, SNR, decode → screen latency) can
 
 - `native/dsp/` — video decoder (`video.cpp`: FM discriminator, sync, fields; the luma and colour filters,
   line drawing, sparkle repair and deinterlacing in files of their own), spectrum + pilot finding, the band picture the Spectrum tab draws
-  (`BandMap`), DJI, HDZero and other digital signals told apart (`digital.cpp`). No hardware.
+  (`BandMap`), a sweep step's 12 ms cut into time and frequency once for every measure that reads it (`step_grid.cpp`),
+  DJI, HDZero and other digital signals told apart (`digital.cpp`). No hardware.
 - `native/radio/` — the adapter (wifi-sdr `Receiver`) + a DSP thread: scan, watch, sweep, stream test; antenna
   combining (`combine.cpp`); when 40 MS/s gives way to 20 (`fallback_policy.cpp`); torn frames kept off the
   screen (`frame_gate.cpp`); the retunes of a scan or sweep and each one's capture (`steps.cpp`); the sweep's
-  passes and the band picture as the app reads it (`sweep.cpp`).
-- `native/tests/` — unit tests of the radio's rules, the decoder's sync, the Spectrum tab's band picture and its
-  telling digital signals apart, no hardware (`ctest`; `scripts/build-desktop.sh` runs them).
+  passes, what each step's capture is measured for, and the band picture that goes into, as the app reads it, with
+  the signals the sweep has recognised in it (`sweep.cpp`).
+- `native/tests/` — unit tests of the radio's rules, the decoder's sync, the Spectrum tab's band picture (and the FFT
+  under it) and its telling digital signals apart, no hardware (`ctest`; `scripts/build-desktop.sh` runs them).
 - `native/render/` — the picture on screen (OpenGL ES 3): layout, side-by-side view, the menu's preview,
   the NO SIGNAL card.
 - `native/jni/` — the app's native side; a render thread draws each frame on the video Surface as it is decoded.
@@ -208,8 +212,9 @@ KP_SIM_FILE=rec/r4.cs16 build/desktop/kp_sim --scan --offset-tune --diversity   
 KP_SIM_FILE=rec/r4.cs16 KP_SIM_LEAD_NS=146 build/desktop/kp_sim --watch 5769 --diversity   # path B 146 ns ahead of A: the combiner measures and undoes it
 KP_SIM_FILE=rec/r4.cs16 build/desktop/kp_sim --sweep 5635 5955   # the Spectrum tab's sweep: its band picture every second
 build/desktop/kp_gen rec/dji --digital dji --mhz 5770 --centre 5770   # a digital one: hdzero, narrow, dji, dji_idle, wifi, ofdm
-KP_SIM_FILE=rec/dji.cs16 build/desktop/kp_sim --sweep 5635 5955   # ... its carrier in the band picture with "kind":"dji"
-build/desktop/kp_digital_tests --time   # what telling digital signals apart costs a sweep step, against its spectrum
+KP_SIM_FILE=rec/dji.cs16 build/desktop/kp_sim --sweep 5635 5955   # ... among the band picture's "signals", its carrier with "kind":"dji"
+build/desktop/kp_digital_tests --time   # what a sweep step costs: its spectrum, its grid, telling digital signals apart
+build/desktop/kp_spectrum_tests --time  # an FFT, planned and as it was before (twiddles by recurrence)
 KP_SIM_FILE=rec/r4.cs16 KP_SIM_DROP_EVERY=700 build/desktop/kp_sim --watch 5769   # a link that loses every 700th block: falls back to 20 MS/s (after the 10 s grace)
 KP_SIM_FILE=rec/r4.cs16 KP_SIM_RESTART_EVERY_MS=1500 build/desktop/kp_sim --watch 5769   # a stream that restarts every 1.5 s: torn frames hidden, then 20 MS/s
 KP_SIM_FILE=rec/r4.cs16 build/desktop/kp_sim --watch 5769 --msps 20               # watch at 20 MS/s (kp_live takes --msps too)
