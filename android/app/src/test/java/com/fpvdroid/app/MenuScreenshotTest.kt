@@ -201,7 +201,8 @@ class MenuScreenshotTest {
     fun signalManualGain() = shoot("signal_gain", Tab.SIGNAL, live, 2400, 1080, { tuned(); gainAuto = false; gainDb = 24f })
 
     /** A band picture as the radio draws it: the floor at 0 dB with a little noise, a hump for each carrier. */
-    private fun spectrumOf(vararg carriers: Carrier, at: Double = 0.0, sweeps: Int = 2, lo: Int = 5635, hi: Int = 5955): Spectrum {
+    private fun spectrumOf(vararg carriers: Carrier, at: Double = 0.0, sweeps: Int = 2, lo: Int = 5635, hi: Int = 5955,
+                           wifi: List<Wifi> = emptyList()): Spectrum {
         val rnd = java.util.Random(7)
         val db = FloatArray((hi - lo) * 2 + 1) { i ->
             val f = lo + i * 0.5
@@ -216,7 +217,7 @@ class MenuScreenshotTest {
             }
             v
         }
-        return Spectrum(lo.toDouble(), 0.5, db, carriers.toList(), at, 33.0, sweeps)
+        return Spectrum(lo.toDouble(), 0.5, db, carriers.toList(), at, 33.0, sweeps, wifi)
     }
 
     private val onAir = arrayOf(Carrier(5658.4, 11.0, 18f), Carrier(5712.0, 9.0, 9f), Carrier(5769.2, 13.0, 31f), Carrier(5880.6, 12.0, 24f))
@@ -268,6 +269,20 @@ class MenuScreenshotTest {
     @Test @Config(qualifiers = SMALL)
     fun smallSpectrumHdzero() = shoot("small_spectrum_hdzero", Tab.SPECTRUM, sweeping.copy(spectrum = spectrumOf(*mixed)),
         1600, 720, { tuned(); spectrumSystem = ChannelSystem.HDZERO })
+
+    /** Wi-Fi seen beside analog on R1 and R4: a network in use on 149 (on the air on A7 too), an idle one on 173+177. */
+    @Test @Config(qualifiers = PHONE)
+    fun spectrumWifi() = shoot("spectrum_wifi", Tab.SPECTRUM, sweeping.copy(spectrum = spectrumOf(
+        Carrier(5658.4, 11.0, 18f), Carrier(5745.2, 17.5, 21f), Carrier(5769.2, 13.0, 31f), at = 5805.0,
+        wifi = listOf(Wifi(5735.0, 5755.0, "Wi-Fi 149", true), Wifi(5855.0, 5895.0, "Wi-Fi 173\u2013177", false)))),
+        2400, 1080, tuned)
+
+    /** Two networks side by side on a small phone (80 MHz on 132-144, 20 on 149): the second name drops a row. */
+    @Test @Config(qualifiers = SMALL)
+    fun smallSpectrumWifi() = shoot("small_spectrum_wifi", Tab.SPECTRUM, sweeping.copy(spectrum = spectrumOf(
+        Carrier(5690.1, 72.0, 24f), Carrier(5769.2, 13.0, 31f),
+        wifi = listOf(Wifi(5650.0, 5730.0, "Wi-Fi 132\u2013144", true), Wifi(5735.0, 5755.0, "Wi-Fi 149", false)))),
+        1600, 720, tuned)
 
     @Test @Config(qualifiers = PHONE)
     fun spectrumNoAdapter() = shoot("spectrum_noadapter", Tab.SPECTRUM, MenuState(

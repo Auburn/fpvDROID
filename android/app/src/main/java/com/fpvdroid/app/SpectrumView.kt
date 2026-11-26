@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.DashPathEffect
 import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Path
@@ -20,8 +21,9 @@ import kotlin.math.roundToInt
 
 /**
  * The spectrum page's graph: the spectrum over [plan]'s span, its channels marked under it (in use: lit; the chosen
- * one: white), the stretch being swept now shaded. A tap picks for [onPick]: the carrier nearest the finger, or else
- * the channel nearest it. [band]: the analog band a signal off [plan]'s channels is put on.
+ * one: white), the stretch being swept now shaded, and each Wi-Fi network seen a span of its own, named at the top. A
+ * tap picks for [onPick]: the carrier nearest the finger, or else the channel nearest it. [band]: the analog band a
+ * signal off [plan]'s channels is put on.
  */
 class SpectrumView(ctx: Context) : View(ctx) {
     var spectrum: Spectrum? = null
@@ -32,6 +34,9 @@ class SpectrumView(ctx: Context) : View(ctx) {
         set(v) { if (field != v) { field = v; place() } }
     /** What is on the air, left to right, each where [plan] puts it: what the graph lights, and the tab lists. */
     var onAir: List<OnAir> = emptyList()
+        private set
+    /** The Wi-Fi networks seen in the span, left to right. */
+    var wifi: List<Wifi> = emptyList()
         private set
     /** The channel being watched, if it is one of [plan]'s (MHz; 0: none). */
     var chosenMhz = 0.0
@@ -55,6 +60,11 @@ class SpectrumView(ctx: Context) : View(ctx) {
     private val middle = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         typeface = Skin.REGULAR; textSize = sp(13f); color = Skin.TEXT_2; textAlign = Paint.Align.CENTER
     }
+    private val wifiText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        typeface = Skin.MEDIUM; textSize = sp(11f); color = Skin.WARN; textAlign = Paint.Align.CENTER
+    }
+    private val wifiEdge = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = dp(1f) }
+    private val dashes = DashPathEffect(floatArrayOf(dp(4f), dp(4f)), 0f)
     private val box = RectF()
     private val trace = Path()
     private val area = Path()
@@ -74,6 +84,7 @@ class SpectrumView(ctx: Context) : View(ctx) {
     /** The spectrum, the plan or the band changed: what is on the air is put on the plan's channels again. */
     private fun place() {
         onAir = spectrum?.carriers.orEmpty().sortedBy { it.mhz }.map { OnAir(it, plan.spot(it.mhz, it.widthMhz, band)) }
+        wifi = spectrum?.wifi.orEmpty().filter { it.hiMhz > span.first && it.loMhz < span.second }.sortedBy { it.loMhz }
         names = null
         describe()
         invalidate()
@@ -179,6 +190,7 @@ class SpectrumView(ctx: Context) : View(ctx) {
                 c.drawRect(max(0f, x0), plotTop, min(w, x1), bottom, paint)
             }
         }
+        drawWifiSpans(c, bottom)
         // dB lines, labelled at the right
         paint.color = Color.argb(14, 255, 255, 255)
         small.textAlign = Paint.Align.RIGHT
@@ -202,6 +214,7 @@ class SpectrumView(ctx: Context) : View(ctx) {
         // the spectrum: a filled line, broken where nothing has been seen
         if (sp != null && !sp.empty) drawTrace(c, sp, bottom)
         else if (emptyText.isNotEmpty()) c.drawText(emptyText, w / 2, (plotTop + bottom) / 2 - (middle.descent() + middle.ascent()) / 2, middle)
+        drawWifiNames(c)
         c.restore()
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = dp(1f)
@@ -261,6 +274,44 @@ class SpectrumView(ctx: Context) : View(ctx) {
         c.drawPath(trace, line)
     }
 
+    /**
+     * Each Wi-Fi network over the whole height of the plot, behind the spectrum: tinted, with solid edges when it has
+     * been seen in use, fainter with dashed ones when only its beacons have been heard (how wide it goes when it is
+     * used is not known yet).
+     */
+    private fun drawWifiSpans(c: Canvas, bottom: Float) {
+        val r = Color.red(Skin.WARN)
+        val g = Color.green(Skin.WARN)
+        val b = Color.blue(Skin.WARN)
+        for (n in wifi) {
+            val x0 = max(0f, xOf(n.loMhz))
+            val x1 = min(width.toFloat(), xOf(n.hiMhz))
+            paint.color = Color.argb(if (n.busy) 30 else 14, r, g, b)
+            c.drawRect(x0, plotTop, x1, bottom, paint)
+            wifiEdge.color = Color.argb(if (n.busy) 130 else 90, r, g, b)
+            wifiEdge.pathEffect = if (n.busy) null else dashes
+            for (x in floatArrayOf(x0, x1)) c.drawLine(x, plotTop, x, bottom, wifiEdge)
+        }
+    }
+
+    /** Each network's name in a tag at the top of its span, over the spectrum: a second row for one that would run into the first. */
+    private fun drawWifiNames(c: Canvas) {
+        val gap = dp(6f)
+        var end = -1e9f   // where the last tag in the first row ends
+        for (n in wifi) {
+            val half = wifiText.measureText(n.label) / 2 + dp(7f)
+            val x = ((xOf(max(n.loMhz, span.first.toDouble())) + xOf(min(n.hiMhz, span.second.toDouble()))) / 2)
+                .coerceIn(half + dp(3f), max(half + dp(3f), width - half - dp(3f)))
+            val row = if (x - half >= end + gap) 0 else 1
+            if (row == 0) end = x + half
+            val top = plotTop + dp(6f) + row * dp(20f)
+            box.set(x - half, top, x + half, top + dp(17f))
+            paint.color = Color.argb(215, Color.red(Skin.PANEL), Color.green(Skin.PANEL), Color.blue(Skin.PANEL))
+            c.drawRoundRect(box, box.height() / 2, box.height() / 2, paint)
+            c.drawText(n.label, x, box.centerY() - (wifiText.descent() + wifiText.ascent()) / 2, wifiText)
+        }
+    }
+
     private fun drawChannelNames(c: Canvas, bottom: Float) {
         for ((m, row) in names()) {
             val base = bottom + dp(17f) + row * dp(16f)
@@ -308,12 +359,13 @@ class SpectrumView(ctx: Context) : View(ctx) {
         onPick?.invoke(to)
     }
 
-    /** The graph in words, for a screen reader: the span, whose channels, and what is in use. */
+    /** The graph in words, for a screen reader: the span, whose channels, what is in use, and the Wi-Fi seen. */
     private fun describe() {
         val sp = spectrum
         val used = onAir.map { it.spot.name }
         contentDescription = "Spectrum, ${span.first} to ${span.second} megahertz, ${plan.title} channels. " +
-            if (sp == null || sp.empty) "Nothing measured yet" else if (used.isEmpty()) "No signals" else "In use: ${used.joinToString()}"
+            (if (sp == null || sp.empty) "Nothing measured yet" else if (used.isEmpty()) "No signals" else "In use: ${used.joinToString()}") +
+            if (wifi.isEmpty()) "" else ". Wi-Fi: ${wifi.joinToString { it.label + if (it.busy) ", in use" else ", idle" }}"
     }
 
     companion object {

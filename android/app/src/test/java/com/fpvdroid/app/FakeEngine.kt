@@ -17,7 +17,7 @@ import kotlin.math.abs
  * mode under the lock before returning) and only while open; [open] resets the bank counter and the dead flag and
  * leaves the mode idle; [close] marks it closed and idle; a scan ends (when the test says [finishScan]) on the
  * preferred channel if it was found, else on the strongest found, else on the preferred one, else idle. A [sweep]
- * goes on until the next mode call; [spectrum] draws [carriers].
+ * goes on until the next mode call; [spectrum] draws [carriers] and lists [wifi].
  *
  * Called from the main thread (status, settings, tuning) and from UsbLink's worker (usb3Switch, open, close): every
  * method is synchronized, except that a held [open] waits outside the lock.
@@ -194,6 +194,8 @@ class FakeEngine : Engine {
     val carriers = ArrayList<Carrier>()
     /** Passes the sweep has finished ("sweeps" in the spectrum). */
     var sweeps = 0
+    /** The Wi-Fi networks the radio has seen ("wifi" in the spectrum, those that reach into the span asked for). */
+    val wifi = ArrayList<Wifi>()
 
     @Synchronized override fun sweep(loHz: Double, hiHz: Double) {
         rec("sweep", loHz, hiHz)
@@ -204,7 +206,8 @@ class FakeEngine : Engine {
 
     /**
      * As Radio::spectrum_json: half-MHz bins over the span, the floor at 0 dB and each of [carriers] a hump as wide
-     * as it says; "at_mhz" the middle of the span while sweeping. Nothing seen (every bin null) until open.
+     * as it says; "at_mhz" the middle of the span while sweeping; [wifi] in the span. Nothing seen (every bin null)
+     * until open.
      */
     @Synchronized override fun spectrum(loHz: Double, hiHz: Double): String {
         rec("spectrum", loHz, hiHz)
@@ -227,6 +230,10 @@ class FakeEngine : Engine {
             })
             put("carriers", JSONArray().apply {
                 if (isOpen) for (c in carriers) put(JSONObject().put("mhz", c.mhz).put("width", c.widthMhz).put("snr", c.snrDb.toDouble()))
+            })
+            put("wifi", JSONArray().apply {
+                if (isOpen) for (w in wifi) if (w.hiMhz > lo && w.loMhz < hiHz / 1e6)
+                    put(JSONObject().put("lo_mhz", w.loMhz).put("hi_mhz", w.hiMhz).put("label", w.label).put("busy", w.busy))
             })
         }.toString()
     }
