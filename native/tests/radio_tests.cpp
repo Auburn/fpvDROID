@@ -11,7 +11,6 @@
 #include "decode_queue.h"
 #include "fallback_policy.h"
 #include "frame_gate.h"
-#include "pilots.h"
 #include "steps.h"
 
 using namespace kp;
@@ -438,118 +437,6 @@ static void queue_pop_gives_up_when_told_to_stop() {
   CHECK(!q.pop(b, 10000, stop));  // at once, not after the 10 s
 }
 
-// --------------------------------------------------------------------------------------------- Pilots
-// A sighting at t ms; the scan under way began at kScan.
-static constexpr int64_t kScan = 100000;
-static Pilot seen(double mhz, float snr, int64_t t = kScan + 1000) {
-  Pilot p;
-  p.mhz = mhz;
-  p.snr_db = snr;
-  p.seen_ms = t;
-  return p;
-}
-
-// The list's frequencies, strongest first.
-static std::vector<double> mhz_of(const std::vector<Pilot> &l) {
-  std::vector<double> v;
-  for (const auto &p : l) v.push_back(p.mhz);
-  return v;
-}
-
-// Seen again within kSameMhz: the newer sighting unless it is more than kWeakerDb weaker, which only says the pilot
-// is still there. Further away: another pilot. Strongest first.
-static void pilots_seen_again() {
-  std::vector<Pilot> l;
-  CHECK(add_sightings(l, {seen(5769, 20, kScan + 100)}, kScan, 0).empty());
-  add_sightings(l, {seen(5770.5, 18, kScan + 200), seen(5806, 25, kScan + 200)}, kScan, 0);
-  CHECK(mhz_of(l) == std::vector<double>({5806, 5770.5}) && l[1].snr_db == 18);
-  add_sightings(l, {seen(5769.5, 14.5, kScan + 300)}, kScan, 0);  // 3.5 dB under: still there, measured as before
-  CHECK(l.size() == 2 && l[1].mhz == 5770.5 && l[1].snr_db == 18 && l[1].seen_ms == kScan + 300);
-}
-
-// What an earlier scan measured gives way to this scan's sighting, however much stronger it was.
-static void pilots_an_earlier_scan_gives_way() {
-  std::vector<Pilot> l{seen(5769, 30, kScan - 5000)};
-  add_sightings(l, {seen(5770, 12)}, kScan, 0);
-  CHECK(l.size() == 1 && l[0].mhz == 5770 && l[0].snr_db == 12);
-}
-
-// FPVDesktopWiFiReceiver's measurement: R3 at 5731.4 MHz, 35 dB, its copy at 5743.4 MHz, 32 dB. One pilot is
-// listed, in either order, the two in one step or each in a step of its own.
-static void pilots_a_copy_is_not_another_pilot() {
-  std::vector<Pilot> l;
-  auto c = add_sightings(l, {seen(5743.4, 32), seen(5731.4, 35)}, kScan, 0);
-  CHECK(mhz_of(l) == std::vector<double>({5731.4}));
-  CHECK(c.size() == 1 && c[0].mhz == 5743.4 && c[0].of_mhz == 5731.4);
-  // the VTX first, its copy in a later step: it never shows
-  l.clear();
-  add_sightings(l, {seen(5731.4, 35)}, kScan, 0);
-  c = add_sightings(l, {seen(5743.4, 32)}, kScan, 0);
-  CHECK(mhz_of(l) == std::vector<double>({5731.4}) && c.size() == 1);
-  // the copy first (below its VTX here): listed until the VTX is seen
-  l.clear();
-  add_sightings(l, {seen(5719.4, 32)}, kScan, 0);
-  CHECK(mhz_of(l) == std::vector<double>({5719.4}));
-  add_sightings(l, {seen(5731.4, 35)}, kScan, 0);
-  CHECK(mhz_of(l) == std::vector<double>({5731.4}));
-  // and seen again later in the scan (the next step overlaps), it goes again
-  add_sightings(l, {seen(5719.6, 31)}, kScan, 0);
-  CHECK(mhz_of(l) == std::vector<double>({5731.4}));
-}
-
-// Two pilots close together: within kCopyDb of each other both stay, as does one kCopyMhz or more away.
-static void pilots_close_together() {
-  std::vector<Pilot> l;
-  add_sightings(l, {seen(5732, 30), seen(5740, 28.5)}, kScan, 0);
-  CHECK(mhz_of(l) == std::vector<double>({5732, 5740}));
-  l.clear();
-  add_sightings(l, {seen(5732, 30), seen(5747, 20)}, kScan, 0);
-  CHECK(mhz_of(l) == std::vector<double>({5732, 5747}));
-  l.clear();
-  add_sightings(l, {seen(5732, 30), seen(5746.9, 28)}, kScan, 0);
-  CHECK(mhz_of(l) == std::vector<double>({5732}));
-}
-
-// A copy does not take a third pilot with it: one kCopyMhz from the VTX but close to its copy stays.
-static void pilots_a_copy_hides_nothing() {
-  std::vector<Pilot> l;
-  add_sightings(l, {seen(5732, 40), seen(5744, 37), seen(5756, 34)}, kScan, 0);
-  CHECK(mhz_of(l) == std::vector<double>({5732, 5756}));
-}
-
-// The channel the user is on, or chose, stays, copy or not (within kSameMhz of it); the VTX stays beside it.
-static void pilots_the_chosen_channel_stays() {
-  std::vector<Pilot> l;
-  CHECK(add_sightings(l, {seen(5731.4, 35), seen(5743.4, 32)}, kScan, 5745).empty());
-  CHECK(mhz_of(l) == std::vector<double>({5731.4, 5743.4}));
-  // chosen before the copy was seen: it stays when it comes
-  l.clear();
-  add_sightings(l, {seen(5731.4, 35)}, kScan, 5743.4);
-  add_sightings(l, {seen(5743.4, 32)}, kScan, 5743.4);
-  CHECK(mhz_of(l) == std::vector<double>({5731.4, 5743.4}));
-  // another channel chosen: the copy goes
-  l.clear();
-  add_sightings(l, {seen(5731.4, 35), seen(5743.4, 32)}, kScan, 5748);
-  CHECK(mhz_of(l) == std::vector<double>({5731.4}));
-}
-
-// Only this scan's pilots weigh: one an earlier scan saw (it may have landed) hides none of this scan's, and is not
-// hidden by them (it is history, which the app does not show).
-static void pilots_only_this_scan_weighs() {
-  std::vector<Pilot> l{seen(5732, 40, kScan - 5000)};
-  add_sightings(l, {seen(5744, 30)}, kScan, 0);
-  CHECK(mhz_of(l) == std::vector<double>({5732, 5744}));
-  l = {seen(5744, 20, kScan - 5000)};
-  add_sightings(l, {seen(5732, 40)}, kScan, 0);
-  CHECK(mhz_of(l) == std::vector<double>({5732, 5744}));
-  // an earlier scan's strong pilot where this scan sees a copy: the copy's sighting takes its place and goes, and
-  // the VTX stays (kept, the old measurement would have made the VTX the copy)
-  l = {seen(5745, 45, kScan - 5000)};
-  add_sightings(l, {seen(5731.4, 35)}, kScan, 0);
-  add_sightings(l, {seen(5743.4, 32)}, kScan, 0);
-  CHECK(mhz_of(l) == std::vector<double>({5731.4}));
-}
-
 // --------------------------------------------------------------------------------------------- Steps
 // A bank of n samples, each valued seq: what a capture holds says which banks went into it.
 static std::vector<cf> bank_of(uint64_t seq, size_t n = 100) {
@@ -745,13 +632,6 @@ int main() {
   combiner_first_verdict_is_not_held_to_the_start();
   steps_settle_then_capture();
   steps_start_over_after_a_gap_but_not_for_ever();
-  pilots_seen_again();
-  pilots_an_earlier_scan_gives_way();
-  pilots_a_copy_is_not_another_pilot();
-  pilots_close_together();
-  pilots_a_copy_hides_nothing();
-  pilots_the_chosen_channel_stays();
-  pilots_only_this_scan_weighs();
   fallback_restarts();
   fallback_restarts_spread_out();
   fallback_only_from_40();

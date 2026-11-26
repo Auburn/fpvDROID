@@ -95,11 +95,16 @@ if(NOT ANDROID)
   enable_testing()
   # the radio's rules that need no adapter: the sources themselves, so this builds with FPVDROID_RADIO off too
   add_executable(kp_radio_tests tests/radio_tests.cpp radio/combine.cpp radio/decode_queue.cpp
-                 radio/fallback_policy.cpp radio/frame_gate.cpp radio/pilots.cpp radio/steps.cpp)
+                 radio/fallback_policy.cpp radio/frame_gate.cpp radio/steps.cpp)
   target_include_directories(kp_radio_tests PRIVATE radio tests)
   target_link_libraries(kp_radio_tests PRIVATE fpvdroid_dsp Threads::Threads)
   target_compile_options(kp_radio_tests PRIVATE -O2 -Wall -Wextra)
   add_test(NAME radio COMMAND kp_radio_tests)
+  # the scan's rules: what it lists, less a strong transmitter's copy, and what it watches after
+  add_executable(kp_scan_tests tests/scan_tests.cpp radio/pilots.cpp)
+  target_include_directories(kp_scan_tests PRIVATE radio)
+  target_compile_options(kp_scan_tests PRIVATE -O2 -Wall -Wextra)
+  add_test(NAME scan COMMAND kp_scan_tests)
   # the decoder's sync tracking, on a signal the test makes itself
   add_executable(kp_decoder_tests tests/decoder_tests.cpp)
   target_link_libraries(kp_decoder_tests PRIVATE fpvdroid_dsp)

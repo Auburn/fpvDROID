@@ -5,29 +5,45 @@
 
 namespace kp {
 
-std::vector<PilotCopy> add_sightings(std::vector<Pilot> &list, const std::vector<Pilot> &found, int64_t scan_ms,
-                                     double keep_mhz) {
+std::vector<PilotCopy> Pilots::add(const std::vector<Pilot> &found, double keep_mhz) {
+  merge(found);
+  return drop_copies(keep_mhz);
+}
+
+void Pilots::merge(const std::vector<Pilot> &found) {
   for (const auto &f : found) {
     const auto it =
-        std::find_if(list.begin(), list.end(), [&](const Pilot &p) { return std::fabs(p.mhz - f.mhz) < kSameMhz; });
-    if (it == list.end()) list.push_back(f);
-    else if (it->seen_ms < scan_ms || f.snr_db >= it->snr_db - kWeakerDb) *it = f;
-    else it->seen_ms = f.seen_ms;
+        std::find_if(_list.begin(), _list.end(), [&](const Pilot &p) { return std::fabs(p.mhz - f.mhz) < kSameMhz; });
+    if (it == _list.end()) _list.push_back(f);
+    else if (f.snr_db >= it->snr_db - kWeakerDb) *it = f;
+    else it->seen_ms = f.seen_ms;  // still there, measured better before
   }
-  std::stable_sort(list.begin(), list.end(), [](const Pilot &a, const Pilot &b) { return a.snr_db > b.snr_db; });
-  const auto now = [&](const Pilot &p) { return p.seen_ms >= scan_ms; };
+  std::stable_sort(_list.begin(), _list.end(), [](const Pilot &a, const Pilot &b) { return a.snr_db > b.snr_db; });
+}
+
+std::vector<PilotCopy> Pilots::drop_copies(double keep_mhz) {
   std::vector<Pilot> kept;
   std::vector<PilotCopy> copies;
-  for (const auto &p : list) {
-    const bool chosen = keep_mhz > 0 && std::fabs(p.mhz - keep_mhz) < kSameMhz;
+  for (const auto &p : _list) {
     const auto of = std::find_if(kept.begin(), kept.end(), [&](const Pilot &k) {
-      return now(k) && std::fabs(k.mhz - p.mhz) < kCopyMhz && k.snr_db >= p.snr_db + kCopyDb;
+      return std::fabs(k.mhz - p.mhz) < kCopyMhz && k.snr_db >= p.snr_db + kCopyDb;
     });
-    if (now(p) && !chosen && of != kept.end()) copies.push_back({p.mhz, of->mhz});
+    const bool chosen = keep_mhz > 0 && std::fabs(p.mhz - keep_mhz) < kSameMhz;
+    if (of != kept.end() && !chosen) copies.push_back({p.mhz, of->mhz});
     else kept.push_back(p);
   }
-  list.swap(kept);
+  _list.swap(kept);
   return copies;
+}
+
+double Pilots::watch_after_scan(double resume_mhz) const {
+  double mhz = 0;
+  if (resume_mhz > 0)
+    for (const auto &p : _list)
+      if (std::fabs(p.mhz - resume_mhz) < kSameMhz) mhz = p.mhz;
+  if (mhz == 0 && !_list.empty()) mhz = _list.front().mhz;
+  if (mhz == 0) mhz = resume_mhz;
+  return mhz;
 }
 
 }  // namespace kp

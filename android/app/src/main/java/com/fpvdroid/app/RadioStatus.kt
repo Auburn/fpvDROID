@@ -98,7 +98,7 @@ class RadioStatus private constructor(s: JSONObject) {
     // the scan
     val scanStep = s.optInt("scan_step")
     val scanSteps = s.optInt("scan_steps")
-    /** Every signal the radio has ever seen, not only the last scan's. */
+    /** The signals the radio's scan under way, or its last one, has seen. */
     val pilots: List<Pilot> = s.optJSONArray("pilots")?.let { arr ->
         (0 until arr.length()).mapNotNull { i -> arr.optJSONObject(i)?.let { Pilot(it) } }
     } ?: emptyList()
