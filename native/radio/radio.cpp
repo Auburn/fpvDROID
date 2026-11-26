@@ -468,6 +468,7 @@ void Radio::begin_scan() {
   auto plan = scan_plan();
   _plan_n = plan.size();
   _step = 0;
+  _scan_t0_ms = now_ms();
   KP_LOGI("radio: scan, %zu steps", plan.size());
   start_steps(std::move(plan));
 }
@@ -831,13 +832,9 @@ void Radio::scan_step_done() {
     // this scan does not put a watch of its own choosing over it. The next bank takes that call up.
     const bool current = _mode_epoch == _epoch_seen;
     if (current) _step = _steps.at();
-    for (const auto &f : found) {
-      auto it = std::find_if(_pilots.begin(), _pilots.end(), [&](const Pilot &p) { return std::fabs(p.mhz - f.mhz) < 4; });
-      if (it == _pilots.end()) _pilots.push_back(f);
-      else if (f.snr_db >= it->snr_db - 3) *it = f;  // prefer the newer sighting unless much weaker
-      else it->seen_ms = f.seen_ms;
-    }
-    std::sort(_pilots.begin(), _pilots.end(), [](const Pilot &a, const Pilot &b) { return a.snr_db > b.snr_db; });
+    // this step's pilots into the list, less any that is only a strong VTX's copy (pilots.h)
+    for (const auto &c : add_sightings(_pilots, found, _scan_t0_ms, _resume_hz / 1e6))
+      KP_LOGI("scan: %.1f MHz taken as a copy of %.1f MHz", c.mhz, c.of_mhz);
     if (done && current) {
       // after a scan: the pilot watched before, if still there, else the strongest seen in this scan
       const int64_t scan_start = now_ms() - 60000;

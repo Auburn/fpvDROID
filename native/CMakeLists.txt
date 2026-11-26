@@ -56,7 +56,7 @@ if(FPVDROID_RADIO)
   endif()
   # web/CMakeLists.txt lists the same sources
   set(FPVDROID_RADIO_SOURCES radio/radio.cpp radio/combine.cpp radio/decode_queue.cpp radio/fallback_policy.cpp
-      radio/frame_gate.cpp radio/steps.cpp radio/sweep.cpp radio/thread_placement.cpp)
+      radio/frame_gate.cpp radio/pilots.cpp radio/steps.cpp radio/sweep.cpp radio/thread_placement.cpp)
   add_library(fpvdroid_radio STATIC ${FPVDROID_RADIO_SOURCES})
   target_include_directories(fpvdroid_radio PUBLIC radio)
   target_link_libraries(fpvdroid_radio PUBLIC fpvdroid_dsp wsdrcore)
@@ -95,7 +95,7 @@ if(NOT ANDROID)
   enable_testing()
   # the radio's rules that need no adapter: the sources themselves, so this builds with FPVDROID_RADIO off too
   add_executable(kp_radio_tests tests/radio_tests.cpp radio/combine.cpp radio/decode_queue.cpp
-                 radio/fallback_policy.cpp radio/frame_gate.cpp radio/steps.cpp)
+                 radio/fallback_policy.cpp radio/frame_gate.cpp radio/pilots.cpp radio/steps.cpp)
   target_include_directories(kp_radio_tests PRIVATE radio tests)
   target_link_libraries(kp_radio_tests PRIVATE fpvdroid_dsp Threads::Threads)
   target_compile_options(kp_radio_tests PRIVATE -O2 -Wall -Wextra)

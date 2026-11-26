@@ -68,6 +68,15 @@ it, a picture that has stopped), full size or in the preview, colour bars show t
   the channel), gain (automatic, or by hand for a very close transmitter), and a line of numbers (USB speed,
   processing load, drops, restarts).
 
+A scan marks a channel as found when a picture locks on the signal there. A strong analog transmitter close by (a
+quad on the table next to the phone) can show a copy of itself a few dB weaker beside it, whose picture locks too:
+FPVDesktopWiFiReceiver measured one on R3 at 5731 MHz with a copy at 5743 MHz, which it listed as A7. So a signal
+within 15 MHz of one at least 2 dB stronger, both seen in this scan, is taken for that one's copy: it is not marked,
+and the scan never tunes it as the strongest. Two real transmitters that close would spoil each other's picture
+anyway. The copy can turn up a step before or after its transmitter, and is marked until the transmitter is seen. The
+chosen channel is the exception: whether a signal there is a copy cannot be told for sure, so it stays marked beside
+the stronger one, and the scan does not move you from it to another transmitter.
+
 The status at the top left says what the adapter is doing. Nothing there needs attention unless it says so:
 a radio that does not start, or stops delivering samples, is closed and started again by itself, on the
 channel it was on. On some phones' USB 3 ports (a Pixel 8 Pro's, for one) the chip's USB data path locks up
@@ -109,8 +118,9 @@ On screen: the OSD pill (channel, frequency, SNR, decode → screen latency) can
   (`BandMap`). No hardware.
 - `native/radio/` — the adapter (wifi-sdr `Receiver`) + a DSP thread: scan, watch, sweep, stream test; antenna
   combining (`combine.cpp`); when 40 MS/s gives way to 20 (`fallback_policy.cpp`); torn frames kept off the
-  screen (`frame_gate.cpp`); the retunes of a scan or sweep and each one's capture (`steps.cpp`); the sweep's
-  passes and the band picture as the app reads it (`sweep.cpp`).
+  screen (`frame_gate.cpp`); the retunes of a scan or sweep and each one's capture (`steps.cpp`); what the scans
+  found, less a strong transmitter's copy (`pilots.cpp`); the sweep's passes and the band picture as the app reads
+  it (`sweep.cpp`).
 - `native/tests/` — unit tests of the radio's rules, the decoder's sync and the Spectrum tab's band picture, no
   hardware (`ctest`; `scripts/build-desktop.sh` runs them).
 - `native/render/` — the picture on screen (OpenGL ES 3): layout, side-by-side view, the menu's preview,
