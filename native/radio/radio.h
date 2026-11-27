@@ -22,6 +22,8 @@
 #include "decode_queue.h"
 #include "fallback_policy.h"
 #include "frame_gate.h"
+#include "pilots.h"
+#include "scan.h"
 #include "spectrum.h"
 #include "steps.h"
 #include "sweep.h"
@@ -34,15 +36,6 @@ struct BankMeta;
 }
 
 namespace kp {
-
-struct Pilot {
-  double mhz = 0;        // measured carrier
-  std::string name;      // nearest standard channel ("R4"), "" if none
-  std::string std_name;  // NTSC / PAL
-  float snr_db = 0;
-  float lock = 0;
-  int64_t seen_ms = 0;   // steady-clock ms of the last scan that saw it
-};
 
 class Radio {
 public:
@@ -63,8 +56,8 @@ public:
   // Radio still reads as open, but nothing more will come until open() again (which clears this).
   bool dead() const;
 
-  // Then watch prefer_hz if found (or, with nothing found, anyway), else the previous pilot again, else the
-  // strongest found. prefer_hz 0: the pilot being watched.
+  // Then watch prefer_hz if this scan finds it (or, with nothing found, anyway), else the strongest this scan
+  // finds; pilots from earlier scans do not count. prefer_hz 0: the pilot being watched.
   void scan(double prefer_hz = 0);
   void watch(double hz);
   void stream_test(int rate_sel, double seconds);
@@ -112,8 +105,7 @@ public:
   // as PREFIX_b.cs16.
   void record(double seconds, const std::string &prefix);
 
-  std::string status_json();   // for the UI (polled)
-  std::vector<Pilot> pilots();
+  std::string status_json();   // for the UI (polled); its "pilots" are the scan under way's, or the last one's
   // The band picture over lo..hi, for the spectrum page (polled while it is shown):
   //   {"first_mhz", "bin_mhz", "db": [dB over the noise floor, null where nothing has been seen],
   //    "carriers": [{"mhz", "width", "snr", "kind"}], "at_mhz": the step being taken now (0: not sweeping or scanning),
@@ -168,6 +160,7 @@ private:
   bool next_step();
   bool capture_step(const Bank &b);
   void handle_scan(Bank &b);
+  void add_extra_steps(const std::vector<ScanPlan::Extra> &extra);
   void handle_sweep(Bank &b);
   void handle_test(Bank &b);
   void scan_step_done();
@@ -199,7 +192,7 @@ private:
   std::string _rec_prefix;
   uint64_t _rec_left = 0, _rec_samples = 0;
   double _rec_fs = 0, _rec_centre = 0, _rec_shift = 0;
-  std::vector<Pilot> _pilots;
+  Pilots _pilots;  // what the scan under way, or the last one, found (begin_scan empties it)
   BandPicture _band;  // what scans and sweeps have seen, and what sweeps have recognised in it (sweep.h)
   Sweep _sweep;       // the span and the passes of the sweep asked for last
   bool _superspeed = false, _open = false;
@@ -248,9 +241,10 @@ private:
   ComboStatus _comb_status;  // under _m
   // scan, and sweep
   Steps _steps;  // the retunes of the scan or of the sweep's pass, and the capture of the one under way
-  // The scan's progress as status_json() shows it (steps done, of how many). Atomic: read there while the DSP
-  // thread moves it on, and set back to the start by scan() for the status to show until that thread takes the
-  // new scan up.
+  ScanPlan _scan;  // the scan's plan, and its extra steps for signals its steps see cut by an edge
+  // The scan's progress as status_json() shows it (steps done, of how many: the plan's and the extra steps given so
+  // far, so the count can grow while the scan runs). Atomic: read there while the DSP thread moves it on, and set
+  // back to the start by scan() for the status to show until that thread takes the new scan up.
   std::atomic<size_t> _step{0}, _plan_n{0};
   std::vector<Hump> _humps;  // this step's candidates (from the first kPsdSpan of the capture)
   StepAnalysers _analysers;  // what each sweep step's capture is measured for (sweep.h)

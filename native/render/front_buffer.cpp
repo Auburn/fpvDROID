@@ -21,14 +21,13 @@ bool FrontBuffer::config_can(EGLDisplay dpy, EGLConfig cfg) {
   return eglGetConfigAttrib(dpy, cfg, EGL_SURFACE_TYPE, &type) && (type & EGL_MUTABLE_RENDER_BUFFER_BIT_KHR);
 }
 
-bool FrontBuffer::wants_config(EGLDisplay dpy) const { return _asked && egl_has(dpy, kMutable); }
+bool FrontBuffer::available(EGLDisplay dpy) { return egl_has(dpy, kMutable); }
 
 bool FrontBuffer::start(EGLDisplay dpy, EGLSurface surf, EGLContext ctx, EGLConfig cfg) {
   _on = false;
-  if (!_asked) return false;
-  const bool has = egl_has(dpy, kMutable);
+  const bool has = available(dpy);
   if (!has || !config_can(dpy, cfg)) {
-    KP_LOGW("screen: front-buffer drawing asked for, but %s: the picture goes up as without it",
+    KP_LOGI("screen: no front-buffer drawing (%s): strips go up once a refresh",
             has ? "the EGL config cannot be single-buffered" : "EGL has no EGL_KHR_mutable_render_buffer");
     return false;
   }
@@ -52,7 +51,7 @@ bool FrontBuffer::start(EGLDisplay dpy, EGLSurface surf, EGLContext ctx, EGLConf
   eglQueryContext(dpy, ctx, EGL_RENDER_BUFFER, &buffer);
   _on = buffer == EGL_SINGLE_BUFFER;
   KP_LOGI("screen: front-buffer drawing %s (compositor auto refresh %s)",
-          _on ? "on" : "asked for, but the surface stayed double-buffered", refresh ? "on" : "off");
+          _on ? "on" : "not on: the surface stayed double-buffered", refresh ? "on" : "off");
   return _on;
 }
 

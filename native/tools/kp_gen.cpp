@@ -2,11 +2,16 @@
 // (github.com/scerstt/PlayRX, tools/gen_testsignal.cpp, GPL-2.0).
 //
 //   kp_gen OUT [--mhz 5769] [--centre MHZ (default --mhz)] [--frames 30] [--dev 8] [--cnr 25] [--pal] [--label R4]
+//              [--copy MHZ DB] [--mirror DB]
 //              [--wifi CH | --wifi-quiet CH] [--wifi-db 20]
 //   kp_gen OUT --digital KIND [--mhz 5769] [--centre MHZ] [--snr 20] [--width MHZ] [--seconds 0.25]
 //
 // Writes OUT.cs16 (int16 I,Q at 40 MS/s, 12-bit values << 4, like wsdr_probe) and OUT.json (sample_rate,
-// centre_hz), which kp_replay and the simulated receiver (kp_sim, KP_SIM_FILE) read.
+// centre_hz, and what is on the air), which kp_replay and the simulated receiver (kp_sim, KP_SIM_FILE) read.
+//
+// --copy adds the same picture at MHZ, DB under the transmitter: the copy a strong analog VTX shows beside itself
+// (radio/pilots.h). --mirror adds its mirror image about the centre, DB under it, as a receiver's IQ imbalance makes
+// one. The transmitter keeps the CNR asked for, and the sum stays inside the 12-bit range.
 //
 // --digital: a digital transmitter in place of analog video, for the Spectrum tab's telling them apart
 // (tools/digital_tx.h: models, not captures). KIND: hdzero (continuous OFDM, 27 MHz), narrow (HDZero's 17 MHz mode),
@@ -163,7 +168,8 @@ int write_digital(const std::string &out, const std::string &kind, double vtx_mh
 
 int main(int argc, char **argv) {
   if (argc < 2) {
-    std::fprintf(stderr, "usage: kp_gen OUT [--mhz F] [--centre F] [--frames N] [--dev MHZ] [--cnr DB] [--pal] [--label TEXT]\n"
+    std::fprintf(stderr, "usage: kp_gen OUT [--mhz F] [--centre F] [--frames N] [--dev MHZ] [--cnr DB] [--pal] [--label TEXT]"
+                         " [--copy MHZ DB] [--mirror DB]\n"
                          "              [--wifi CH | --wifi-quiet CH] [--wifi-db DB]\n"
                          "       kp_gen OUT --digital hdzero|narrow|dji|dji_idle|wifi|ofdm [--mhz F] [--centre F] [--snr DB]"
                          " [--width MHZ] [--seconds S]\n");
@@ -171,6 +177,7 @@ int main(int argc, char **argv) {
   }
   const std::string out = argv[1];
   double vtx_mhz = 5769, centre_mhz = NAN, dev_mhz = 8, cnr_db = 25;
+  double copy_mhz = NAN, copy_db = NAN, mirror_db = NAN;  // NAN: none
   int frames = 30;
   bool pal = false;
   std::string label;  // big text over the bars (a channel name), so feeds are easy to tell apart
@@ -189,6 +196,8 @@ int main(int argc, char **argv) {
     else if (k == "--cnr") cnr_db = v();
     else if (k == "--pal") pal = true;
     else if (k == "--label" && i + 1 < argc) label = argv[++i];
+    else if (k == "--copy") { copy_mhz = v(); copy_db = v(); }
+    else if (k == "--mirror") mirror_db = v();
     else if (k == "--wifi") wifi_ch = static_cast<int>(v());
     else if (k == "--wifi-quiet") { wifi_ch = static_cast<int>(v()); wifi_quiet = true; }
     else if (k == "--wifi-db") wifi_db = v();
@@ -200,18 +209,26 @@ int main(int argc, char **argv) {
   }
   if (std::isnan(centre_mhz)) centre_mhz = vtx_mhz;  // the recording centred on its transmitter
   if (!digital.empty()) return write_digital(out, digital, vtx_mhz, centre_mhz, snr_db, width_mhz, seconds);
+  if (std::fabs(copy_mhz - centre_mhz) >= 20) {  // false for NAN: no copy
+    std::fprintf(stderr, "--copy %.1f: outside the recording (%.1f MHz +-20)\n", copy_mhz, centre_mhz);
+    return 2;
+  }
   const Std &S = pal ? kPal : kNtsc;
   const double fs = 40e6;
   const double H = S.H_us * 1e-6, half = H / 2;
   const double frame_s = H * S.half_lines / 2;
   const size_t n = static_cast<size_t>(std::llround(frames * frame_s * fs));
   const double offset_hz = (vtx_mhz - centre_mhz) * 1e6;
+  const double copy_shift_hz = (copy_mhz - vtx_mhz) * 1e6;  // the copy from the transmitter
 
   // 75 % bars: white, yellow, cyan, green, magenta, red, blue, black
   const double bars[8][3] = {{.75, .75, .75}, {.75, .75, 0}, {0, .75, .75}, {0, .75, 0},
                              {.75, 0, .75}, {.75, 0, 0}, {0, 0, .75}, {0, 0, 0}};
 
-  const double amp = 1400;  // 12-bit full scale is 2047
+  // 12-bit full scale is 2047; with a copy or a mirror, the first transmitter gives up enough for the sum not to clip
+  const double copy_gain = std::isnan(copy_db) ? 0 : std::pow(10, -copy_db / 20);
+  const double mirror_gain = std::isnan(mirror_db) ? 0 : std::pow(10, -mirror_db / 20);
+  const double amp = 1400 / (1 + copy_gain + mirror_gain);
   // CNR in an 18 MHz channel: noise power over the whole 40 MHz is scaled up by 40/18
   const double noise_pow = amp * amp / std::pow(10, cnr_db / 10) * (fs / 18e6);
   std::mt19937 rng(1);
@@ -229,7 +246,17 @@ int main(int argc, char **argv) {
   std::vector<kp::cf> piece(1 << 16);
   double phase = 0;
   const double w_sc = 2 * M_PI * S.fsc;
-  const std::string extra = std::string("\"std\": \"") + (pal ? "PAL" : "NTSC") + "\"";
+  std::string extra = std::string("\"std\": \"") + (pal ? "PAL" : "NTSC") + "\"";
+  char more[160];
+  if (copy_gain > 0) {
+    std::snprintf(more, sizeof more, ", \"copy_hz\": %.0f, \"copy_db\": %g", copy_mhz * 1e6, copy_db);
+    extra += more;
+  }
+  if (mirror_gain > 0) {
+    std::snprintf(more, sizeof more, ", \"mirror_hz\": %.0f, \"mirror_db\": %g", (2 * centre_mhz - vtx_mhz) * 1e6,
+                  mirror_db);
+    extra += more;
+  }
   const int e = write_recording(out, n, centre_mhz, vtx_mhz, extra, [&](size_t i) {
     const double t = i / fs;
     const double tf = std::fmod(t, frame_s);
@@ -298,7 +325,18 @@ int main(int argc, char **argv) {
     const double fi = offset_hz + dev_mhz * 1e6 * ((ire + 40) / 140.0 - 0.5);
     phase += 2 * M_PI * fi / fs;
     if (phase > M_PI) phase -= 2 * M_PI * std::floor((phase + M_PI) / (2 * M_PI));
-    double re = amp * std::cos(phase) + nd(rng), im = amp * std::sin(phase) + nd(rng);
+    const double cp = std::cos(phase), sp = std::sin(phase);
+    double x = cp, y = sp;
+    if (copy_gain > 0) {  // the same modulation, copy_shift_hz away
+      const double c = phase + 2 * M_PI * copy_shift_hz * t;
+      x += copy_gain * std::cos(c);
+      y += copy_gain * std::sin(c);
+    }
+    if (mirror_gain > 0) {  // the conjugate: frequency and modulation turned over
+      x += mirror_gain * cp;
+      y -= mirror_gain * sp;
+    }
+    double re = amp * x + nd(rng), im = amp * y + nd(rng);
     if (wifi_ch) {
       if (i % piece.size() == 0) {
         std::fill(piece.begin(), piece.end(), kp::cf(0, 0));
@@ -313,5 +351,8 @@ int main(int argc, char **argv) {
   if (e) return e;
   std::fprintf(stderr, "wrote %s.cs16: %zu samples (%.3f s, %d %s frames), VTX %.1f MHz, centre %.1f MHz, CNR %.0f dB\n",
                out.c_str(), n, n / fs, frames, pal ? "PAL" : "NTSC", vtx_mhz, centre_mhz, cnr_db);
+  if (copy_gain > 0) std::fprintf(stderr, "  a copy at %.1f MHz, %.1f dB under it\n", copy_mhz, copy_db);
+  if (mirror_gain > 0)
+    std::fprintf(stderr, "  its mirror at %.1f MHz, %.1f dB under it\n", 2 * centre_mhz - vtx_mhz, mirror_db);
   return 0;
 }

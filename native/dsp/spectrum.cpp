@@ -112,7 +112,7 @@ float median_of(std::vector<float> v) {
   return v[v.size() / 2];
 }
 
-std::vector<Hump> find_humps(const std::vector<float> &db, double fs, double edge_hz) {
+StepSignals find_step_signals(const std::vector<float> &db, double fs, double edge_hz) {
   const int n = static_cast<int>(db.size());
   const double bin = fs / n;
   // median-smooth, then floor = lower quartile of the smoothed spectrum
@@ -121,7 +121,7 @@ std::vector<Hump> find_humps(const std::vector<float> &db, double fs, double edg
   std::nth_element(sorted.begin(), sorted.begin() + n / 4, sorted.end());
   const float floor = sorted[n / 4];  // lower quartile: robust even when a wide signal fills much of the span
   const float thr = floor + 6.f;
-  std::vector<Hump> out;
+  StepSignals out;
   int i = 0;
   while (i < n) {
     if (sm[i] <= thr) {
@@ -132,7 +132,8 @@ std::vector<Hump> find_humps(const std::vector<float> &db, double fs, double edg
     while (j < n && sm[j] > thr) j++;
     const double f0 = (i - n / 2) * bin, f1 = (j - 1 - n / 2) * bin;
     const double width = f1 - f0 + bin;
-    if (width >= 3.5e6 && width <= 24e6 && f0 > -edge_hz && f1 < edge_hz) {  // a VTX next to the phone: ~16 MHz
+    const bool lo = f0 <= -edge_hz, hi = f1 >= edge_hz;  // it runs past the bottom, the top edge
+    if (!lo && !hi && width >= kHumpMinHz && width <= kHumpMaxHz) {
       double sw = 0, sf = 0;
       float pk = -1e9f;
       for (int k = i; k < j; k++) {
@@ -141,11 +142,30 @@ std::vector<Hump> find_humps(const std::vector<float> &db, double fs, double edg
         sf += p * (k - n / 2) * bin;
         pk = std::max(pk, sm[k]);
       }
-      out.push_back(Hump{sf / sw, width, pk, pk - floor});
+      out.whole.push_back(Hump{sf / sw, width, pk, pk - floor});
+    } else if (lo != hi) {
+      CutSignal c;
+      c.f0_hz = std::max(f0, -edge_hz);
+      c.f1_hz = std::min(f1 + bin, edge_hz);
+      c.cut_hi = hi;
+      std::vector<float> in;  // its bins inside the span, for their median
+      for (int k = i; k < j; k++) {
+        const double f = (k - n / 2) * bin;
+        if (f >= c.f0_hz && f < c.f1_hz) in.push_back(sm[k]);
+      }
+      if (c.f1_hz - c.f0_hz >= kHumpMinHz && !in.empty()) {
+        std::nth_element(in.begin(), in.begin() + in.size() / 2, in.end());
+        c.snr_db = in[in.size() / 2] - floor;
+        out.cut.push_back(c);
+      }
     }
     i = j;
   }
   return out;
+}
+
+std::vector<Hump> find_humps(const std::vector<float> &db, double fs, double edge_hz) {
+  return find_step_signals(db, fs, edge_hz).whole;
 }
 
 float carrier_snr(const std::vector<float> &db, double fs, double span_hz, double carrier_hz, double pass_hz) {
