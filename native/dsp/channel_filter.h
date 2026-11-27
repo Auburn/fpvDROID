@@ -2,7 +2,7 @@
 // narrower than its sample rate: at 20 MS/s close to 20 MHz of noise reach the discriminator, and an FM picture
 // needs about 10 dB of carrier over that noise before it is free of sparkles (below that it loses contrast as
 // well). The signal itself is narrower. So while the decoder finds the sync noisy (its depth less than kOn times
-// the noise on the back porch; until it is more than kOff times with the filter in: sync_noise.h), the stream goes
+// its noise; until it is more than kOff times with the filter in: sync_noise.h), the stream goes
 // through a low-pass kDepths sync depths wide around the middle of the signal's swing, sync tip to white, as the
 // decoder has them from better times. That width is what recordings of three transmitters with noise added came
 // out best with, each against its own pictures without the noise: +0.3 to +1.3 dB of picture with the carrier
@@ -34,7 +34,7 @@ public:
   // The sync as the decoder has it.
   struct Sync {
     bool acquiring;    // there is no lock
-    float snr;         // the sync depth over the noise on the back porch (0: not known)
+    float snr;         // the sync depth over its noise (sync_noise.h; 0: not known)
     float tip, blank;  // the levels, MHz of discriminator output
     float depth_ref;   // the sync depth of better times (MHz; 0: none yet)
   };

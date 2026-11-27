@@ -248,8 +248,8 @@ cores, where they fall behind). The things the decoder does to keep its picture 
 each by itself (from the next channel or rate watched; they are the rows of `kDecoderHelps` in
 `native/radio/decoder_helps.h`):
 
-- `KP_LEVELS`: following a signal whose sync levels jump (a light flashing in the picture does that to some
-  transmitters).
+- `KP_LEVELS`: following a signal whose sync levels jump or slide with the picture's brightness (a light flashing
+  in the picture, or a bright sky over dark ground, does that to some transmitters).
 - `KP_FLYWHEEL`: beginning a field where the fields before say when its vertical sync is not found.
 - `KP_HOLD`: holding the line grid through a signal too weak for its lines' hsyncs to be found (the status line
   then says `held`, and counts `holds`).

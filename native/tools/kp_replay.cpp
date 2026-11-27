@@ -10,10 +10,10 @@
 //   --mix HZ: the recording shifted by HZ first (scanner edge tests). --fs HZ: for a recording without a .json.
 //   --flash MHZ: the transmitter's frequency down by MHZ for half of every 1/7 s, as when its sync levels jump with
 //   a light flashing in the picture (an AC-coupled video input): the lock should hold through it.
-//   --no-levels, --no-flywheel, --no-hold, --no-coast, --no-filter: without the decoder's following of such jumps,
-//   without its vertical flywheel, without its holding of the grid through a weak signal, without its coasting
-//   through a dropout, without the front end's channel filter for a noisy one (DecoderOpts), to see what each does
-//   by itself. --coast-s S: coast for S seconds at most (5).
+//   --no-levels, --no-flywheel, --no-hold, --no-coast, --no-filter: without the decoder's following of such jumps
+//   (and of levels that slide), without its vertical flywheel, without its holding of the grid through a weak
+//   signal, without its coasting through a dropout, without the front end's channel filter for a noisy one
+//   (DecoderOpts), to see what each does by itself. --coast-s S: coast for S seconds at most (5).
 //   --grid FILE: where the decoder has its line grid and its field, a row for every block of 65536 samples: samples
 //   done, acquiring, the line's start (samples), line period (us), field, the field's start (samples), tip, blank,
 //   lock, frames, held, sync snr, channel filter (MHz), --fade's ratio now (dB; 0 without), the sync depth of better

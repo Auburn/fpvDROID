@@ -74,6 +74,15 @@ bool BurstLock::follow_mean(cf b, float mag, float nv, double pred, int64_t li) 
   return on;
 }
 
+// How calm the colour is drawn. Averaged (Way::mean): kMeanCalm. Line by line, NTSC, with the sync's snr known and
+// under kEachHi: t of the way from sharp to kEachCalm, which it is at kEachLo and under.
+Calm BurstLock::calm() const {
+  if (_mean) return kMeanCalm;
+  if (_pal || _snr <= 0 || _snr >= kEachHi) return {};
+  const float t = std::min(1.f, (kEachHi - _snr) / (kEachHi - kEachLo));
+  return {1.f - t * (1.f - kEachCalm.share), static_cast<int>(std::lround(t * kEachCalm.cells))};
+}
+
 // A burst has been followed: e, its |phase error| against the reference as it was predicted.
 void BurstLock::note(int64_t li, float mag, float e) {
   _last_line = li;

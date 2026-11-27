@@ -32,12 +32,11 @@ PictureFilters::PictureFilters(double fs, bool colour) : _fs(fs), _colour(colour
 }
 
 void PictureFilters::set_std(const VideoStd &s) {
-  const double fsc = &s == &kPal ? 4.43361875e6 : 315e6 / 88;
-  const double a = 2 * M_PI * fsc / _fs;
+  const double a = 2 * M_PI * s.fsc / _fs;
   _lo_step = cf(static_cast<float>(std::cos(a)), static_cast<float>(std::sin(a)));
-  _luma_notch.notch(fsc, _fs, 1.5);  // the subcarrier out of the picture (also the B/W herringbone)
-  _luma_notch_w.notch(fsc, _fs, 1.5);  // adaptive comb: the same, on the comb's wide signal
-  _bp_chroma.bandpass(fsc, _fs, 1.0);  // luma comb: the colour band of the line difference
+  _luma_notch.notch(s.fsc, _fs, 1.5);  // the subcarrier out of the picture (also the B/W herringbone)
+  _luma_notch_w.notch(s.fsc, _fs, 1.5);  // adaptive comb: the same, on the comb's wide signal
+  _bp_chroma.bandpass(s.fsc, _fs, 1.0);  // luma comb: the colour band of the line difference
   _comb_w = a;
 }
 

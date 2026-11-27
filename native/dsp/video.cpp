@@ -40,8 +40,8 @@ class Decoder {
 public:
   // picture: the switches, which whoever owns the decoder may change at any time (FrontEnd::set_picture)
   Decoder(double fs, FrameSink sink, const DecoderOpts &o, const std::atomic<PictureOpts> &picture)
-      : fs(fs), sink(std::move(sink)), o(o), picture(picture), levels(fs), drawer(o.width, fs), burst(fs, o.hold), filt(fs, o.colour),
-        spark(fs), hold(fs, o.coast ? o.coast_s : 0) {
+      : fs(fs), sink(std::move(sink)), o(o), picture(picture), levels(fs, o.follow_levels), drawer(o.width, fs),
+        burst(fs, o.hold), filt(fs, o.colour), spark(fs), hold(fs, o.coast ? o.coast_s : 0) {
     lp_sync.design(1.0e6, fs);
     acq.resize(static_cast<size_t>(fs * 0.06));  // 60 ms
     set_std(o.std_force == 2 ? kPal : kNtsc);
@@ -213,7 +213,10 @@ private:
   LineHold hold;
   VertSync vert;
   SyncNoise noise;
-  float snr_now = 0;  // the sync's snr as noise last judged it (every SyncNoise::kLines lines; 0: not known)
+  // The sync's snr over the last SyncNoise::kEvery lines, as of the last time it was judged (0: not known): what the
+  // hold goes by, which has to see the noise rise within a few lines (the colour and the channel filter go by a
+  // field's lines)
+  float snr_now = 0;
   // The sync depth of better times, while nearly every line finds its hsync: a weak signal does not show it (the
   // discriminator is then captured by the noise part of the time, and tip and blanking both shrink towards the
   // middle of the band). For the front end's channel filter (sync).
@@ -281,7 +284,7 @@ private:
     const double ls = line_start;
     count_line(locked);
     LineLevels sync;
-    if (o.follow_levels && !hold.holding()) {  // (held by the fold, the levels are the fold's)
+    if (!hold.holding()) {  // (held by the fold, the levels are the fold's)
       const float was = levels.tip;
       sync = levels.look(R, ls);
       if (sync.jumped) {
@@ -512,7 +515,7 @@ private:
     l.ok = l.col && burst.last_err() < kCombMaxErr;
     l.phase = burst.phase();
     l.mag = burst.size();
-    l.calm = l.col ? burst.calm() : 0;
+    l.calm = l.col ? burst.calm() : Calm{};
     l.fade = filt.fade_noted();
     return l;
   }
@@ -735,7 +738,7 @@ private:
     start_field(*at);
   }
 
-  // How clean the sync is (DecoderStats::sync_snr): its depth over the noise on the back porch (sync_noise.h); 0
+  // How clean the sync is (DecoderStats::sync_snr): its depth over the noise on its tip and porch (sync_noise.h); 0
   // while that is not known. (settled: the levels are measured ones, on locked lines or in the fold, not the
   // histogram's)
   float sync_snr() const { return !acquiring && levels.settled() ? noise.snr(levels.blank - levels.tip) : 0; }
@@ -744,11 +747,11 @@ private:
   // line into the fold, which steers when the signal is weak (line_hold.h). Returns where the next line begins.
   double held_line(double next, bool broad) {
     const SyncSamples s = sync_now();
-    if (noise.line(s, line_start, fs)) {
+    if (noise.line(s, line_start, fs, std_->fsc)) {
       const float depth = levels.blank - levels.tip;
       if (noise.round()) {
-        snr_now = noise.snr(depth);
-        if (snr_now > 0) burst.sync_snr(snr_now);  // (colour goes by it)
+        if (const float snr = noise.snr(depth); snr > 0) burst.sync_snr(snr);  // (colour goes by it)
+        snr_now = noise.snr(depth, SyncNoise::kEvery);
       }
       // (lines >= 128: the first 64 lines after an acquisition count as found before they are)
       if (hold.clean() && lines >= 128 && depth > 0.2f) depth_ref += (depth_ref > 0 ? 1.f / 16 : 1.f) * (depth - depth_ref);

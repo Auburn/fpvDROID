@@ -66,8 +66,8 @@ struct DecoderStats {
   int field = -1;
   bool holding = false;                   // the signal is weak: the grid is held by the fold of the lines ...
   uint64_t holds = 0;                     // ... and how often that has begun
-  // How clean the sync is: its depth over the noise on the back porch, in the sync path (0: not known). And the
-  // sync depth of better times (MHz; 0: none yet), which a weak signal does not show (its levels shrink together).
+  // How clean the sync is: its depth over its noise, in the sync path (sync_noise.h; 0: not known). And the sync
+  // depth of better times (MHz; 0: none yet), which a weak signal does not show (its levels shrink together).
   float sync_snr = 0, depth_ref = 0;
   float filter_mhz = 0;                   // the front end's channel filter: how wide (0: out) ...
   uint64_t filter_changes = 0;            // ... and how often it has come in, gone out or been retuned
@@ -81,7 +81,7 @@ struct DecoderOpts {
   bool colour = true;          // decode colour (falls back to grey when there is no usable burst)
   // Three things the decoder does to keep its picture, each of which the bench and the tests can turn off to see
   // what the others do by themselves (kp_replay --no-levels, --no-flywheel, --no-hold):
-  bool follow_levels = true;   // the sync levels follow a signal that jumps up or down
+  bool follow_levels = true;   // the sync levels follow a signal that jumps up or down, or slides (sync_levels.h)
   bool flywheel = true;        // a field begins where the fields before say, when its vertical sync is not found
   // The line grid is held through a signal too weak for its lines' hsyncs to be found, by the fold of many
   // lines; such a signal's fields are found by what their half lines are, and it is acquired by that fold.

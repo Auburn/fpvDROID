@@ -16,6 +16,7 @@ struct PictureWindow {
 struct VideoStd {
   double T_us;      // line period
   int field_lines;  // whole lines in an odd field; an even one has one more
+  double fsc;       // colour subcarrier, Hz
   PictureWindow window;
   const char *name;
 };
@@ -43,7 +44,7 @@ constexpr PictureWindow bt601_window(int lead, int first_line, int lines) {
 // PAL keeps the standard's lines, 22-309 (line 310 is equalizing pulses in one of its two fields; the OSD's
 // text ran on lines 26-251). Being wider and no taller, it shows a PAL camera's 4:3 picture (52-53.3 us wide)
 // 1.4-3.9 % narrow. That is unmeasured, because the PAL recordings have no camera.
-inline constexpr VideoStd kNtsc{63.5556, 262, bt601_window(122, 18, 242), "NTSC"};
-inline constexpr VideoStd kPal{64.0, 312, bt601_window(132, 22, 288), "PAL"};
+inline constexpr VideoStd kNtsc{63.5556, 262, 315e6 / 88, bt601_window(122, 18, 242), "NTSC"};
+inline constexpr VideoStd kPal{64.0, 312, 4.43361875e6, bt601_window(132, 22, 288), "PAL"};
 
 }  // namespace kp

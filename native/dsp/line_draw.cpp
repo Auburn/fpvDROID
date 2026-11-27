@@ -177,11 +177,11 @@ void LineDrawer::draw_colour(uint32_t *row, const SampleRings &R, double base, f
 // A noisy signal's colour (LineInfo::calm). Its coloured snow is as fine as the chroma filter lets it be, a
 // megahertz and more across, and another on every line; the picture's colours change slowly both ways. So U and V
 // are taken at every kCalmStep-th pixel only (a cell: far finer than the smoothing), each cell's are the mean over
-// kCalmCells cells either side, and of that only the share `calm` is this line's: the rest is what the lines above
-// it in the field had there (_calm_u, _calm_v, a cell each). Luma as ever, every pixel. No comb: the neighbours'
-// bursts are noise.
+// calm.cells cells either side, and of that only the share calm.share is this line's: the rest is what the lines
+// above it in the field had there (_calm_u, _calm_v, a cell each). Luma as ever, every pixel. No comb: the
+// neighbours' bursts are noise.
 void LineDrawer::draw_colour_calm(uint32_t *row, const SampleRings &R, double base, float yscale, std::complex<float> rot,
-                                  float k_uv, float calm, int x0, int x1, const DrawParams &p) {
+                                  float k_uv, Calm calm, int x0, int x1, const DrawParams &p) {
   using cf = std::complex<float>;
   if (x1 <= x0) return;
   const double *xo = _px_off.data();
@@ -207,10 +207,10 @@ void LineDrawer::draw_colour_calm(uint32_t *row, const SampleRings &R, double ba
   sv[g1 + 1 - g0] = av;
   float *pu = _calm_u.data(), *pv = _calm_v.data();
   for (int g = g0; g <= g1; g++) {
-    const int a = std::max(g0, g - kCalmCells), b = std::min(g1 + 1, g + kCalmCells + 1);
+    const int a = std::max(g0, g - calm.cells), b = std::min(g1 + 1, g + calm.cells + 1);
     const float inv = 1.f / static_cast<float>(b - a);
-    pu[g] += calm * ((su[b - g0] - su[a - g0]) * inv - pu[g]);
-    pv[g] += calm * ((sv[b - g0] - sv[a - g0]) * inv - pv[g]);
+    pu[g] += calm.share * ((su[b - g0] - su[a - g0]) * inv - pu[g]);
+    pv[g] += calm.share * ((sv[b - g0] - sv[a - g0]) * inv - pv[g]);
   }
   const float sg = p.sign, sb = p.sign * p.blank;
   for (int x = x0; x < x1; x += 4) {
@@ -309,7 +309,7 @@ void LineDrawer::draw(uint32_t *row, const SampleRings &R, const LineInfo &l, bo
   // a neighbour that is not (or not all) in the rings does not count
   if (dn && !R.written(static_cast<int64_t>(ls + a0 + aw + cdel + T + 2))) dn = false;
   if (up && !R.kept(static_cast<int64_t>(ls + a0 - T), 8)) up = false;
-  const bool calm = l.col && l.calm > 0;
+  const bool calm = l.col && l.calm.share > 0;
   const bool comb_on = l.col && !calm && (up || dn || l.fade);
   if (comb_on) comb_weights(R, ls, yscale, up, dn, l.fade, p);
   // [x0, x1): the pixels whose samples are in the rings (a pixel's first sample only grows with x). The others,
@@ -324,7 +324,7 @@ void LineDrawer::draw(uint32_t *row, const SampleRings &R, const LineInfo &l, bo
     const bool next = l.field == _calm_field && l.k == _calm_k + 1;
     _calm_field = l.field;
     _calm_k = l.k;
-    draw_colour_calm(row, R, base, yscale, rot, k_uv, next ? l.calm : 1.f, x0, x1, p);
+    draw_colour_calm(row, R, base, yscale, rot, k_uv, {next ? l.calm.share : 1.f, l.calm.cells}, x0, x1, p);
   } else if (l.col) {
     draw_colour(row, R, base, yscale, rot, k_uv, comb_on, l.pal_v, x0, x1, p);
   } else {

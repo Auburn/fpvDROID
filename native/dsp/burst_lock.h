@@ -24,6 +24,14 @@
 
 namespace kp {
 
+// How calm a noisy signal's colour is drawn (LineDrawer::draw_colour_calm): U and V smoothed down the field and
+// along the line.
+struct Calm {
+  float share = 0;  // down the field: the line's own share of what is drawn, the rest being what the lines above
+                    // it had (0: not calm, the colour as it comes)
+  int cells = 0;    // along the line: the mean over so many cells either side (a cell: a few pixels)
+};
+
 class BurstLock {
 public:
   // can_average: the decoder has every line's start, found or not (DecoderOpts::hold), so that a noisy signal's
@@ -35,11 +43,15 @@ public:
     _on = false;
     _good = 0;
     _last_line = -1;
+    _snr = 0;
   }
   // How noisy the sync is now (SyncNoise::snr, as often as it has a new one). The burst of a signal whose sync is
   // noisier than kSnrOff is not one to take colour from line by line: its phase is mostly the noise's. Judged over
   // a tenth of a second or so, as the front end's channel filter is.
-  void sync_snr(float snr) { _noise.update(snr, 0.02f); }
+  void sync_snr(float snr) {
+    _noise.update(snr, 0.02f);
+    _snr = _snr > 0 ? _snr + 0.1f * (snr - _snr) : snr;
+  }
   // The sync is that noisy, and the bursts are averaged: then a line whose hsync was not found has colour too, if
   // the decoder has its start.
   bool averaging() const { return way() == Way::mean; }
@@ -52,7 +64,7 @@ public:
   bool on() const { return _on; }                    // colour is being decoded
   double phase() const { return _phase; }            // the reference phase after the last burst (rad) ...
   float size() const { return _size; }               // ... and the burst amplitude the colour is drawn against
-  float calm() const { return _mean ? kCalm : 0; }   // ... smoothed, by this share a line (LineInfo::calm; 0: not)
+  Calm calm() const;                                 // ... and how calm it is drawn (LineInfo::calm)
   float err() const { return _err; }                 // the bursts' mean |phase error| against the reference (rad)
   float last_err() const { return _e; }              // ... and the last burst's
 
@@ -68,7 +80,16 @@ private:
   static constexpr int kLines = 128, kMin = 32;
   static constexpr float kOn = 0.4f, kOff = 0.25f;
   static constexpr double kStep = 0.05, kDrift = 0.0005;
-  static constexpr float kCalm = 0.1f, kNoise = 0.3f;
+  static constexpr float kNoise = 0.3f;
+  static constexpr Calm kMeanCalm{0.1f, 3};  // Way::mean's colour is drawn this calm
+  // A moderately noisy signal's colour, line by line still (Way::each), is drawn calm too (NTSC), the more the
+  // noisier the sync: not at all at a sync snr of kEachHi and over, at the most (kEachCalm) at kEachLo and under.
+  // Measured on a still scene against the mean of 200 of its pictures (its true colours): one recording at sync
+  // snr 27 had its colour error go from 13.1 to 5.2 at that strength (stronger smoothing gained little more and
+  // blurred more), a clean one with noise added from 13.7 to 5.3 at snr 29 and from 8.2 to 3.8 at 44, while the
+  // blur at colour edges doubles (2.9 to 5.7) at any snr. A clean signal (snr 57 there) keeps its sharp colour.
+  static constexpr Calm kEachCalm{0.3f, 2};
+  static constexpr float kEachHi = 50, kEachLo = 30;
 
   bool follow_mean(std::complex<float> b, float mag, float nv, double pred, int64_t line);
   void note(int64_t line, float mag, float e);
@@ -83,6 +104,7 @@ private:
   float _mag = 0, _err = 1;      // the bursts' amplitude (MHz) and mean |phase error| (rad), smoothed
   float _e = 0;
   float _size = 0;
+  float _snr = 0;                // the sync's snr lately (0: not known)
   bool _on = false;
   int _good = 0;                 // the colour killer's count: up with a good burst, down two with a bad one
   // Way::mean

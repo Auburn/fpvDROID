@@ -38,7 +38,7 @@ struct SampleRings {
 
 // The sync path's samples (the decoder's 1 MHz low-pass and 3-point median), the last kMask + 1 of them by
 // absolute index: for what looks at a line's sync once the line has ended (the fold of the lines: line_hold.h; the
-// vertical sync by its half lines: vert_sync.h; the noise on the back porch: sync_noise.h).
+// vertical sync by its half lines: vert_sync.h; the noise on the sync tip and the back porch: sync_noise.h).
 struct SyncRing {
   static constexpr size_t kMask = 8191;
   std::vector<float> v;

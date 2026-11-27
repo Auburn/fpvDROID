@@ -75,7 +75,7 @@ public:
     double T;            // the line period, samples
     float sign;          // the polarity, and the levels as the decoder has them
     LevelPair levels;
-    float snr;           // the sync's depth over its noise (sync_noise.h); 0: not known
+    float snr;           // the sync's depth over its noise, the last SyncNoise::kEvery lines'; 0: not known
   };
   struct Verdict {
     double next, T;                   // where the next line begins, and the line period: as they were, or steered
