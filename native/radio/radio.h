@@ -23,6 +23,7 @@
 #include "fallback_policy.h"
 #include "frame_gate.h"
 #include "pilots.h"
+#include "scan.h"
 #include "spectrum.h"
 #include "steps.h"
 #include "sweep.h"
@@ -147,6 +148,7 @@ private:
   bool next_step();
   bool capture_step(const Bank &b);
   void handle_scan(Bank &b);
+  void add_extra_steps(const std::vector<ScanPlan::Extra> &extra);
   void handle_sweep(Bank &b);
   void handle_test(Bank &b);
   void scan_step_done();
@@ -227,9 +229,10 @@ private:
   ComboStatus _comb_status;  // under _m
   // scan, and sweep
   Steps _steps;  // the retunes of the scan or of the sweep's pass, and the capture of the one under way
-  // The scan's progress as status_json() shows it (steps done, of how many). Atomic: read there while the DSP
-  // thread moves it on, and set back to the start by scan() for the status to show until that thread takes the
-  // new scan up.
+  ScanPlan _scan;  // the scan's plan, and its extra steps for signals its steps see cut by an edge
+  // The scan's progress as status_json() shows it (steps done, of how many: the plan's and the extra steps given so
+  // far, so the count can grow while the scan runs). Atomic: read there while the DSP thread moves it on, and set
+  // back to the start by scan() for the status to show until that thread takes the new scan up.
   std::atomic<size_t> _step{0}, _plan_n{0};
   std::vector<Hump> _humps;  // this step's candidates (from the first kPsdSpan of the capture)
   double _resume_hz = 0;

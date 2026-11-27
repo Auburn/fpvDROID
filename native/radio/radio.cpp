@@ -23,8 +23,6 @@ int64_t now_ms() {
 
 namespace {
 constexpr double kFs = 40e6;
-constexpr double kEdge = 16.5e6;     // usable +- span at 40 MS/s (BW40 DFIR is flat to ~17 MHz)
-constexpr double kStep = 20e6;       // a hump up to ~13 MHz wide is fully inside some step's span
 constexpr double kCapture = 0.09;    // s of IQ per scan step (60 ms acquisition + ~300 lines)
 constexpr double kPsdSpan = 0.012;   // s of it for the spectrum
 constexpr int64_t kSnrEveryMs = 500;  // live SNR while watching (~2 % of a core at 20 MS/s)
@@ -32,14 +30,6 @@ constexpr double kSnrSpan = 8e6;      // +- span the BW20 RX filter passes flat 
 // Off-centre tuning at 40 MS/s: how far beside the pilot the hardware centre goes (Radio::offset_centre). The
 // video swings about +-2.5 MHz around its carrier; this keeps that clear of the DC point and inside the flat band.
 constexpr double kOffsetAim40 = 6e6;
-
-std::vector<double> scan_plan() {
-  std::vector<double> p;
-  // the common analog bands first (A, B, E, F, R: 5645..5945), then the low band (L: 5362..5621)
-  for (double c = 5652e6; c <= 5940e6; c += kStep) p.push_back(c);
-  for (double c = 5370e6; c <= 5630e6; c += kStep) p.push_back(c);
-  return p;
-}
 
 // A step's samples as a spectrum (Psd::db(): fftshifted, kFs wide, dB).
 std::vector<float> spectrum_db(const std::vector<cf> &x) {
@@ -252,7 +242,7 @@ void Radio::scan(double prefer_hz) {
   // the status says "scan" from here on: its progress with it, not what the scan before left (the DSP thread
   // sets both again when it takes the scan up, and moves the step on only for the scan it is working on)
   _step = 0;
-  _plan_n = scan_plan().size();
+  _plan_n = ScanPlan::plan().size();
 }
 
 void Radio::watch(double hz) {
@@ -460,7 +450,7 @@ void Radio::begin_watch() {
 }
 
 void Radio::begin_scan() {
-  auto plan = scan_plan();
+  auto plan = _scan.start();
   _plan_n = plan.size();
   _step = 0;
   {
@@ -551,8 +541,8 @@ void Radio::measure_snr(const std::vector<cf> &iq, double fs, double shift_hz) {
   _snr_have += iq.size();
   if (_snr_have < _snr_need) return;
   // Around the carrier (at shift_hz: beside the centre with off-centre tuning), within the band the RX filter
-  // passes: the BW40 DFIR's +-kEdge at 40 MS/s, the BW20 set's +-kSnrSpan at 20 MS/s.
-  const double pass = fs >= 40e6 ? kEdge : std::min(kSnrSpan, 0.4 * fs);
+  // passes: the BW40 DFIR's +-ScanPlan::kEdge at 40 MS/s, the BW20 set's +-kSnrSpan at 20 MS/s.
+  const double pass = fs >= 40e6 ? ScanPlan::kEdge : std::min(kSnrSpan, 0.4 * fs);
   const float snr = carrier_snr(_snr_psd->db(), fs, std::min(kSnrSpan, 0.4 * fs), shift_hz, pass);
   _snr_psd.reset();
   _snr_t_ms = now_ms();
@@ -769,13 +759,24 @@ void Radio::handle_scan(Bank &b) {
     // spectrum first: a step with no candidate is done now; otherwise keep capturing for the sync check
     const std::vector<float> db = spectrum_db(_steps.iq());
     add_spectrum(db, _steps.centre_hz());
-    _humps = find_humps(db, kFs, kEdge);
+    StepSignals s = find_step_signals(db, kFs, ScanPlan::kEdge);
+    add_extra_steps(_scan.step(_steps.centre_hz(), s.whole, s.cut));  // now, while the next retune is still to come
+    _humps = std::move(s.whole);
     if (!_humps.empty()) {
       _steps.want(static_cast<size_t>(kCapture * kFs));
       return;
     }
   }
   scan_step_done();
+}
+
+// A signal that the scan's steps have only seen cut by an edge of one gets a step of its own (scan.h), taken right
+// after this one. The sweep needs none: it finds signals in the band picture, which joins its steps.
+void Radio::add_extra_steps(const std::vector<ScanPlan::Extra> &extra) {
+  for (const auto &e : extra)
+    KP_LOGI("scan: %.1f MHz step: extra step at %.1f MHz, for a signal at %.1f..%.1f MHz (0: an end no step saw), "
+            "%.1f dB", _steps.centre_hz() / 1e6, e.hz / 1e6, e.lo_hz / 1e6, e.hi_hz / 1e6, e.snr_db);
+  _steps.insert(ScanPlan::hz_of(extra));
 }
 
 void Radio::handle_sweep(Bank &b) {
@@ -796,7 +797,7 @@ void Radio::handle_sweep(Bank &b) {
 
 void Radio::add_spectrum(const std::vector<float> &db, double centre_hz) {
   std::lock_guard<std::mutex> l(_m);
-  _band.add(db, kFs, centre_hz, kEdge, now_ms());
+  _band.add(db, kFs, centre_hz, ScanPlan::kEdge, now_ms());
 }
 
 void Radio::scan_step_done() {
@@ -829,14 +830,18 @@ void Radio::scan_step_done() {
     // has the last word: the status shows its progress (a scan called again starts at 0), and the end of
     // this scan does not put a watch of its own choosing over it. The next bank takes that call up.
     const bool current = _mode_epoch == _epoch_seen;
-    if (current) _step = _steps.at();
+    if (current) {
+      _step = _steps.at();
+      _plan_n = _steps.size();  // with the extra steps given so far
+    }
     // this step's pilots into the list, less any that is only a strong VTX's copy (pilots.h)
     for (const auto &c : _pilots.add(found, _resume_hz / 1e6))
       KP_LOGI("scan: %.1f MHz taken as a copy of %.1f MHz", c.mhz, c.of_mhz);
     if (done && current) {
       // after a scan: the pilot watched before, if this scan saw it, else the strongest it saw
       next_watch = _pilots.watch_after_scan(_resume_hz / 1e6) * 1e6;
-      KP_LOGI("scan: done, %zu pilot(s)%s", _pilots.list().size(), next_watch > 0 ? ", watching" : "");
+      KP_LOGI("scan: done, %zu pilot(s), %zu extra step(s)%s", _pilots.list().size(), _scan.given(),
+              next_watch > 0 ? ", watching" : "");
       if (next_watch > 0) {
         _watch_hz = next_watch;
         _mode = Mode::Watch;
@@ -960,7 +965,7 @@ std::string Radio::spectrum_json(double lo_hz, double hi_hz) {
     sweeps = _mode == Mode::Sweep ? _sweep.passes() : 0;
   }
   // the bin size is fixed: no lock needed
-  return band_json(db, first, _band.bin_hz(), at, 2 * kEdge, sweeps);
+  return band_json(db, first, _band.bin_hz(), at, 2 * ScanPlan::kEdge, sweeps);
 }
 
 }  // namespace kp
