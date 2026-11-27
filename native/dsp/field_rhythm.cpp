@@ -21,7 +21,8 @@ void FieldRhythm::doubt() {
   _doubt = true;
 }
 
-std::optional<FieldStart> FieldRhythm::seen(FieldStart in_hand, FieldStart s, int64_t field_lines, bool held, bool faint) {
+std::optional<FieldStart> FieldRhythm::seen(FieldStart in_hand, FieldStart s, int64_t field_lines, Signal signal) {
+  const bool held = signal == Signal::held, faint = signal != Signal::steady;
   if (!believed(in_hand.kind)) {
     _odd_n = 0;
     _doubt = false;

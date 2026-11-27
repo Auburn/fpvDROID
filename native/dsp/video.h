@@ -96,7 +96,7 @@ struct DecoderOpts {
   // The line grid is held through a signal too weak for its lines' hsyncs to be found, by the fold of many
   // lines; such a signal's fields are found by what their half lines are, and it is acquired by that fold.
   bool hold = true;
-  // A channel filter ahead of the discriminator while the sync is noisy (FrontEnd, see kCf): less of the noise
+  // A channel filter ahead of the discriminator while the sync is noisy (channel_filter.h): less of the noise
   // reaches it, and a weak signal's picture has fewer sparkles and less snow. (It goes by the hold's measure of
   // the sync's noise: without the hold there is no filter either.)
   bool channel_filter = true;
@@ -146,8 +146,10 @@ constexpr int kStripRows = 32;
 
 class Decoder;
 class ClickDetector;
+class ChannelFilter;
 
-// IQ (at fs_in) -> DC removal -> NCO -> [halfband /2 when fs_in >= 40e6] -> FM discriminator -> Decoder.
+// IQ (at fs_in) -> DC removal -> NCO -> [halfband /2 when fs_in >= 40e6] -> [channel filter, while the sync is
+// noisy] -> FM discriminator -> Decoder.
 class FrontEnd {
 public:
   FrontEnd(double fs_in, double shift_hz, FrameSink sink, const DecoderOpts &o = {}, const PictureOpts &p = {});
@@ -181,44 +183,10 @@ private:
   std::vector<float> _dbuf;
   std::vector<uint8_t> _badbuf;
   std::atomic<PictureOpts> _picture;  // set_picture(): read by demod() at each call, by the decoder at each line
-  // The channel filter (DecoderOpts::channel_filter). The stream has no filter of its own narrower than its sample
-  // rate: at 20 MS/s close to 20 MHz of noise reach the discriminator, and an FM picture needs about 10 dB of
-  // carrier over that noise before it is free of sparkles (below that it loses contrast as well). The signal
-  // itself is narrower. So while the decoder finds the sync noisy (its depth less than kCfOn times the noise on
-  // the back porch; until it is more than kCfOff times with the filter in), the stream goes through a low-pass
-  // kCfDepths sync depths wide around the middle of the signal's swing, sync tip to white, as the decoder has them
-  // from better times. That width is what recordings of three transmitters with noise added came out best with,
-  // each against its own pictures without the noise: +0.3 to +1.3 dB of picture with the carrier 12 dB over the
-  // noise, +2 to +4.5 dB at 3 to 6 dB, and four lines in five finding their hsync where half did. Narrower than
-  // the swing and the picture breaks up; on a clean signal the filter costs fine detail, so it is out then.
-  // Out, the stream is only delayed by as much as the filter delays it, so that the picture does not step
-  // sideways when it comes in.
-  static constexpr int kCf = 23;  // taps
-  static constexpr float kCfOn = 24, kCfOff = 36, kCfDepths = 6, kCfMinMhz = 7, kCfMaxMhz = 13;
-  static constexpr float kCfMinDepth = 1.0f;  // MHz: a sync depth below any transmitter's (they are 1.3 to 2.0)
-  static constexpr double kCfJudgeS = 0.1;    // in or out is judged over about this long;
-  static constexpr double kCfLostS = 1.0;     // out when the lock has been gone for this long;
-  static constexpr double kCfSmoothS = 0.3;   // and the filter's middle follows the levels over this long
-  // decode()'s (steer_channel_filter): how much of the time lately the sync was noisy by the measure for coming
-  // in, and by the one for going out; how long the lock has been gone; where the levels put the filter's middle
-  // (smoothed; _cf_at_n: times measured), and the deepest sync depth seen
-  float _cf_noisy = 0, _cf_unclean = 0;
-  double _cf_lost = 0;
-  float _cf_at = 0, _cf_now = 0, _cf_depth = 0;  // (_cf_now: the sync depth, smoothed the same way)
-  int _cf_at_n = 0;
-  std::atomic<uint64_t> _cf_changes{0};
-  bool _cf;                          // the filter is there to be used
-  float _cf_h[kCf] = {};
-  std::vector<float> _cf_r, _cf_i;   // the last kCf - 1 samples of the stream, I and Q
-  std::vector<float> _cf_fr, _cf_fi; // a chunk through the filter
-  void channel_filter(const float *s, int ny, std::vector<float> &out);
-  float _cf_width = 0, _cf_centre = 0;  // in use, MHz: how wide (0: out), and its middle above the carrier
-  std::atomic<float> _cf_want_width{0}, _cf_want_centre{0};  // decode() says, demod() does
   void tune(double hz);
-  void retune_channel_filter();
-  void steer_channel_filter(size_t samples);
   Decoder *_dec;
   ClickDetector *_clicks;  // sparkle repair's half of demod() (sparkle.h)
+  ChannelFilter *_chan = nullptr;  // the channel filter (channel_filter.h); null: none (DecoderOpts::channel_filter)
 };
 
 }  // namespace kp

@@ -42,17 +42,22 @@ public:
   // Line `line` has ended with no start found: the start of the field after in_hand, once that is kNear lines
   // overdue. Nothing before then, or without a rhythm.
   std::optional<FieldStart> overdue(FieldStart in_hand, int64_t line) const;
-  // A vertical sync found the decoder's other way, by what its half lines are (video.cpp: vert_line), which works
-  // in noise and is known three lines after the field began: s, while in_hand is being drawn. Where a field begins
-  // now, if one does. While each line's hsync is found it comes after the start found by the broad pulses' run, or
-  // after the flywheel has begun the field, and mostly says the same: nothing. It counts where that way finds none
+  // What kind of signal a vertical sync is seen in (seen).
+  //  steady: each line's hsync is found;
+  //  faint:  the decoder held its grid by the fold of the lines not long ago (line_hold.h). Such a signal shows
+  //          few of its vertical syncs, but hardly one that is none (of 161 in one recording 7, of 54 in another
+  //          1): kOffFaint of them off the rhythm the same way are enough, and they may be further apart;
+  //  held:   it does so now. Faint, and this is the only way its vertical syncs are found: one is known before the
+  //          flywheel acts and begins the field itself, and one a line or two off is put right.
+  enum class Signal { steady, faint, held };
+  // A vertical sync found the decoder's other way, by what its half lines are (vert_sync.h), which works in noise
+  // and is known three lines after the field began: s, while in_hand is being drawn. Where a field begins now, if
+  // one does. While each line's hsync is found it comes after the start found by the broad pulses' run, or after
+  // the flywheel has begun the field, and mostly says the same: nothing. It counts where that way finds none
   // (then it begins the fields, and with them the rhythm), and where it keeps saying otherwise: kOff in a row off
   // the rhythm the same way, each where the standard's rhythm leads from the one before, and the fields begin
-  // where they say. held: the decoder holds its grid by the fold of the lines, where this is the only way: it is
-  // known before the flywheel acts and begins the field itself, and one a line or two off is put right. faint:
-  // the signal shows few of its vertical syncs, but hardly one that is none (of 161 in one recording 7, of 54 in
-  // another 1): kOffFaint of them off the rhythm the same way are enough, and they may be further apart.
-  std::optional<FieldStart> seen(FieldStart in_hand, FieldStart s, int64_t field_lines, bool held, bool faint);
+  // where they say.
+  std::optional<FieldStart> seen(FieldStart in_hand, FieldStart s, int64_t field_lines, Signal signal);
 
 private:
   static constexpr int kNear = 2, kOff = 3;

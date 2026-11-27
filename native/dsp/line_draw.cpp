@@ -55,8 +55,11 @@ void LineDrawer::set_std(const VideoStd &s, double comb_w) {
   _px_cm.assign(_w + kPad, 0.f);
   _px_cr.assign(_w + kPad, 0.f);
   _px_ci.assign(_w + kPad, 0.f);
-  _sum_u.assign(_w + kPad, 0.f);
-  _sum_v.assign(_w + kPad, 0.f);
+  const size_t cells = static_cast<size_t>(_w / kCalmStep + 2);  // (and one past the last, for the sums)
+  _sum_u.assign(cells, 0.f);
+  _sum_v.assign(cells, 0.f);
+  _calm_u.assign(cells, 0.f);
+  _calm_v.assign(cells, 0.f);
   _calm_k = -2;
   _px_off.resize(_w + kPad);
   for (int x = 0; x < _w + kPad; x++) _px_off[x] = s.aw_us * 1e-6 * _fs * x / _w;
@@ -175,8 +178,8 @@ void LineDrawer::draw_colour(uint32_t *row, const SampleRings &R, double base, f
 // megahertz and more across, and another on every line; the picture's colours change slowly both ways. So U and V
 // are taken at every kCalmStep-th pixel only (a cell: far finer than the smoothing), each cell's are the mean over
 // kCalmCells cells either side, and of that only the share `calm` is this line's: the rest is what the lines above
-// it in the field had there (_prev_u, _prev_v, a cell each: NTSC has no other use for them). Luma as ever, every
-// pixel. No comb: the neighbours' bursts are noise.
+// it in the field had there (_calm_u, _calm_v, a cell each). Luma as ever, every pixel. No comb: the neighbours'
+// bursts are noise.
 void LineDrawer::draw_colour_calm(uint32_t *row, const SampleRings &R, double base, float yscale, std::complex<float> rot,
                                   float k_uv, float calm, int x0, int x1, const DrawParams &p) {
   using cf = std::complex<float>;
@@ -202,7 +205,7 @@ void LineDrawer::draw_colour_calm(uint32_t *row, const SampleRings &R, double ba
   }
   su[g1 + 1 - g0] = au;
   sv[g1 + 1 - g0] = av;
-  float *pu = _prev_u.data(), *pv = _prev_v.data();
+  float *pu = _calm_u.data(), *pv = _calm_v.data();
   for (int g = g0; g <= g1; g++) {
     const int a = std::max(g0, g - kCalmCells), b = std::min(g1 + 1, g + kCalmCells + 1);
     const float inv = 1.f / static_cast<float>(b - a);

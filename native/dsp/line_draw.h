@@ -24,8 +24,8 @@ struct LineInfo {
   uint64_t epoch = 0;  // which stretch of unbroken stream it is in (lines across a jump don't comb)
   double phase = 0;    // the burst's reference phase and amplitude after this line's burst
   float mag = 0;
-  // A noisy signal's colour (the decoder's faint_burst): above 0, U and V are smoothed along the line and down
-  // the field, and this is the share of the line's own in what is drawn (LineDrawer::draw_colour_calm)
+  // A noisy signal's colour (BurstLock::calm): above 0, U and V are smoothed along the line and down the field,
+  // and this is the share of the line's own in what is drawn (LineDrawer::draw_colour_calm)
   float calm = 0;
   // Its sync was at other levels than the decoder's (the signal has jumped: SyncLevels::look): it is drawn
   // against these, its own
@@ -78,8 +78,10 @@ private:
   std::vector<float> _comb_m;  // the comb on every other pixel: chroma becomes c * (1 - _comb_m) - _comb_o
   std::vector<std::complex<float>> _comb_o;
   std::vector<float> _px_cm, _px_cr, _px_ci;  // ... and for each pixel (chroma * _px_cm - _px_c{r,i})
-  std::vector<float> _sum_u, _sum_v;  // draw_colour_calm: the line's U and V summed up to each cell
-  int64_t _calm_k = -2;  // ... and the last line drawn that way: its row and field
+  // draw_colour_calm: the line's U and V summed up to each cell; what the lines above it in the field had at each
+  // cell (smoothed); and the last line drawn that way, its row and field
+  std::vector<float> _sum_u, _sum_v, _calm_u, _calm_v;
+  int64_t _calm_k = -2;
   int _calm_field = -1;
 };
 

@@ -11,7 +11,9 @@
 #include <vector>
 
 #include "field_rhythm.h"
+#include "fold.h"
 #include "log.h"
+#include "sync_noise.h"
 #include "video.h"
 
 using namespace kp;
@@ -28,6 +30,22 @@ static int g_checks = 0, g_failed = 0;
 
 // A case's numbers are printed when it failed, or for all cases with KP_TEST_VERBOSE set.
 static bool shown(bool ok) { return !ok || std::getenv("KP_TEST_VERBOSE"); }
+
+// Noise that is the same from run to run: numbers spread evenly over [0, 1) (xorshift), and pairs of normal ones
+// with the standard deviation sd (Box-Muller).
+struct Noise {
+  uint64_t x;
+  double uniform() {
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    return static_cast<double>(x >> 11) * (1.0 / 9007199254740992.0);
+  }
+  std::pair<double, double> normal2(double sd) {
+    const double r = sd * std::sqrt(-2 * std::log(1 - uniform())), ph = 2 * M_PI * uniform();
+    return {r * std::cos(ph), r * std::sin(ph)};
+  }
+};
 
 // ---------------------------------------------------------------------------------------- the signal
 // A grey NTSC picture as the decoder gets it: discriminator output in MHz at 20 MS/s, sync at the low end.
@@ -388,19 +406,20 @@ static void the_rhythm_on_line_numbers() {
     CHECK(r.found(none, odd, lines) == Start(odd));
     r.doubt();
     CHECK(r.overdue(odd, even.line + 2) == Start(even));
-    CHECK(r.seen(even, FieldStart{0, 600}, lines, true, true) == Start(FieldStart{0, 600}));
+    CHECK(r.seen(even, FieldStart{0, 600}, lines, FieldRhythm::Signal::held) == Start(FieldStart{0, 600}));
     CHECK(r.overdue(FieldStart{0, 600}, 862 + 2) == Start(FieldStart{1, 862}));
-    CHECK(r.seen(FieldStart{0, 600}, FieldStart{1, 880}, lines, true, true) == std::nullopt);  // (no longer)
+    CHECK(r.seen(FieldStart{0, 600}, FieldStart{1, 880}, lines, FieldRhythm::Signal::held) == std::nullopt);  // (no longer)
   }
   {
     // Vertical syncs seen off the rhythm (FieldRhythm::seen), 15 lines early here and ten fields apart: in a faint
     // signal, which shows few of them, the second is where the fields begin; in any other it takes three, and
     // each within eight fields of the one before.
-    for (const bool faint : {true, false}) {
+    for (const FieldRhythm::Signal signal : {FieldRhythm::Signal::held, FieldRhythm::Signal::faint, FieldRhythm::Signal::steady}) {
+      const bool faint = signal != FieldRhythm::Signal::steady;
       FieldRhythm r;
       CHECK(r.found(none, odd, lines) == Start(odd));
-      CHECK(r.seen(even, FieldStart{0, 610}, lines, true, faint) == std::nullopt);
-      const Start second = r.seen(FieldStart{1, 2987}, FieldStart{0, 3235}, lines, true, faint);
+      CHECK(r.seen(even, FieldStart{0, 610}, lines, signal) == std::nullopt);
+      const Start second = r.seen(FieldStart{1, 2987}, FieldStart{0, 3235}, lines, signal);
       CHECK(second == (faint ? Start(FieldStart{0, 3235}) : std::nullopt));
     }
   }
@@ -542,23 +561,76 @@ static void levels_and_flywheel_together_and_apart() {
 
 // ---------------------------------------------------------------------------------------- a weak signal
 
+// The fold by itself (fold.h), on a fold made here: blanking at 0, an hsync 4.7 us long down at -2 that begins at
+// `edge` (bins, to a fraction: a bin an edge falls in has its share of both levels), picture from 9.4 us after it.
+// The hsync is found by its shape, its edge to a hundredth of a bin, and its levels. In a whole line's fold too,
+// where it lies across the fold's ends, and where something dark in the picture looks like a pulse as well (less
+// deep than the sync is): the hsync is the line's best pulse and the lowest thing in it, and the dark bar, looked at
+// by itself, is not. A fold of nothing has none.
+static void the_fold_finds_the_hsync() {
+  const auto level = [](Fold &f, double from, double to, float v) {  // bins [from, to) at v, wrapping
+    const int K = static_cast<int>(f.v.size());
+    for (int i = static_cast<int>(std::floor(from)); i < to; i++) {
+      const double share = std::min<double>(i + 1, to) - std::max<double>(i, from);
+      float &bin = f.v[static_cast<size_t>(((i % K) + K) % K)];
+      bin += static_cast<float>(share) * (v - bin);
+    }
+  };
+  {
+    Fold f;  // a stretch around where the hsync is due, a sample to a bin
+    f.shape(static_cast<size_t>(21 * kUs), kFs, 1, false);
+    const double edge = 7 * kUs + 3.3;
+    level(f, edge, edge + 4.7 * kUs, kTip);
+    const std::optional<FoldPulse> p = f.pulse(f.bins(2.5), f.bins(11.5));
+    CHECK(p && std::fabs(p->edge - edge) < 0.01 && std::fabs(p->tip - kTip) < 0.01f && std::fabs(p->blank - kBlank) < 0.01f &&
+          std::fabs(p->depth - (kBlank - kTip)) < 0.01f);
+    Fold none;
+    none.shape(f.v.size(), kFs, 1, false);
+    CHECK(!none.pulse(none.bins(2.5), none.bins(11.5)));
+  }
+  {
+    Fold f;  // a whole line, four samples to a bin, the hsync two bins before its end
+    const int K = static_cast<int>(kT / 4);
+    f.shape(static_cast<size_t>(K), kFs, 4, true);
+    const double edge = K - 2.4, bar = f.bins(30);
+    level(f, edge, edge + f.bins(4.7), kTip);
+    level(f, edge + f.bins(9.4), edge + f.bins(62), kGrey);
+    level(f, bar, bar + f.bins(5), 0.2f);  // something dark in the picture, as long as a pulse (not as deep)
+    const std::optional<FoldPulse> p = f.pulse(0, K - 1), dark = f.pulse(static_cast<int>(bar) - 4, static_cast<int>(bar) + 4);
+    CHECK(p && std::fabs(p->edge - edge) < 0.01 && std::fabs(p->tip - kTip) < 0.01f && p->lowest_there());
+    // (the bar passes for a pulse by its shape, but lies well above the lowest thing in the line)
+    CHECK(dark && std::fabs(dark->edge - bar) < 0.5 && dark->tip > p->lowest + 0.25f * dark->depth);
+  }
+}
+
+// Noisy or not goes by how much of the time (sync_noise.h): one noisy moment in ten is not noise; noisy most of
+// the time is, after some thirty measurements at a fiftieth each; between the two limits it stays what it was;
+// and it is clean again once it has been over the upper one for four fifths of the time.
+static void noisy_by_how_much_of_the_time() {
+  NoisyLatch l{12, 16};
+  for (int i = 0; i < 300; i++) l.update(i % 10 == 0 ? 5.f : 30.f, 0.02f);
+  CHECK(!l.noisy);
+  int n = 0;
+  while (!l.noisy && n < 1000) l.update(5.f, 0.02f), n++;
+  CHECK(l.noisy && n > 20 && n < 40);
+  for (int i = 0; i < 300; i++) l.update(14.f, 0.02f);
+  CHECK(l.noisy);
+  n = 0;
+  while (l.noisy && n < 1000) l.update(30.f, 0.02f), n++;
+  CHECK(!l.noisy && n > 60 && n < 100);
+}
+
 // The signal as a receiver far from the transmitter gives it, from t0 to t1 (seconds). The discriminator is
 // captured by the noise part of the time, which pulls every level towards the middle of the band (left: how much
 // of the signal's swing is left), and the noise is on top (sd MHz a sample, white: about a third of it gets through
 // the sync path's low-pass).
 static Signal faded(Signal s, double t0, double t1, float left, float sd, float centre = 0.5f) {
-  uint64_t x = 0x9e3779b97f4a7c15ull;
-  const auto uniform = [&x] {
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    return static_cast<double>(x >> 11) * (1.0 / 9007199254740992.0);
-  };
+  Noise noise{0x9e3779b97f4a7c15ull};
   const size_t a = static_cast<size_t>(t0 * kFs), b = std::min(s.d.size(), static_cast<size_t>(t1 * kFs));
   for (size_t i = a; i < b; i += 2) {
-    const double r = sd * std::sqrt(-2 * std::log(1 - uniform())), ph = 2 * M_PI * uniform();
-    s.d[i] = centre + left * (s.d[i] - centre) + static_cast<float>(r * std::cos(ph));
-    if (i + 1 < b) s.d[i + 1] = centre + left * (s.d[i + 1] - centre) + static_cast<float>(r * std::sin(ph));
+    const auto [n0, n1] = noise.normal2(sd);
+    s.d[i] = centre + left * (s.d[i] - centre) + static_cast<float>(n0);
+    if (i + 1 < b) s.d[i + 1] = centre + left * (s.d[i + 1] - centre) + static_cast<float>(n1);
   }
   return s;
 }
@@ -592,7 +664,7 @@ static void the_grid_is_held_through_a_fade() {
                     got.size() == whole.size() && placed == got.size() && same && bare.losses >= 1 &&
                     bare.frames + 5 <= whole.size();
     CHECK(ok);
-    if (!ok || std::getenv("KP_TEST_VERBOSE"))
+    if (shown(ok))
       std::fprintf(stderr, "  a fade, noise %.0f MHz: %zu pictures of %zu, %zu in place, the last 8 the same %d; %llu holds, "
                    "%llu losses, %llu re-phases, %llu coasted; without the hold %llu pictures, %llu losses\n", sd,
                    got.size(), whole.size(), placed, same, (unsigned long long)st.holds, (unsigned long long)st.losses,
@@ -614,7 +686,7 @@ static void a_weak_signal_from_the_start() {
   const bool ok = st.losses == 0 && st.holding && got.size() + 8 >= whole.size() && placed + 2 >= got.size() &&
                   bare.frames * 2 < got.size();
   CHECK(ok);
-  if (!ok || std::getenv("KP_TEST_VERBOSE"))
+  if (shown(ok))
     std::fprintf(stderr, "  weak from the start: %zu pictures of %zu, %zu in place; %llu acquisitions, %llu losses, %llu "
                  "holds; without the hold %llu pictures\n", got.size(), whole.size(), placed,
                  (unsigned long long)st.acquisitions, (unsigned long long)st.losses, (unsigned long long)st.holds,
@@ -636,7 +708,7 @@ static void nothing_for_a_moment_and_for_long() {
                   placed == got.size() && same;
   CHECK(ok);
   CHECK(gone.losses == 1 && gone.acquisitions == 2 && !gone.acquiring && gone.lock_recent > 0.9f);
-  if (!ok || gone.losses != 1 || std::getenv("KP_TEST_VERBOSE"))
+  if (shown(ok && gone.losses == 1))
     std::fprintf(stderr, "  nothing for 0.2 s: %zu pictures of %zu, %zu in place, the last 8 the same %d, %llu losses, %llu "
                  "re-phases; for 0.8 s: %llu losses, %llu acquisitions, lock %.2f\n", got.size(), whole.size(), placed,
                  same, (unsigned long long)st.losses, (unsigned long long)st.rephases, (unsigned long long)gone.losses,
@@ -765,19 +837,13 @@ static void a_noisy_signal_keeps_its_colour() {
 // (the signal's levels here are the test signal's: sync tip at -2 MHz, white near +4)
 static std::vector<cf> on_a_carrier(const Signal &s, double cnr_db, double above) {
   std::vector<cf> x(s.d.size());
-  uint64_t r = 0x2545f4914f6cdd1dull;
-  const auto uniform = [&r] {
-    r ^= r << 13;
-    r ^= r >> 7;
-    r ^= r << 17;
-    return static_cast<double>(r >> 11) * (1.0 / 9007199254740992.0);
-  };
+  Noise noise{0x2545f4914f6cdd1dull};
   const double sd = cnr_db > 90 ? 0 : std::sqrt(0.5 / std::pow(10, cnr_db / 10));
   double ph = 0;
   for (size_t i = 0; i < x.size(); i++) {
     ph = std::remainder(ph + 2 * M_PI * (s.d[i] + above) * 1e6 / kFs, 2 * M_PI);
-    const double a = sd * std::sqrt(-2 * std::log(1 - uniform())), b = 2 * M_PI * uniform();
-    x[i] = cf(static_cast<float>(std::cos(ph) + a * std::cos(b)), static_cast<float>(std::sin(ph) + a * std::sin(b)));
+    const auto [nr, ni] = noise.normal2(sd);
+    x[i] = cf(static_cast<float>(std::cos(ph) + nr), static_cast<float>(std::sin(ph) + ni));
   }
   return x;
 }
@@ -823,7 +889,7 @@ static void a_noisy_signal_gets_a_channel_filter() {
     const bool ok = with.widest == 0 && with.st.filter_changes == 0 && with.st.losses == 0 &&
                     with.pics.size() == without.pics.size() && same_pictures(with.pics, without.pics, 20, 3);
     CHECK(ok);
-    if (!ok || std::getenv("KP_TEST_VERBOSE"))
+    if (shown(ok))
       std::fprintf(stderr, "  clean: filter %.0f MHz at its widest, %llu changes, %zu pictures (without: %zu), sync snr "
                    "%.0f\n", with.widest, (unsigned long long)with.st.filter_changes, with.pics.size(),
                    without.pics.size(), with.st.sync_snr);
@@ -844,7 +910,7 @@ static void a_noisy_signal_gets_a_channel_filter() {
                       std::fabs(with.st.blank - without.st.blank) < 0.25f * depth &&
                       with.pics.size() + 3 >= without.pics.size();
       CHECK(ok);
-      if (!ok || std::getenv("KP_TEST_VERBOSE"))
+      if (shown(ok))
         std::fprintf(stderr, "  carrier %.0f dB over the noise%s: filter %.0f MHz, %llu changes, lines locked %llu "
                      "(without: %llu), tip %.2f blank %.2f (without: %.2f %.2f), sync snr %.1f (without: %.1f), %zu "
                      "pictures (without: %zu), %llu losses\n", cnr, from_start ? " from the start" : "",
@@ -871,6 +937,8 @@ int main() {
   a_field_start_found_off_is_put_right();
   a_new_rhythm_is_believed();
   levels_and_flywheel_together_and_apart();
+  the_fold_finds_the_hsync();
+  noisy_by_how_much_of_the_time();
   the_grid_is_held_through_a_fade();
   a_weak_signal_from_the_start();
   nothing_for_a_moment_and_for_long();
