@@ -203,7 +203,7 @@ async function connect(fromClick) {
     }
     if (op.text === 'USB 2') {
       await cmd('close');
-      return fail('The adapter is running at USB 2, which is too slow. Plug it into a USB 3 port (usually blue) and replug it.');
+      return fail('The adapter is running at USB 2, which is too slow. Unplug it and plug it into a USB 3 port (usually blue).');
     }
     startScan('card', store.get('lastMhz', 0));
   } catch (e) {
@@ -250,9 +250,9 @@ function onStatus(e) {
     $('scan-progress').hidden = true;
     $('pilots-note').textContent = s.pilots.length
       ? `Found ${s.pilots.length} · just now. Click one to watch it.`
-      : 'No analog video found. Check the VTX is on, then scan again.';
+      : 'No analog video found. Check that the VTX is on, then scan again.';
     if (s.mode !== 'watch' && phase !== 'watching')
-      card('No analog video found. Check that the VTX is powered, then scan again.', { rescan: true });
+      card('No analog video found. Check that the VTX is on, then scan again.', { rescan: true });
     scanFrom = null;
   }
   if (s.mode === 'watch') {
