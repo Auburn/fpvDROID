@@ -6,7 +6,7 @@
 
 namespace kp {
 
-SyncLevels::SyncLevels(double fs) : _fs(fs), _hist(800, 0) {}
+SyncLevels::SyncLevels(double fs, bool follow) : _fs(fs), _follow(follow), _hist(800, 0) {}
 
 bool SyncLevels::mean(const SampleRings &R, double from, double to, float &out) const {
   const int64_t i0 = static_cast<int64_t>(from), i1 = static_cast<int64_t>(to);
@@ -128,34 +128,37 @@ bool SyncLevels::from_hist(uint32_t total, float &tip_o, float &blank_o) {
   return false;
 }
 
-// The lines lately were off the kept levels one way: by more than three times what their scatter makes of an
-// average over 8 lines (its variance a 15th of theirs), and by more than a hundredth of the sync depth. And they
-// agree with each other to a tenth of the depth: in heavy noise, with clicks in the sync, two lines off the same
-// way are not a slide, and levels that followed them a quarter of the way would wander.
+// The lines lately were off the kept levels one way: by more than kSlideSigmas times what their scatter makes of
+// their average (a leaky one over kDriftLines lines: its variance is theirs over 2 kDriftLines - 1), and by more
+// than a hundredth of the sync depth. And they agree with each other to a tenth of the depth: in heavy noise, with
+// clicks in the sync, two lines off the same way are not a slide, and levels that followed them a quarter of the
+// way would wander.
 bool SyncLevels::sliding() const {
   const float d = std::fabs(_drift), depth = blank - tip;
-  return d > 0.01f * depth && d * d > 9.f / 15 * _scatter && _scatter < 0.01f * depth * depth;
+  return d > 0.01f * depth && d * d > kSlideSigmas * kSlideSigmas / (2 * kDriftLines - 1) * _scatter &&
+         _scatter < 0.01f * depth * depth;
 }
 
-void SyncLevels::measure(const SampleRings &R, double ls, bool slides) {
+void SyncLevels::measure(const SampleRings &R, double ls) {
   const double us = 1e-6 * _fs;
   float t, b;
   if (!mean(R, ls + kTipUs[0] * us, ls + kTipUs[2] * us, t)) return;
   if (!mean(R, ls + kPorchUs[0] * us, ls + kPorchUs[2] * us, b)) return;
   if (b - t < 0.05f) return;
   const float et = t - tip, eb = b - blank, e = 0.5f * (et + eb);
-  const float a = !settled() ? 0.1f : _fast > 0 || (slides && sliding()) ? 0.25f : 1.f / 64;
+  const float a = !settled() ? 0.1f : _fast > 0 || (_follow && sliding()) ? 0.25f : 1.f / 64;
   if (_fast > 0) _fast--;
   tip += a * et;
   blank += a * eb;
   thr = 0.5f * (tip + blank);
   _gated++;
   // this line into what the next ones go by
-  _scatter += ((e - _drift) * (e - _drift) - _scatter) / 32;
-  _drift += (e - _drift) / 8;
+  _scatter += ((e - _drift) * (e - _drift) - _scatter) / kScatterLines;
+  _drift += (e - _drift) / kDriftLines;
 }
 
 LineLevels SyncLevels::look(const SampleRings &R, double ls) {
+  if (!_follow) return {};
   const double us = 1e-6 * _fs;
   const float depth = blank - tip;
   float t0, t1, b0, b1, front;

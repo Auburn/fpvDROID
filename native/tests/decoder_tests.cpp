@@ -7,9 +7,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <initializer_list>
 #include <optional>
 #include <vector>
 
+#include "burst_lock.h"
 #include "field_rhythm.h"
 #include "fold.h"
 #include "log.h"
@@ -893,19 +895,24 @@ static void a_block_missing_from_a_weak_signal() {
 
 // ---------------------------------------------------------------------------------------- colour in noise
 
+// A wave of `cycles` cycles a line (on the samples' clock) added to the signal over [from_us, to_us) of the line
+// that begins at start, as far as that lies inside the signal.
+static void wave(Signal &s, double start, double from_us, double to_us, double cycles, double amp, double ph) {
+  const double w = 2 * M_PI * cycles / kT;
+  const int64_t a = std::max<int64_t>(0, std::llround(start + from_us * kUs));
+  const int64_t b = std::min<int64_t>(static_cast<int64_t>(s.d.size()), std::llround(start + to_us * kUs));
+  for (int64_t i = a; i < b; i++) s.d[i] += static_cast<float>(amp * std::cos(w * static_cast<double>(i) + ph));
+}
+
 // The grey picture in one colour: a burst on every picture line's back porch (40 IRE peak to peak, as the sync is
-// deep) and a subcarrier across the picture, `hue` radians from the burst. NTSC: 227.5 cycles a line, here on the
-// samples' clock.
-static Signal coloured(double seconds, double hue) {
-  return video(seconds, on_the_grid, [hue](Signal &s, int64_t, double start) {
-    const double w = 2 * M_PI * 227.5 / kT;
-    const auto wave = [&](double from_us, double to_us, double amp, double ph) {
-      const int64_t a = std::max<int64_t>(0, std::llround(start + from_us * kUs));
-      const int64_t b = std::min<int64_t>(static_cast<int64_t>(s.d.size()), std::llround(start + to_us * kUs));
-      for (int64_t i = a; i < b; i++) s.d[i] += static_cast<float>(amp * std::cos(w * static_cast<double>(i) + ph));
-    };
-    wave(5.3, 7.8, 1.0, M_PI);
-    wave(9.4, 62.0, 0.6, M_PI + hue);
+// deep) and a subcarrier across the picture, `hue` radians from the burst. NTSC: 227.5 cycles a line. more: what
+// else is done to each picture line (video()'s damage).
+static Signal coloured(double seconds, double hue,
+                       const std::function<void(Signal &, int64_t, double)> &more = nullptr) {
+  return video(seconds, on_the_grid, [&](Signal &s, int64_t line, double start) {
+    wave(s, start, 5.3, 7.8, 227.5, 1.0, M_PI);
+    wave(s, start, 9.4, 62.0, 227.5, 0.6, M_PI + hue);
+    if (more) more(s, line, start);
   });
 }
 
@@ -926,39 +933,61 @@ static std::pair<double, double> tint(const std::vector<Picture> &v, size_t back
   return {rg / std::max(n, 1.0), bg / std::max(n, 1.0)};
 }
 
-// A noisy signal keeps its colour. One line's burst is mostly noise then, and the decoder used to show no colour
-// (with the hold), or bands of wrong colour (without): now the bursts are averaged over many lines, and the
-// picture's colour is the clean signal's: the same hue, and the paler the larger the noise (a tenth of the clean
-// signal's saturation where the noise through the colour path is some three times the burst). A noisy signal
-// without a burst gets no colour from its noise.
 // How noisy the sync is, is read where a line is flat. A clean signal in colour reads clean: its burst does not
 // count (read on the porch alone it got through the sync path's low-pass enough to pass for noise: never more than
 // 36 depths of sync to one of noise), and neither does a picture that begins bright 8.7 us after the sync's edge,
 // as one camera's does, nor a sync tip that is not flat on a quarter of the lines. The front end's channel filter
 // and the colour go by this number.
+// In those three the flat tips say so, whatever the porch reads. With a ripple on every tip the porch alone has to:
+// its burst and the early picture still leave the reading over 36, where the channel filter stays out. (The porch
+// read sample by sample, not in pairs, gave 32 there; read as far as 8.8 us, 10; as it is, 47.)
 static void a_clean_signal_reads_clean() {
-  const Signal plain = coloured(1.0, 1.0);
-  Signal early = plain;  // the picture from 8.7 us on, bright
-  Signal bent = plain;   // a ripple on the sync tip of a quarter of the lines
-  const double depth = kBlank - kTip;
-  for (int64_t line = 0; static_cast<double>(line + 1) * kT < static_cast<double>(plain.d.size()); line++) {
-    const double start = static_cast<double>(line) * kT;
-    const int64_t in_field = line % 262;
-    if (in_field < 24) continue;
-    early.put(start + 8.7 * kUs, start + 9.4 * kUs, kGrey + 1.5f);
-    if (in_field % 4 == 0)
-      for (int64_t i = std::llround(start + 0.5 * kUs); i < std::llround(start + 4.2 * kUs); i++)
-        bent.d[static_cast<size_t>(i)] += static_cast<float>(0.15 * depth * std::sin(2 * M_PI * 0.9e6 / kFs * static_cast<double>(i)));
-  }
-  const DecoderStats a = decode(plain), b = decode(early), c = decode(bent);
-  const bool ok = a.sync_snr > 60 && b.sync_snr > 60 && c.sync_snr > 60 && a.losses + b.losses + c.losses == 0 &&
-                  a.colour && b.colour && c.colour;
+  // the picture from 8.7 us on, bright; a ripple of 0.9 MHz on the sync tip
+  const auto early = [](Signal &s, double start) { s.put(start + 8.7 * kUs, start + 9.4 * kUs, kGrey + 1.5f); };
+  const auto ripple = [](Signal &s, double start) { wave(s, start, 0.5, 4.2, 0.9e6 * kT / kFs, 0.15 * (kBlank - kTip), 0); };
+  const DecoderStats a = decode(coloured(1.0, 1.0));
+  const DecoderStats b = decode(coloured(1.0, 1.0, [&](Signal &s, int64_t, double start) { early(s, start); }));
+  const DecoderStats c = decode(coloured(1.0, 1.0, [&](Signal &s, int64_t line, double start) {
+    if (line % 4 == 0) ripple(s, start);
+  }));
+  const DecoderStats d = decode(coloured(1.0, 1.0, [&](Signal &s, int64_t, double start) {
+    early(s, start);
+    ripple(s, start);
+  }));
+  const bool ok = a.sync_snr > 60 && b.sync_snr > 60 && c.sync_snr > 60 && d.sync_snr > 36 &&
+                  a.losses + b.losses + c.losses + d.losses == 0 && a.colour && b.colour && c.colour && d.colour;
   CHECK(ok);
   if (shown(ok))
     std::fprintf(stderr, "  sync snr of a clean signal in colour %.0f, with a bright picture from 8.7 us %.0f, with a "
-                 "ripple on a quarter of the sync tips %.0f\n", a.sync_snr, b.sync_snr, c.sync_snr);
+                 "ripple on a quarter of the sync tips %.0f, on all of them and with that picture %.0f\n", a.sync_snr,
+                 b.sync_snr, c.sync_snr, d.sync_snr);
 }
 
+// A moderately noisy signal's colour is still taken line by line, and drawn calm, the more the noisier its sync
+// (BurstLock::calm): as it comes while the sync's snr is not known and at 50 and over, three tenths of each line's
+// own down the field and 2 cells either side along it at 30 and under, half way there at 40. By the snr of the
+// last ten judgements or so: one noisy one does not blur a clean signal's colour. NTSC only.
+static void a_moderately_noisy_signal_has_calm_colour() {
+  const auto at = [](std::initializer_list<float> snrs, bool pal = false) {
+    BurstLock b(kFs, true);
+    b.set_std(pal);
+    for (const float snr : snrs) b.sync_snr(snr);
+    return b.calm();
+  };
+  const Calm unknown = at({}), clean = at({57}), mid = at({40}), most = at({30}), under = at({20});
+  CHECK(unknown.share == 0 && clean.share == 0);
+  CHECK(std::fabs(mid.share - 0.65f) < 1e-3f && mid.cells == 1);
+  CHECK(std::fabs(most.share - 0.3f) < 1e-3f && most.cells == 2);
+  CHECK(under.share == most.share && under.cells == most.cells);
+  CHECK(at({57, 30}).share == 0 && at({57, 30, 30, 30, 30}).share > 0.5f);
+  CHECK(at({30}, true).share == 0);
+}
+
+// A noisy signal keeps its colour. One line's burst is mostly noise then, and the decoder used to show no colour
+// (with the hold), or bands of wrong colour (without): now the bursts are averaged over many lines, and the
+// picture's colour is the clean signal's: the same hue, and the paler the larger the noise (a tenth of the clean
+// signal's saturation where the noise through the colour path is some three times the burst). A noisy signal
+// without a burst gets no colour from its noise.
 static void a_noisy_signal_keeps_its_colour() {
   for (const double hue : {0.6, 2.4, 4.4}) {
     const Signal s = coloured(1.0, hue);
@@ -1132,6 +1161,7 @@ int main() {
   a_dropout_is_coasted_through();
   a_block_missing_from_a_weak_signal();
   a_clean_signal_reads_clean();
+  a_moderately_noisy_signal_has_calm_colour();
   a_noisy_signal_keeps_its_colour();
   a_noisy_signal_gets_a_channel_filter();
   std::printf("%d checks, %d failed\n", g_checks, g_failed);

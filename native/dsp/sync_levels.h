@@ -46,7 +46,9 @@ struct LineLevels {
 
 class SyncLevels {
 public:
-  explicit SyncLevels(double fs);
+  // follow: the kept levels go after a signal that jumps (look) and follow one that slides fast (measure). Without
+  // (DecoderOpts::follow_levels off) they are the sync-gated ones at their own pace, and nothing else.
+  SyncLevels(double fs, bool follow);
 
   float sign = +1;                         // the polarity: +1 with the sync at the low-frequency end
   float tip = -1, blank = 0, thr = -0.5f;  // the kept levels, and the threshold half way between them
@@ -70,11 +72,10 @@ public:
   // The sync-gated measurement has settled. Until it has, every sample of the sync path goes to track().
   bool settled() const { return _gated >= kSettle; }
   void track(float m);
-  // A locked picture line began at ls, with its sync at the kept levels: they follow it. slides: fast while they
-  // slide (not with DecoderOpts::follow_levels off). (The vertical interval's lines with an hsync were measured
-  // too for a while, for the slide to go on through it: the lit recordings came out no different without, and a
-  // weak recording lost half a percent of its lines.)
-  void measure(const SampleRings &R, double ls, bool slides);
+  // A locked picture line began at ls, with its sync at the kept levels: they follow it, fast while they slide.
+  // (The vertical interval's lines with an hsync were measured too for a while, for the slide to go on through
+  // it: the lit recordings came out no different without, and a weak recording lost half a percent of its lines.)
+  void measure(const SampleRings &R, double ls);
   // Does the line that began at ls (its hsync found there, or only due there) have its sync at other levels than
   // the kept ones? It does when there is an hsync at ls by its shape (a pulse flat at its bottom, between two
   // porches at one level, as deep as the sync was) and both its levels are off the kept ones the same way by more
@@ -83,6 +84,7 @@ public:
   // into its broad pulses, as deep again as the sync, would else pass for an hsync one depth down.) The
   // kJumpLines-th such line in a row at the same new levels moves the kept levels onto them. A line with an hsync
   // where the levels were ends the run at once, lines that cannot say (the vertical interval's) after a few.
+  // (Without `follow`, no line says anything.)
   LineLevels look(const SampleRings &R, double ls);
 
   // Where a line's sync is read, in us from its hsync's leading edge: the tip inside the pulse (4.7 us long) and
@@ -95,21 +97,26 @@ public:
 private:
   static constexpr uint64_t kSettle = 64;  // gated lines
   static constexpr int kJumpLines = 3, kFastLines = 128;
+  // A slide (sliding): how far the lines are off the kept levels is averaged over so many lines (_drift), how much
+  // they scatter about that over so many (_scatter), and the first has to be so many times what the second makes
+  // of such an average.
+  static constexpr int kDriftLines = 8, kScatterLines = 32;
+  static constexpr float kSlideSigmas = 3;
 
   bool from_hist(uint32_t total, float &tip_o, float &blank_o);
+  bool sliding() const;
 
   double _fs;
+  bool _follow;
   std::vector<uint32_t> _hist;  // of the samples, by the polarity, over [_hlo, _hhi) MHz
   double _hlo = -8, _hhi = 8;
   int _hdec = 0;
   uint64_t _hist_count = 0;
   uint64_t _gated = 0;                // lines measured sync-gated since acquisition
   int _fast = 0;                      // lines the gated levels still follow fast for
-  // How far the lines lately were off the kept levels (tip and blanking together), on average over ~8 lines, and
-  // how much they scatter about that (mean square, ~32 lines): a slide is the first being more than the second
-  // makes of it.
+  // How far the lines lately were off the kept levels (tip and blanking together) on average, and how much they
+  // scatter about that (mean square): a slide is the first being more than the second makes of it.
   float _drift = 0, _scatter = 0;
-  bool sliding() const;
   int _run = 0, _gap = 0;             // lines that have said the levels moved, and lines since that could not say
   float _run_tip = 0, _run_blank = 0;  // the levels they said (their mean)
 };

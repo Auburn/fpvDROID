@@ -74,21 +74,13 @@ bool BurstLock::follow_mean(cf b, float mag, float nv, double pred, int64_t li) 
   return on;
 }
 
-// How far into its calm drawing a line-by-line signal's colour is: 0 (sharp) to 1 (kEachK, kEachCells).
-float BurstLock::each_t() const {
-  if (_pal || _snr <= 0 || _snr >= kCalmHi) return 0;
-  return std::min(1.f, (kCalmHi - _snr) / (kCalmHi - kCalmLo));
-}
-
-float BurstLock::calm() const {
-  if (_mean) return kCalm;
-  const float t = each_t();
-  return t > 0 ? 1.f - t * (1.f - kEachK) : 0;
-}
-
-int BurstLock::calm_cells() const {
-  if (_mean) return kCalmCells;
-  return static_cast<int>(std::lround(each_t() * kEachCells));
+// How calm the colour is drawn. Averaged (Way::mean): kMeanCalm. Line by line, NTSC, with the sync's snr known and
+// under kEachHi: t of the way from sharp to kEachCalm, which it is at kEachLo and under.
+Calm BurstLock::calm() const {
+  if (_mean) return kMeanCalm;
+  if (_pal || _snr <= 0 || _snr >= kEachHi) return {};
+  const float t = std::min(1.f, (kEachHi - _snr) / (kEachHi - kEachLo));
+  return {1.f - t * (1.f - kEachCalm.share), static_cast<int>(std::lround(t * kEachCalm.cells))};
 }
 
 // A burst has been followed: e, its |phase error| against the reference as it was predicted.

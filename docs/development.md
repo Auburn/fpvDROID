@@ -246,7 +246,8 @@ extra: `KP_CONCEAL=0` shows the frames torn by a stream restart (at once), and `
 the two processing threads on any core (from the next open; by default they are kept off the phone's slowest
 cores, where they fall behind). `KP_LEVELS=0`, `KP_FLYWHEEL=0`, `KP_HOLD=0`, `KP_COAST=0` and `KP_FILTER=0` turn
 off the things the decoder does to keep its picture, to see each by itself (from the next channel or rate watched):
-following a signal whose sync levels jump (a light flashing in the picture does that to some transmitters),
+following a signal whose sync levels jump or slide with the picture's brightness (a light flashing in the picture,
+or a bright sky over dark ground, does that to some transmitters),
 beginning a field where the fields before say when its vertical sync is not found, holding the line grid through a
 signal too weak for its lines' hsyncs to be found (the status line then says `held`, and counts `holds`), coasting
 through a dropout (with the signal gone altogether the lines and the fields run on for as long as the lock had
