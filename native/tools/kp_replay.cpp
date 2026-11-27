@@ -22,7 +22,7 @@
 //   carrier-to-noise ratio that follows these points (seconds of the stream, straight lines between them; 99 and
 //   over: none), and --fade-every S: the same again every S seconds. --drop T:N,T:N,...: N samples of the recording
 //   missing at T seconds of the stream, as when the phone drops a block.
-//   kp_replay REC.cs16 --frames | ffplay -f rawvideo -pixel_format rgb0 -video_size 720x480 -i -
+//   kp_replay REC.cs16 --frames | ffplay -f rawvideo -pixel_format rgb0 -video_size 720x484 -i -
 #include <chrono>
 #include <cmath>
 #include <cstdio>

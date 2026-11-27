@@ -18,10 +18,11 @@ using cf = std::complex<float>;
 
 struct VideoStd {
   double T_us;   // line period
-  double a0_us;  // active video start after the hsync leading edge
-  double aw_us;  // active video width
-  int active;    // active lines per field
-  int skip;      // lines from the field's first broad pulse to the first active line
+  // The part of the signal that is drawn (video.cpp: the picture, with a sliver of blanking round it):
+  double a0_us;  // its start after the hsync leading edge ...
+  double aw_us;  // ... and its width
+  int active;    // lines drawn per field ...
+  int skip;      // ... from this many lines after the line of the field's first broad pulse
   int field_lines;  // whole lines in an odd field; an even one has one more
   const char *name;
 };
@@ -43,7 +44,7 @@ struct LineTimes {
 // the picture (finished()); until then the lines from y1 down are still the picture before's.
 struct Frame {
   const uint8_t *data;  // the whole picture, line 0 first
-  int width, height;    // 720 x 480 (NTSC) / 720 x 576 (PAL)
+  int width, height;    // 720 x 484 (NTSC) / 720 x 576 (PAL)
   const VideoStd *std;
   int y0, y1;           // the lines that are new with this frame ...
   LineTimes times{};    // ... and when they were taken

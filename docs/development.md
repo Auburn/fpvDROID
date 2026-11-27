@@ -283,11 +283,11 @@ build/desktop/kp_render out.ppm --scale 0.8 --stereo --eye -0.02 --offset 0,0.04
 build/desktop/kp_render out.ppm --nofeed --label R8 --inset 1 --box 68,722,493,289 --radius 37   # no picture on R8, in the menu's preview
 build/desktop/kp_replay ../vtx-spike/rec/demo.cs16            # lock numbers
 build/desktop/kp_replay ../vtx-spike/rec/r4.cs16 --cnr 8      # with noise added (CNR in an 18 MHz channel)
-build/desktop/kp_replay ../vtx-spike/rec/r4.cs16 --frames | ffplay -f rawvideo -pixel_format rgb0 -video_size 720x480 -i -
+build/desktop/kp_replay ../vtx-spike/rec/r4.cs16 --frames | ffplay -f rawvideo -pixel_format rgb0 -video_size 720x484 -i -
 KP_SIM_FILE=../vtx-spike/rec/r4.cs16 build/desktop/kp_sim --scan   # scan -> watch without hardware
 build/desktop/kp_gen rec/f2 --mhz 5760 --centre 5770 --cnr 35 --label F2   # F2, halfway between the 5750 and 5770 retunes
 KP_SIM_FILE=rec/f2.cs16 build/desktop/kp_sim --scan   # right after 5770, a retune at 5760 for it ("scan: 5770.0 MHz step: extra step at 5760...")
-build/desktop/kp_live --scan --frames | ffplay -f rawvideo -pixel_format rgb0 -video_size 720x480 -framerate 60 -fflags nobuffer -i -
+build/desktop/kp_live --scan --frames | ffplay -f rawvideo -pixel_format rgb0 -video_size 720x484 -framerate 60 -fflags nobuffer -i -
 ```
 
 Measured on the spike's recordings (R4 NTSC VTX on the bench): 96.5 % of lines locked, no lock losses

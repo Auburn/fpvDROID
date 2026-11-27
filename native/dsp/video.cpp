@@ -27,8 +27,22 @@
 
 namespace kp {
 
-const VideoStd kNtsc{63.5556, 9.4, 52.6, 240, 18, 262, "NTSC"};
-const VideoStd kPal{64.0, 10.5, 52.0, 288, 22, 312, "PAL"};
+// What is kept of each line and field: the whole picture, with a sliver of blanking round it. The standards' active
+// line (NTSC 9.4-62.0 us after the hsync, PAL 10.4-62.35 us) is narrower than what an FPV camera sends: on a lit
+// NTSC recording (logs/strips/lit) the picture ran 8.85-62.3 us and the flight controller's OSD 9.0-62.3 us, so
+// the standard's window cut the outer OSD characters on both sides. (An OSD chip of the MAX7456 kind draws 30
+// characters of 12 pixels at 6.75 MHz: 53.33 us, the 720 samples of BT.601, which start 9.04 us after the hsync
+// in NTSC and 9.78 us in PAL.) Its picture lines were 19-258 and 20-259 after the line of the first broad pulse,
+// by field; line 260 is equalizing pulses only (the next vertical sync) in both. So NTSC is kept 8.55-62.65 us
+// (after the burst, and ahead of the next hsync and of the low-pass's ringing before it) and lines 18-259
+// (720 x 484). Shown whole at 4:3, a camera whose 4:3 picture fills its 53.45 us and 240 lines keeps its shape to
+// within 0.5 % (the standard's window stretched it 1.6 % wide). PAL keeps its lines (22-309; line 310 is equalizing
+// pulses only in one of its two fields) and is widened across as NTSC is against BT.601: 9.3-63.4 us. The PAL
+// recordings here (logs/pixel7a, logs/pixel8) have no camera, only the OSD on its chip's own grey: that grey (the
+// OSD's 30 columns) ran 9.65-62.85 us, the text 10.0-62.45 us on lines 26-251, and the standard's 10.5-62.5 us had
+// cut the first column's characters.
+const VideoStd kNtsc{63.5556, 8.55, 54.1, 242, 18, 262, "NTSC"};
+const VideoStd kPal{64.0, 9.3, 54.1, 288, 22, 312, "PAL"};
 
 // ---- the decoder: discriminator output (MHz) in, frames out ---------------------------------------------
 // It finds the sync pulses (a line PLL that freewheels and re-phases, the field starts by the broad pulses' run),

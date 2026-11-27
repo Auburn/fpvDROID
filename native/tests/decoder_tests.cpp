@@ -244,7 +244,7 @@ static void strips_add_up_to_the_frames() {
     }
     CHECK(same);
     CHECK(same_times);
-    // NTSC: 240 field lines, 32 to a strip (a strip may wait 3 lines for sparkle repair, one for smooth lines)
+    // NTSC: 242 field lines, 32 to a strip (a strip may wait 3 lines for sparkle repair, one for smooth lines)
     CHECK(per_frame >= 7 && per_frame <= 9);
     if (!same || per_frame < 7 || per_frame > 9)
       std::fprintf(stderr, "  smooth %d repair %d comb %d: %zu / %zu frames, %d strips a frame\n", p.smooth_lines,
@@ -260,7 +260,7 @@ static void frames_say_when_their_lines_were_taken() {
   CHECK(f.size() >= 8);
   for (size_t i = 2; i < f.size(); i++) {
     const double lines = (f[i].times.t_last - f[i].times.t_first) * kFs / kT;
-    CHECK(lines > 235 && lines < 245);  // first row to last row: 239 lines apart
+    CHECK(lines > 235 && lines < 245);  // first row to last row: 241 lines apart
     if (i > 2) CHECK(f[i].times.t_first > f[i - 1].times.t_last);
   }
   int frames = 0, timed = 0;
