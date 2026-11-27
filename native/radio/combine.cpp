@@ -31,6 +31,15 @@ constexpr double kLagClear = 0.8;
 // compiler can then do a group at a time without being allowed to reorder float additions (-ffast-math).
 constexpr size_t kLanes = 8;
 
+// Four floats side by side (NEON on a phone, SSE on a PC), to and from memory wherever it lies.
+typedef float f4 __attribute__((vector_size(16)));
+inline f4 load4(const float *p) {
+  f4 v;
+  std::memcpy(&v, p, sizeof v);
+  return v;
+}
+inline void store4(float *p, f4 v) { std::memcpy(p, &v, sizeof v); }
+
 float sum(const float *s) {
   float t = 0;
   for (size_t j = 0; j < kLanes; j++) t += s[j];
@@ -184,14 +193,16 @@ void Combiner::block(cf *a, const cf *b, size_t n) {
   const size_t whole = n - n % kLanes;
   // DC (the adapter's DC line), smoothed across blocks like the demodulator does
   {
-    float sar[kLanes] = {}, sai[kLanes] = {}, sbr[kLanes] = {}, sbi[kLanes] = {};
+    // (each group of kLanes samples added to the partial sums as it lies, real and imaginary parts in turn: taken
+    // apart first, a phone's compiler spent more on that than on the adding)
+    float sa[2 * kLanes] = {}, sb[2 * kLanes] = {};
     for (size_t i = 0; i < whole; i += kLanes)
-      for (size_t j = 0; j < kLanes; j++) {
-        sar[j] += x[2 * (i + j)];
-        sai[j] += x[2 * (i + j) + 1];
-        sbr[j] += y[2 * (i + j)];
-        sbi[j] += y[2 * (i + j) + 1];
+      for (size_t j = 0; j < 2 * kLanes; j++) {
+        sa[j] += x[2 * i + j];
+        sb[j] += y[2 * i + j];
       }
+    float sar[kLanes], sai[kLanes], sbr[kLanes], sbi[kLanes];
+    for (size_t j = 0; j < kLanes; j++) sar[j] = sa[2 * j], sai[j] = sa[2 * j + 1], sbr[j] = sb[2 * j], sbi[j] = sb[2 * j + 1];
     for (size_t i = whole; i < n; i++)
       sar[0] += x[2 * i], sai[0] += x[2 * i + 1], sbr[0] += y[2 * i], sbi[0] += y[2 * i + 1];
     const float mar = sum(sar) / n, mai = sum(sai) / n, mbr = sum(sbr) / n, mbi = sum(sbi) / n;
@@ -202,13 +213,18 @@ void Combiner::block(cf *a, const cf *b, size_t n) {
     _dcbi += (mbi - _dcbi) * 0.3f;
   }
   const float dcar = _dcar, dcai = _dcai, dcbr = _dcbr, dcbi = _dcbi;
-  // moments and the cross-correlation
+  // moments and the cross-correlation; and each sample without its DC, the real and the imaginary parts apart,
+  // kept for the combining below (which then has neither to take the DC off nor to take the samples apart again:
+  // on a phone's middle cores both passes are held up by nothing but the number of float operations). A block is
+  // kBlock samples at most: process() deals them out.
+  float ar[kBlock], ai[kBlock], br[kBlock], bi[kBlock];
   double m2a, m4a, m2b, m4b, cr, ci;
   {
     float s2a[kLanes] = {}, s4a[kLanes] = {}, s2b[kLanes] = {}, s4b[kLanes] = {}, scr[kLanes] = {}, sci[kLanes] = {};
     const auto add = [&](size_t i, size_t j) {
       const float xr = x[2 * i] - dcar, xi = x[2 * i + 1] - dcai;
       const float yr = y[2 * i] - dcbr, yi = y[2 * i + 1] - dcbi;
+      ar[i] = xr, ai[i] = xi, br[i] = yr, bi[i] = yi;
       const float pa = xr * xr + xi * xi, pb = yr * yr + yi * yi;
       s2a[j] += pa;
       s4a[j] += pa * pa;
@@ -257,14 +273,25 @@ void Combiner::block(cf *a, const cf *b, size_t n) {
   {
     const float wa0 = _wa, wbr0 = _wbr, wbi0 = _wbi;
     const float dwa = (wa_new - wa0) / n, dwbr = (wbr_new - wbr0) / n, dwbi = (wbi_new - wbi0) / n;
-    const int m = static_cast<int>(n);
-    for (int i = 0; i < m; i++) {
-      const float t = static_cast<float>(i + 1);
-      const float ua = wa0 + t * dwa, ubr = wbr0 + t * dwbr, ubi = wbi0 + t * dwbi;
-      const float xr = x[2 * i] - dcar, xi = x[2 * i + 1] - dcai;
-      const float yr = y[2 * i] - dcbr, yi = y[2 * i + 1] - dcbi;
-      x[2 * i] = ua * xr + ubr * yr - ubi * yi;  // ua * x + ub * y
-      x[2 * i + 1] = ua * xi + ubr * yi + ubi * yr;
+    // Four samples at a time, written out: as plain arithmetic over the samples the compiler counted them in
+    // integers and made a float of every count (a fifth of this loop on a phone's middle cores), and put as
+    // groups like the sums above it made half-width work of it. t: how far into the block each of the four is,
+    // whole numbers up to kBlock, so exact as floats.
+    f4 t = {1, 2, 3, 4};
+    size_t i = 0;
+    for (; i + 4 <= n; i += 4, t += 4.f) {
+      const f4 ua = wa0 + t * dwa, ubr = wbr0 + t * dwbr, ubi = wbi0 + t * dwbi;
+      const f4 xr = load4(ar + i), xi = load4(ai + i), yr = load4(br + i), yi = load4(bi + i);
+      const f4 re = ua * xr + ubr * yr - ubi * yi;  // ua * x + ub * y
+      const f4 im = ua * xi + ubr * yi + ubi * yr;
+      store4(x + 2 * i, __builtin_shufflevector(re, im, 0, 4, 1, 5));  // real, imaginary, real, ...
+      store4(x + 2 * i + 4, __builtin_shufflevector(re, im, 2, 6, 3, 7));
+    }
+    for (; i < n; i++) {
+      const float ts = static_cast<float>(i + 1);
+      const float ua = wa0 + ts * dwa, ubr = wbr0 + ts * dwbr, ubi = wbi0 + ts * dwbi;
+      x[2 * i] = ua * ar[i] + ubr * br[i] - ubi * bi[i];
+      x[2 * i + 1] = ua * ai[i] + ubr * bi[i] + ubi * br[i];
     }
   }
   _wa = wa_new;

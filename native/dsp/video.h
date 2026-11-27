@@ -58,6 +58,7 @@ struct DecoderStats {
   uint64_t lines = 0, lines_locked = 0;   // since the last acquisition
   uint64_t fields = 0, frames = 0;        // since construction
   uint64_t acquisitions = 0, losses = 0;  // successful acquisitions, lock losses
+  // (lock_recent below counts lines that found their own hsync: while the grid is held, see holding, few do)
   uint64_t rephases = 0;                  // line grid moved onto a jumped signal without re-acquiring
   uint64_t level_jumps = 0;               // sync levels moved onto a signal that jumped up or down, likewise
   uint64_t fields_coasted = 0;            // fields begun by the flywheel, their vertical sync not found ...
@@ -69,6 +70,17 @@ struct DecoderStats {
   bool colour = false;                    // colour is being decoded (burst present and steady)
   float burst_err = 0;                    // mean burst phase error (rad)
   const char *std_name = "?";
+  // Where the line grid is, for the bench (kp_replay --grid): the start of the line in hand and of the field in
+  // hand, in samples of discriminator output since the decoder was made (-1: none), and which field that is.
+  double grid = -1, field0 = -1;
+  int field = -1;
+  bool holding = false;                   // the signal is weak: the grid is held by the fold of the lines ...
+  uint64_t holds = 0;                     // ... and how often that has begun
+  // How clean the sync is: its depth over the noise on the back porch, in the sync path (0: not known). And the
+  // sync depth of better times (MHz; 0: none yet), which a weak signal does not show (its levels shrink together).
+  float sync_snr = 0, depth_ref = 0;
+  float filter_mhz = 0;                   // the front end's channel filter: how wide (0: out) ...
+  uint64_t filter_changes = 0;            // ... and how often it has come in, gone out or been retuned
 };
 
 struct DecoderOpts {
@@ -77,10 +89,17 @@ struct DecoderOpts {
   int std_force = 0;           // 0 auto, 1 NTSC, 2 PAL
   bool force_invert = false;   // only try sync at the high-frequency end
   bool colour = true;          // decode colour (falls back to grey when there is no usable burst)
-  // Two things the decoder does to keep its picture, each of which the bench and the tests can turn off to see
-  // what the other does by itself (kp_replay --no-levels, --no-flywheel):
+  // Three things the decoder does to keep its picture, each of which the bench and the tests can turn off to see
+  // what the others do by themselves (kp_replay --no-levels, --no-flywheel, --no-hold):
   bool follow_levels = true;   // the sync levels follow a signal that jumps up or down
   bool flywheel = true;        // a field begins where the fields before say, when its vertical sync is not found
+  // The line grid is held through a signal too weak for its lines' hsyncs to be found, by the fold of many
+  // lines; such a signal's fields are found by what their half lines are, and it is acquired by that fold.
+  bool hold = true;
+  // A channel filter ahead of the discriminator while the sync is noisy (channel_filter.h): less of the noise
+  // reaches it, and a weak signal's picture has fewer sparkles and less snow. (It goes by the hold's measure of
+  // the sync's noise: without the hold there is no filter either.)
+  bool channel_filter = true;
 };
 
 // The picture switches: one value, given to a FrontEnd when it is made and changed with set_picture(). A new set
@@ -127,8 +146,10 @@ constexpr int kStripRows = 32;
 
 class Decoder;
 class ClickDetector;
+class ChannelFilter;
 
-// IQ (at fs_in) -> DC removal -> NCO -> [halfband /2 when fs_in >= 40e6] -> FM discriminator -> Decoder.
+// IQ (at fs_in) -> DC removal -> NCO -> [halfband /2 when fs_in >= 40e6] -> [channel filter, while the sync is
+// noisy] -> FM discriminator -> Decoder.
 class FrontEnd {
 public:
   FrontEnd(double fs_in, double shift_hz, FrameSink sink, const DecoderOpts &o = {}, const PictureOpts &p = {});
@@ -162,8 +183,10 @@ private:
   std::vector<float> _dbuf;
   std::vector<uint8_t> _badbuf;
   std::atomic<PictureOpts> _picture;  // set_picture(): read by demod() at each call, by the decoder at each line
+  void tune(double hz);
   Decoder *_dec;
   ClickDetector *_clicks;  // sparkle repair's half of demod() (sparkle.h)
+  ChannelFilter *_chan = nullptr;  // the channel filter (channel_filter.h); null: none (DecoderOpts::channel_filter)
 };
 
 }  // namespace kp

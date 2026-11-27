@@ -55,6 +55,12 @@ void LineDrawer::set_std(const VideoStd &s, double comb_w) {
   _px_cm.assign(_w + kPad, 0.f);
   _px_cr.assign(_w + kPad, 0.f);
   _px_ci.assign(_w + kPad, 0.f);
+  const size_t cells = static_cast<size_t>(_w / kCalmStep + 2);  // (and one past the last, for the sums)
+  _sum_u.assign(cells, 0.f);
+  _sum_v.assign(cells, 0.f);
+  _calm_u.assign(cells, 0.f);
+  _calm_v.assign(cells, 0.f);
+  _calm_k = -2;
   _px_off.resize(_w + kPad);
   for (int x = 0; x < _w + kPad; x++) _px_off[x] = s.aw_us * 1e-6 * _fs * x / _w;
 }
@@ -168,6 +174,64 @@ void LineDrawer::draw_colour(uint32_t *row, const SampleRings &R, double base, f
   }
 }
 
+// A noisy signal's colour (LineInfo::calm). Its coloured snow is as fine as the chroma filter lets it be, a
+// megahertz and more across, and another on every line; the picture's colours change slowly both ways. So U and V
+// are taken at every kCalmStep-th pixel only (a cell: far finer than the smoothing), each cell's are the mean over
+// kCalmCells cells either side, and of that only the share `calm` is this line's: the rest is what the lines above
+// it in the field had there (_calm_u, _calm_v, a cell each). Luma as ever, every pixel. No comb: the neighbours'
+// bursts are noise.
+void LineDrawer::draw_colour_calm(uint32_t *row, const SampleRings &R, double base, float yscale, std::complex<float> rot,
+                                  float k_uv, float calm, int x0, int x1, const DrawParams &p) {
+  using cf = std::complex<float>;
+  if (x1 <= x0) return;
+  const double *xo = _px_off.data();
+  const float *lr = R.luma.data();
+  const cf *chr = R.chroma.data();
+  const size_t mask = R.mask;
+  const float rr = rot.real() * k_uv, ri = rot.imag() * k_uv;
+  // the cells the pixels [x0, x1) lie in, [g0, g1]; this line's U and V summed from g0 up to each
+  const int g0 = x0 / kCalmStep, g1 = (x1 - 1) / kCalmStep;
+  float *su = _sum_u.data(), *sv = _sum_v.data();
+  float au = 0, av = 0;
+  for (int g = g0; g <= g1; g++) {
+    su[g - g0] = au;
+    sv[g - g0] = av;
+    const double pc = base + xo[g * kCalmStep + kCalmStep / 2] + p.cdel;
+    const int64_t j0 = static_cast<int64_t>(pc);
+    const float fc = static_cast<float>(pc - j0);
+    const cf c0 = chr[j0 & mask], c = c0 + (chr[(j0 + 1) & mask] - c0) * fc;
+    au -= c.real() * rr - c.imag() * ri;
+    av -= c.real() * ri + c.imag() * rr;
+  }
+  su[g1 + 1 - g0] = au;
+  sv[g1 + 1 - g0] = av;
+  float *pu = _calm_u.data(), *pv = _calm_v.data();
+  for (int g = g0; g <= g1; g++) {
+    const int a = std::max(g0, g - kCalmCells), b = std::min(g1 + 1, g + kCalmCells + 1);
+    const float inv = 1.f / static_cast<float>(b - a);
+    pu[g] += calm * ((su[b - g0] - su[a - g0]) * inv - pu[g]);
+    pv[g] += calm * ((sv[b - g0] - sv[a - g0]) * inv - pv[g]);
+  }
+  const float sg = p.sign, sb = p.sign * p.blank;
+  for (int x = x0; x < x1; x += 4) {
+    const int cnt = std::min(4, x1 - x);
+    v4f a, b, f, u, v;
+    for (int q = 0; q < 4; q++) {
+      const double at = base + xo[x + q];
+      const int64_t i0 = static_cast<int64_t>(at);
+      f[q] = static_cast<float>(at - i0);
+      a[q] = lr[i0 & mask];
+      b[q] = lr[(i0 + 1) & mask];
+      const int g = std::min((x + q) / kCalmStep, g1);
+      u[q] = pu[g];
+      v[q] = pv[g];
+    }
+    const v4f y = sg * (a + (b - a) * f - sb) * yscale;
+    const v4u px = rgb_px(y + 1.140f * v, y - 0.395f * u - 0.581f * v, y + 2.032f * u);
+    store_lanes(row + x, px, cnt);
+  }
+}
+
 // The comb for a line, on every other pixel (chroma is 1.2 MHz wide; per pixel costs twice as much for nothing
 // visible; draw_colour interpolates in between): chroma becomes c * (1 - _comb_m) - _comb_o. The neighbours sit
 // one line period T (Ti whole samples and Tf more) away, turned onto this line's subcarrier phase: the
@@ -245,7 +309,8 @@ void LineDrawer::draw(uint32_t *row, const SampleRings &R, const LineInfo &l, bo
   // a neighbour that is not (or not all) in the rings does not count
   if (dn && !R.written(static_cast<int64_t>(ls + a0 + aw + cdel + T + 2))) dn = false;
   if (up && !R.kept(static_cast<int64_t>(ls + a0 - T), 8)) up = false;
-  const bool comb_on = l.col && (up || dn || l.fade);
+  const bool calm = l.col && l.calm > 0;
+  const bool comb_on = l.col && !calm && (up || dn || l.fade);
   if (comb_on) comb_weights(R, ls, yscale, up, dn, l.fade, p);
   // [x0, x1): the pixels whose samples are in the rings (a pixel's first sample only grows with x). The others,
   // a run at either end of the line, are black.
@@ -254,8 +319,17 @@ void LineDrawer::draw(uint32_t *row, const SampleRings &R, const LineInfo &l, bo
   int x0 = 0, x1 = _w;
   while (x0 < _w && !R.kept(first(x0), 8)) row[x0++] = 0xff000000u;
   while (x1 > x0 && !R.written(first(x1 - 1) + 8)) row[--x1] = 0xff000000u;
-  if (l.col) draw_colour(row, R, base, yscale, rot, k_uv, comb_on, l.pal_v, x0, x1, p);
-  else draw_grey(row, R, base, yscale, x0, x1, p);
+  if (calm) {
+    // (the first such line of a field, or after others, has no lines above it to go by)
+    const bool next = l.field == _calm_field && l.k == _calm_k + 1;
+    _calm_field = l.field;
+    _calm_k = l.k;
+    draw_colour_calm(row, R, base, yscale, rot, k_uv, next ? l.calm : 1.f, x0, x1, p);
+  } else if (l.col) {
+    draw_colour(row, R, base, yscale, rot, k_uv, comb_on, l.pal_v, x0, x1, p);
+  } else {
+    draw_grey(row, R, base, yscale, x0, x1, p);
+  }
 }
 
 }  // namespace kp

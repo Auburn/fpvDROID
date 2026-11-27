@@ -11,12 +11,67 @@ namespace kp {
 void FieldRhythm::forget() {
   _step[0].seen = _step[1].seen = 0;
   _off = 0;
+  _odd_n = 0;
+  _doubt = false;
+}
+
+void FieldRhythm::doubt() {
+  _off = 0;
+  _odd_n = 0;
+  _doubt = true;
+}
+
+std::optional<FieldStart> FieldRhythm::seen(FieldStart in_hand, FieldStart s, int64_t field_lines, Signal signal) {
+  const bool held = signal == Signal::held, faint = signal != Signal::steady;
+  if (!believed(in_hand.kind)) {
+    _odd_n = 0;
+    _doubt = false;
+    if (in_hand == s) return std::nullopt;  // (found by its broad pulses' run already)
+    learn(in_hand, s, field_lines);
+    return s;
+  }
+  if (_doubt) {
+    // the first one since the count of lines was lost: the fields begin where it says
+    _doubt = false;
+    if (in_hand == s) return std::nullopt;
+    return s;
+  }
+  const FieldStart due = due_after(in_hand);
+  // is it the field in hand's, or the next one's?
+  const bool begun = std::llabs(s.line - in_hand.line) < std::llabs(s.line - due.line);
+  if (s == (begun ? in_hand : due)) {
+    _odd_n = _off = 0;
+    if (begun) return std::nullopt;
+    return s;
+  }
+  bool leads = false;
+  if (_odd_n > 0) {
+    FieldStart at = _odd;
+    const int fields = faint ? kLeadFieldsFaint : kLeadFields;
+    for (int i = 0; i < fields && at.line < s.line; i++) at = FieldStart{1 - at.kind, at.line + field_lines + at.kind};
+    leads = at == s;
+  }
+  _odd_n = leads ? _odd_n + 1 : 1;
+  _odd = s;
+  if (_odd_n >= (faint ? kOffFaint : kOff)) {
+    KP_LOGD("video: the fields begin %lld lines from where the rhythm had them: %d vertical syncs say so",
+            static_cast<long long>(s.line - (begun ? in_hand.line : due.line)), _odd_n);
+    _odd_n = _off = 0;
+    return s;
+  }
+  if (held && !begun && std::llabs(s.line - due.line) <= kNear) return due;
+  return std::nullopt;
 }
 
 std::optional<FieldStart> FieldRhythm::found(FieldStart in_hand, FieldStart s, int64_t field_lines) {
   if (!believed(in_hand.kind)) {
     // (no field is begun by the flywheel without a rhythm: the field in hand is the last one found)
+    _doubt = false;
     learn(in_hand, s, field_lines);
+    return s;
+  }
+  if (_doubt) {
+    _doubt = false;
     return s;
   }
   const FieldStart due = due_after(in_hand);

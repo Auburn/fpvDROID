@@ -6,19 +6,24 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
-#include <cstring>
 #include <optional>
 #include <utility>
 
+#include "acquire.h"
 #include "biquad.h"
+#include "burst_lock.h"
+#include "channel_filter.h"
 #include "deinterlace.h"
 #include "field_rhythm.h"
 #include "line_draw.h"
+#include "line_hold.h"
 #include "log.h"
 #include "picture_filters.h"
 #include "rings.h"
 #include "sparkle.h"
 #include "sync_levels.h"
+#include "sync_noise.h"
+#include "vert_sync.h"
 
 namespace kp {
 
@@ -26,18 +31,20 @@ const VideoStd kNtsc{63.5556, 9.4, 52.6, 240, 18, 262, "NTSC"};
 const VideoStd kPal{64.0, 10.5, 52.0, 288, 22, 312, "PAL"};
 
 // ---- the decoder: discriminator output (MHz) in, frames out ---------------------------------------------
-// It finds the sync pulses (acquisition, a line PLL that freewheels and re-phases, the field starts), which is its
-// own; for the rest it runs the modules: the levels the pulses are found by (sync_levels.h) and where a field begins
-// when its vertical sync is not found (field_rhythm.h); the luma and colour paths behind the pulse tracking into
-// the sample rings (picture_filters.h, rings.h), and as each line ends, its burst, sparkle repair (sparkle.h), the
-// line into a row (line_draw.h) and, as each field ends, the frame (deinterlace.h); with strips
-// (PictureOpts::strips), the frame a strip at a time as the rows come in.
+// It finds the sync pulses (a line PLL that freewheels and re-phases, the field starts by the broad pulses' run),
+// which is its own; for the rest it runs the modules: acquisition (acquire.h); the levels the pulses are found by
+// (sync_levels.h); for a weak signal the fold of the lines that holds the grid (line_hold.h), its vertical sync
+// (vert_sync.h) and how noisy its sync is (sync_noise.h); where a field begins when its vertical sync is not found
+// (field_rhythm.h); the luma and colour paths behind the pulse tracking into the sample rings (picture_filters.h,
+// rings.h), and as each line ends, its burst (burst_lock.h), sparkle repair (sparkle.h), the line into a row
+// (line_draw.h) and, as each field ends, the frame (deinterlace.h); with strips (PictureOpts::strips), the frame a
+// strip at a time as the rows come in.
 class Decoder {
 public:
   // picture: the switches, which whoever owns the decoder may change at any time (FrontEnd::set_picture)
   Decoder(double fs, FrameSink sink, const DecoderOpts &o, const std::atomic<PictureOpts> &picture)
-      : fs(fs), sink(std::move(sink)), o(o), picture(picture), levels(fs), drawer(o.width, fs), filt(fs, o.colour),
-        spark(fs) {
+      : fs(fs), sink(std::move(sink)), o(o), picture(picture), levels(fs), drawer(o.width, fs), burst(fs, o.hold), filt(fs, o.colour),
+        spark(fs), hold(fs) {
     lp_sync.design(1.0e6, fs);
     acq.resize(static_cast<size_t>(fs * 0.06));  // 60 ms
     set_std(o.std_force == 2 ? kPal : kNtsc);
@@ -62,12 +69,24 @@ public:
     s.level_jumps = levels.jumps;
     s.fields_coasted = fields_coasted;
     s.starts_put_right = starts_put_right;
-    s.colour = colour_on;
-    s.burst_err = c_err;
+    s.colour = burst.on();
+    s.burst_err = burst.err();
     s.clicks_repaired = spark.clicks_repaired;
     s.lines_mended = spark.lines_mended;
+    s.holding = hold.holding();
+    s.holds = hold.holds();
+    s.sync_snr = sync_snr();
+    s.depth_ref = depth_ref;
+    if (!acquiring && line_start >= 0) {
+      s.grid = line_start;
+      s.field = cur_field;
+      if (cur_field >= 0) s.field0 = line_start - static_cast<double>(line_idx - field_line0) * T;
+    }
     return s;
   }
+
+  // The sync as the front end's channel filter steers by it (channel_filter.h).
+  ChannelFilter::Sync sync() const { return {acquiring, sync_snr(), levels.tip, levels.blank, depth_ref}; }
 
   // A block of discriminator output, MHz; bad: the front end's click marks for it (sparkle repair), or null.
   // Each piece of up to kPiece samples goes through in two passes. First the sync path (a 1 MHz low-pass and a
@@ -101,6 +120,7 @@ public:
         med_a = a;
         med_b = b;
       }
+      if (o.hold) sync_ring.put(n, mb, pn);
       for (size_t k = 0; k < pn;) {
         k += quiet_run(mb + k, pn - k);
         if (k < pn) track(mb[k++]);
@@ -142,15 +162,7 @@ private:
   bool comb = false;
   uint64_t comb_epoch = 0;     // bumped where the sample stream may have jumped: lines across it don't mix
   LineInfo comb_up, comb_mid;  // the two lines before the current one
-  float burst_e = 0;           // |phase error| of the last burst against the PLL's prediction
-  // fpvDROID: colour. A per-line PLL on the burst tracks the transmitter's subcarrier phase (and its small
-  // frequency error) against the filters' free-running oscillator. PAL: the burst's +-45 degree swing gives
-  // the V switch, and adjacent lines are averaged (PAL-D).
-  double c_phase = 0, c_dphi = 0;  // burst reference phase (rad) and its drift per line
-  int64_t c_last_line = -1;
-  float c_mag = 0, c_err = 1;      // burst amplitude (MHz), mean |phase error| (rad)
-  bool colour_on = false;
-  int c_good = 0;
+  BurstLock burst;  // fpvDROID: colour. The reference the lines' bursts give (PAL: and each line's V switch)
   float med_a = 0, med_b = 0;
   Biquad lp_sync;  // the sync path: a 1 MHz low-pass, then a 3-point median (med_a, med_b)
   // The luma and colour paths, which follow behind the pulse tracking (filter_to). Their switches are set once
@@ -196,6 +208,25 @@ private:
   static constexpr int kRecent = 1024;
   uint8_t recent[kRecent] = {};
   int recent_pos = 0, recent_n = 0, recent_locked = 0;
+  // fpvDROID: a weak signal (DecoderOpts::hold). The sync path's samples are kept (sync_ring) for three things
+  // that look at each line's sync once the line has ended: the fold of the lines, which holds the grid when the
+  // lines' own hsyncs are no longer found (hold); the vertical sync by what its half lines are (vert); and how
+  // noisy the sync is (noise).
+  SyncRing sync_ring;
+  LineHold hold;
+  VertSync vert;
+  SyncNoise noise;
+  // The sync depth of better times, while nearly every line finds its hsync: a weak signal does not show it (the
+  // discriminator is then captured by the noise part of the time, and tip and blanking both shrink towards the
+  // middle of the band). For the front end's channel filter (sync).
+  float depth_ref = 0;
+  SyncSamples sync_now() const { return {sync_ring, n}; }  // the sync path's samples as the pulse tracking has them
+  // Is the signal a faint one: held by the fold now, or within the last two fields? Such a signal shows the
+  // vertical sync of few of its fields (one in nine, in one recording): see FieldRhythm::doubt and Signal.
+  bool faint() const { return o.hold && hold.lately(2 * std_->field_lines); }
+  FieldRhythm::Signal signal() const {
+    return hold.holding() ? FieldRhythm::Signal::held : faint() ? FieldRhythm::Signal::faint : FieldRhythm::Signal::steady;
+  }
 
   // The pulse tracking for the next sample (m: its sync-path value). The luma and colour paths are behind it
   // (see push_block): filter_to(n) brings them up to and including this sample before anything that uses them.
@@ -252,7 +283,7 @@ private:
     const double ls = line_start;
     count_line(locked);
     LineLevels sync;
-    if (o.follow_levels) {
+    if (o.follow_levels && !hold.holding()) {  // (held by the fold, the levels are the fold's)
       const float was = levels.tip;
       sync = levels.look(R, ls);
       if (sync.jumped) {
@@ -316,6 +347,7 @@ private:
     std_ = &s;
     rhythm.reset();
     T = s.T_us * 1e-6 * fs;
+    hold.set_std(T);
     fieldA.assign(static_cast<size_t>(o.width) * s.active * 4, 0);
     fieldB = fieldA;
     frame.assign(static_cast<size_t>(o.width) * s.active * 2 * 4, 0);
@@ -325,9 +357,7 @@ private:
     refresh_switches();
     comb_epoch++;
     drawer.set_std(s, filt.comb_w());
-    colour_on = false;
-    c_good = 0;
-    c_last_line = -1;
+    burst.set_std(&s == &kPal);
   }
 
   // The picture switches as they now stand, and the timing, for the line that begins. PAL's colour repeats over
@@ -355,11 +385,24 @@ private:
     recent[recent_pos] = locked;
     recent_locked += locked;
     recent_pos = (recent_pos + 1) % kRecent;
+    hold.count(locked);
   }
 
   // fpvDROID: lost when fewer than 40 % of the last ~2 fields' lines found their hsync (a healthy picture
-  // locks ~90 %: only the vertical interval freewheels). The spike used the ratio since acquisition.
+  // locks ~90 %: only the vertical interval freewheels). The spike used the ratio since acquisition. With the
+  // hold, which takes such a signal over long before: when the fold has not shown the hsync for half a second
+  // (LineHold::lost).
   void check_lost() {
+    if (hold.holding()) {  // the fold has the say
+      if (hold.lost(T)) {
+        losses++;
+        KP_LOGI("video: lost lock (no hsync in the fold for %.1f s), re-acquiring", hold.silent_s(T));
+        restart_acquisition();
+      }
+      return;
+    }
+    // (with the hold, a signal whose lines do not find their hsync is one for the fold before it gets here)
+    if (o.hold && lines >= 64) return;
     const int window = std::min(kRecent, 2 * std_->field_lines);
     if (recent_n < window) return;
     if (recent_locked * 10 < recent_n * 4) {
@@ -385,6 +428,9 @@ private:
     last_stray = -1;
     hs_len = 0;
     comb_epoch++;
+    hold.restart();
+    vert.reset();
+    noise.restart();
   }
 
   // acquisition: pick polarity + levels + line period from a 60 ms buffer
@@ -394,36 +440,15 @@ private:
       if (o.force_invert && sgn > 0) continue;
       float t, b;
       if (!levels.survey(acq, acq_n, sgn, t, b)) continue;
-      const float th = 0.5f * (t + b);
-      std::vector<double> edges;
-      bool lo = false;
-      size_t ls = 0;
-      for (size_t i = 0; i < acq_n; i++) {
-        const float v = sgn * acq[i];
-        if (!lo && v < th) {
-          lo = true;
-          ls = i;
-        } else if (lo && v >= th) {
-          lo = false;
-          const double w = (i - ls) / fs * 1e6;
-          if (w > 3.0 && w < 6.5) edges.push_back(static_cast<double>(ls));
-        }
-      }
-      if (edges.size() < 30) continue;
-      std::vector<double> good;
-      for (size_t k = 1; k < edges.size(); k++) {
-        const double iv = (edges[k] - edges[k - 1]) / fs * 1e6;
-        if (iv > 62.5 && iv < 65.0) good.push_back(iv);
-      }
-      const float score = static_cast<float>(good.size()) / (edges.size() - 1);
-      KP_LOGD("video acq: sign %+.0f tip %.2f blank %.2f, %zu pulses, score %.2f", sgn, t, b, edges.size(), score);
-      if (score > best && !good.empty()) {
-        best = score;
+      const std::optional<PulseScore> ps = score_pulses(acq, acq_n, fs, sgn, 0.5f * (t + b));
+      if (!ps) continue;
+      KP_LOGD("video acq: sign %+.0f tip %.2f blank %.2f, %zu pulses, score %.2f", sgn, t, b, ps->pulses, ps->score);
+      if (ps->score > best) {  // (so some pulses came a line apart: there is a period)
+        best = ps->score;
         bs = sgn;
         bt = t;
         bb = b;
-        std::sort(good.begin(), good.end());
-        const double Tus = good[good.size() / 2];
+        const double Tus = ps->T_us;
         if (!o.std_force) {
           const VideoStd &s = std::fabs(Tus - kNtsc.T_us) < std::fabs(Tus - kPal.T_us) ? kNtsc : kPal;
           if (&s != std_) set_std(s);
@@ -436,50 +461,33 @@ private:
       acquiring = false;
       line_start = -1;
       acquisitions++;
+      // the transmitter's line period is what it was before, and known far better than from this buffer's median
+      const std::optional<double> known = o.hold ? hold.period() : std::nullopt;
+      if (known && std::fabs(T - *known) < 0.25) T = *known;
+      else hold.forget_period();
       KP_LOGI("video: acquired, sync %s end, tip %.2f blank %.2f MHz, line %.3f us -> %s, score %.2f",
               bs > 0 ? "low" : "high", bt, bb, T / fs * 1e6, std_->name, best);
     }
+    // fpvDROID: a signal too weak for the above is acquired by the fold of its lines (acquire.h)
+    if (acquiring && o.hold)
+      if (const std::optional<FoldLock> got = acquire_by_fold(acq, acq_n, fs, levels.sign, o.std_force, std_, hold.period()))
+        acquired_by_fold(*got);
     acq_n = 0;
   }
 
-  // Burst: chroma over the burst window (NTSC 5.3-7.8 us, PAL 5.6-7.85 us after the hsync edge; the
-  // chroma filter delays it ~0.35 us). Updates the reference phase; returns false when there is none.
-  bool burst(double ls, bool &pal_v) {
-    const double us = 1e-6 * fs;
-    const int64_t i0 = static_cast<int64_t>(ls + 6.0 * us), i1 = static_cast<int64_t>(ls + 7.8 * us);
-    if (!R.has(i0, i1)) return false;
-    cf b{};
-    for (int64_t i = i0; i < i1; i++) b += R.chroma[i & R.mask];
-    b /= static_cast<float>(i1 - i0);
-    const float mag = std::abs(b);
-    const int64_t li = line_idx;
-    const double pred = c_last_line < 0 ? std::arg(b) : c_phase + c_dphi * (li - c_last_line);
-    double e = std::arg(b * std::polar(1.f, static_cast<float>(-pred)));
-    pal_v = false;
-    if (std_ == &kPal) {
-      // The burst sits 45 degrees either side of the reference: at baseband a normal line's burst (135 deg
-      // in U/V) lands at -45, a V-switched line's (225 deg) at +45.
-      pal_v = e > 0;
-      e += pal_v ? -M_PI / 4 : M_PI / 4;
-    }
-    burst_e = static_cast<float>(std::fabs(e));
-    if (c_last_line < 0) {
-      c_phase = pred + e;
-      c_dphi = 0;
-    } else {
-      c_phase = pred + 0.2 * e;
-      c_dphi += 0.01 * e / std::max<int64_t>(1, li - c_last_line);
-    }
-    c_phase = std::remainder(c_phase, 2 * M_PI);
-    c_last_line = li;
-    c_mag += 0.05f * (mag - c_mag);
-    c_err += 0.05f * (static_cast<float>(std::fabs(e)) - c_err);
-    // colour killer, with hysteresis: a burst near the expected size (~1/4 of the sync depth) and steady
-    const bool ok = c_mag > 0.08f * (levels.blank - levels.tip) && c_err < 0.5f;
-    c_good = ok ? std::min(c_good + 1, 60) : std::max(c_good - 2, 0);
-    if (!colour_on && c_good >= 40) colour_on = true;
-    if (colour_on && c_good == 0) colour_on = false;
-    return colour_on;
+  // ... and the fold holds its grid from the first line on.
+  void acquired_by_fold(const FoldLock &got) {
+    if (got.std != std_) set_std(*got.std);
+    T = got.T;
+    levels.set(got.tip, got.blank);  // (measured levels: none of the histogram's after this)
+    acquiring = false;
+    acquisitions++;
+    // sample j of the buffer is sample n - 1 - acq_n + j of the signal; an hsync is found a little before where
+    // the fold has its edge (LineHold::ref)
+    line_start = static_cast<double>(n - 1 - acq_n) + got.edge - hold.ref();
+    hold.acquired();
+    KP_LOGI("video: acquired by the fold of the lines (%d of %d parts), tip %.2f blank %.2f MHz, line %.4f us -> %s",
+            got.parts, kAcqParts, levels.tip, levels.blank, T / fs * 1e6, std_->name);
   }
 
   bool in_picture(int64_t k) const { return k >= 0 && k < std_->active; }
@@ -496,13 +504,16 @@ private:
     l.epoch = comb_epoch;
     l.own = own;
     if (!in_picture(k)) return l;
-    if (locked && !own) levels.measure(R, ls);
+    if (locked && !own && !hold.holding()) levels.measure(R, ls);
     if (filt.luma_comb()) top_line(ls, k);
     l.hit = pic.repair && patch_line(ls);
-    l.col = o.colour && locked && burst(ls, l.pal_v);
-    l.ok = l.col && burst_e < kCombMaxErr;
-    l.phase = c_phase;
-    l.mag = c_mag;
+    // (in colour: a line whose hsync was found, or one the hold has the start of, for a noisy signal's colour)
+    l.col = o.colour && (locked || (hold.holding() && burst.averaging())) &&
+            burst.line(R, ls, line_idx, levels.blank - levels.tip, l.pal_v);
+    l.ok = l.col && burst.last_err() < kCombMaxErr;
+    l.phase = burst.phase();
+    l.mag = burst.size();
+    l.calm = l.col ? burst.calm() : 0;
     l.fade = filt.fade_noted();
     return l;
   }
@@ -660,9 +671,16 @@ private:
     // picture's black under the old threshold). So a field start waits for the line after it, in a vertical sync
     // another of its lines, and while lines say the levels have moved: when they have (end_line), it is dropped.
     const bool vs = line_low > 0.5 * T;
-    if (!moved) {
+    if (o.hold) {  // the vertical sync by what its half lines are, which shows in noise
+      if (const std::optional<FieldStart> s = vert.line(sync_now(), line_start, T, fs, levels.sign, {levels.tip, levels.blank},
+                                                        std_ == &kPal, line_idx))
+        found_start(*s, StartBy::halves);
+    }
+    if (hold.holding()) {
+      pending_start.reset();  // (a run under the threshold says nothing in such noise)
+    } else if (!moved) {
       if (pending_start) {
-        found_start(*std::exchange(pending_start, std::nullopt));
+        found_start(*std::exchange(pending_start, std::nullopt), StartBy::run);
       } else if (vs && !prev_line_vsync && line_has_longrun) {
         // field start: phase of the broad-pulse start inside this line
         double ph = (static_cast<double>(line_longrun_start) - line_start) / T;
@@ -670,13 +688,16 @@ private:
         pending_start = FieldStart{std::fabs(ph) < 0.25 ? 0 : 1, line_idx};
       }
     }
-    // the flywheel: no vertical sync where the field in hand should end, and none waited on
+    // the flywheel: no vertical sync where the field in hand should end, and none waited on (with a weak signal a
+    // vertical sync is known VertSync::kWait lines later)
     if (!pending_start) {
-      if (const std::optional<FieldStart> due = rhythm.overdue({cur_field, field_line0}, line_idx)) {
+      if (const std::optional<FieldStart> due =
+              rhythm.overdue({cur_field, field_line0}, line_idx - (hold.holding() ? VertSync::kWait : 0))) {
         fields_coasted++;
         start_field(*due);
       }
     }
+    if (o.hold) next_start = held_line(next_start, vs || vert.broad());
     prev_line_vsync = vs;
     line_idx++;
     line_low = 0;
@@ -685,13 +706,51 @@ private:
     refresh_switches();
   }
 
-  // A field start has been found: the field begins there, or with the flywheel where the fields' rhythm says it
-  // is due (the start is put right), or the start is passed over (field_rhythm.h).
-  void found_start(FieldStart s) {
-    const std::optional<FieldStart> at = o.flywheel ? rhythm.found({cur_field, field_line0}, s, std_->field_lines) : s;
+  // A field start has been found, by the broad pulses' run under the threshold (close_line) or by what the half
+  // lines are (vert_sync.h): the field begins there, or with the flywheel where the fields' rhythm says it is due
+  // (the start is put right), or the start is passed over (field_rhythm.h: found, seen). Without the flywheel a
+  // field begins wherever either way finds one, once.
+  enum class StartBy { run, halves };
+  void found_start(FieldStart s, StartBy by) {
+    const FieldStart in_hand{cur_field, field_line0};
+    std::optional<FieldStart> at = s;
+    if (o.flywheel) {
+      at = by == StartBy::run ? rhythm.found(in_hand, s, std_->field_lines) : rhythm.seen(in_hand, s, std_->field_lines, signal());
+    } else if (by == StartBy::halves && in_hand == s) {
+      return;  // (the run has begun it already)
+    }
     if (!at) return;
     if (*at != s) starts_put_right++;
     start_field(*at);
+  }
+
+  // How clean the sync is (DecoderStats::sync_snr): its depth over the noise on the back porch (sync_noise.h); 0
+  // while that is not known. (settled: the levels are measured ones, on locked lines or in the fold, not the
+  // histogram's)
+  float sync_snr() const { return !acquiring && levels.settled() ? noise.snr(levels.blank - levels.tip) : 0; }
+
+  // The line in hand has ended, and the next begins at `next` (DecoderOpts::hold): how noisy its sync is, and the
+  // line into the fold, which steers when the signal is weak (line_hold.h). Returns where the next line begins.
+  double held_line(double next, bool broad) {
+    const SyncSamples s = sync_now();
+    if (noise.line(s, line_start, fs)) {
+      const float depth = levels.blank - levels.tip;
+      if (noise.round())
+        if (const float snr = noise.snr(depth); snr > 0) burst.sync_snr(snr);  // (colour goes by it)
+      // (lines >= 128: the first 64 lines after an acquisition count as found before they are)
+      if (hold.clean() && lines >= 128 && depth > 0.2f) depth_ref += (depth_ref > 0 ? 1.f / 16 : 1.f) * (depth - depth_ref);
+    }
+    const LineHold::Verdict v = hold.line(s, {line_start, next, line_idx, line_in_field(), lines, broad, T, levels.sign,
+                                              {levels.tip, levels.blank}});
+    T = v.T;
+    if (v.levels) levels.set(v.levels->tip, v.levels->blank);
+    if (v.rephased) {  // the signal had moved, and the grid is on it again
+      rephases++;
+      comb_epoch++;
+      rhythm.doubt();
+      vert.reset();
+    }
+    return v.next;
   }
 
   // A field begins, at line s.line (the first of its vertical sync): the one before it is done.
@@ -709,6 +768,11 @@ private:
     fields_seen++;
     if (s.kind == 0) haveB = false;  // a frame is A then B
     begin_field();
+  }
+
+  // Is a pulse that begins at edge the third or later of a run of strays a line apart?
+  bool in_a_run(double edge) const {
+    return stray_run >= 2 && last_stray >= 0 && std::fabs(edge - last_stray - T) < 0.03 * T;
   }
 
   // An hsync-width pulse has ended: it began at edge and was len samples long.
@@ -729,12 +793,29 @@ private:
     const double by_end = edge + len - hs_len;
     const bool odd = hs_len > 0 && std::fabs(len - hs_len) > 0.1e-6 * fs;
     const double at = odd && std::fabs(by_end - pred) < std::fabs(edge - pred) ? by_end : edge;
-    if (std::fabs(at - pred) <= 0.08 * T) {
-      // hs_len follows the pulses a sixteenth of a sample at a time, whatever their length: one that something
-      // ran into does not move it
-      hs_len = hs_len > 0 ? hs_len + std::clamp(len - hs_len, -1.0, 1.0) * (1.0 / 16) : len;
-      const double ns = 0.6 * at + 0.4 * pred;
-      T = 0.995 * T + 0.005 * (ns - line_start);
+    // How far from where it was due a pulse may begin and still be the line's hsync: the line PLL's own window, or
+    // less where the hold says so (LineHold::pulses).
+    //  - Held by the fold, a pulse where the grid has the hsync counts as that line's, and steers nothing. One
+    //    further off is a stray like any other.
+    //  - Guarded: in a signal with noise in it, one where more than a few lines in 64 miss their hsync, a pulse far
+    //    from the grid is no hsync while the fold shows the hsync where the grid is: at six tenths of the way
+    //    towards each such pulse the grid was thrown about, and the line period with it. A signal that has really
+    //    moved brings them in a row, a line apart: the third of such a run is followed as ever (the grid a few us
+    //    off after a vertical interval's pulses pulled it: left to the sixth, a re-phase, the fields' rhythm went
+    //    with it), and six further off re-phase. A clean signal that steps is followed at once, as ever.
+    const LineHold::Pulses say = hold.pulses();
+    const bool held = say == LineHold::Pulses::counted;
+    const double window = held ? LineHold::kTightUs * 1e-6 * fs
+                               : say == LineHold::Pulses::guarded && !in_a_run(edge) ? LineHold::kNearUs * 1e-6 * fs : 0.08 * T;
+    if (std::fabs(at - pred) <= window) {
+      double ns = pred;
+      if (!held) {
+        // hs_len follows the pulses a sixteenth of a sample at a time, whatever their length: one that something
+        // ran into does not move it
+        hs_len = hs_len > 0 ? hs_len + std::clamp(len - hs_len, -1.0, 1.0) * (1.0 / 16) : len;
+        ns = 0.6 * at + 0.4 * pred;
+        T = 0.995 * T + 0.005 * (ns - line_start);
+      }
       miss_run = 0;
       stray_run = 0;
       end_line(ns, true);
@@ -747,7 +828,8 @@ private:
     if (stray_run >= 6 && miss_run >= 4) {
       rephases++;
       comb_epoch++;
-      rhythm.forget();
+      if (faint()) rhythm.doubt();
+      else rhythm.forget();
       // In the log every time, with how far the grid moved (the shorter way round), because that says why. A
       // block of samples lost on the way here (the decode queue drops 4096 at a time, the stream a bank, which
       // is as many) moves it by that many samples less whole lines: -14.1 us for each at 20 MS/s NTSC, -12.8 us
@@ -760,14 +842,13 @@ private:
       line_has_longrun = false;
       stray_run = 0;
       miss_run = 0;
+      hold.jumped();
+      vert.reset();
     }
   }
 };
 
-// ---- front end ----------------------------------------------------------------------------------------
-// fpvDROID: block-wise and branch-free so the compiler vectorises it (the spike's per-sample loop used a whole
-// phone core at 40 MS/s). Per chunk of <= kTab samples: DC removal (block mean, smoothed), mix by a
-// precomputed rotation table, halfband /2 over a work array with 22 samples of history, discriminator.
+// ---- front end: its two halves made, and decode()'s (demod()'s is in demod.cpp) --------------------------
 FrontEnd::FrontEnd(double fs_in, double shift_hz, FrameSink sink, const DecoderOpts &o, const PictureOpts &p)
     : _fs_in(fs_in), _fs_out(fs_in >= 40e6 ? fs_in / 2 : fs_in), _decimate(fs_in >= 40e6), _picture(p) {
   for (int i = 0; i < kHb; i++) {
@@ -779,123 +860,29 @@ FrontEnd::FrontEnd(double fs_in, double shift_hz, FrameSink sink, const DecoderO
   _wi.assign(kHb - 1 + kTab, 0.f);
   _dec = new Decoder(_fs_out, std::move(sink), o, _picture);
   _clicks = new ClickDetector(_fs_out);
+  // (the filter goes by the hold's measure of the sync's noise: without the hold there is none)
+  if (o.channel_filter && o.hold) _chan = new ChannelFilter(_fs_out);
   set_shift(shift_hz);
 }
 
 FrontEnd::~FrontEnd() {
+  delete _chan;
   delete _clicks;
   delete _dec;
 }
 
-void FrontEnd::set_shift(double s) {
-  _shift = s;
-  _tr.resize(kTab);
-  _ti.resize(kTab);
-  for (int i = 0; i < kTab; i++) {
-    const double a = -2 * M_PI * s / _fs_in * i;
-    _tr[i] = static_cast<float>(std::cos(a));
-    _ti[i] = static_cast<float>(std::sin(a));
+DecoderStats FrontEnd::stats() const {
+  DecoderStats s = _dec->stats();
+  if (_chan) {
+    s.filter_mhz = _chan->width();
+    s.filter_changes = _chan->changes();
   }
-  const double a = -2 * M_PI * s / _fs_in * kTab;
-  _stepN = cf(static_cast<float>(std::cos(a)), static_cast<float>(std::sin(a)));
-  _rot = cf(1, 0);
-}
-
-DecoderStats FrontEnd::stats() const { return _dec->stats(); }
-
-
-namespace {
-// branch-free atan2 (a polynomial, max error ~1e-4 rad) so the discriminator loop vectorises
-inline float atan2_bf(float y, float x) {
-  const float ax = std::fabs(x), ay = std::fabs(y);
-  const float mx = ax > ay ? ax : ay, mn = ax > ay ? ay : ax;
-  const float a = mn / (mx + 1e-20f);
-  const float s = a * a;
-  float r = ((-0.0464964749f * s + 0.15931422f) * s - 0.327622764f) * s * a + a;
-  r = ay > ax ? 1.57079637f - r : r;
-  r = x < 0 ? 3.14159274f - r : r;
-  return y < 0 ? -r : r;
-}
-}  // namespace
-
-void FrontEnd::demod(const cf *xs, size_t n, std::vector<float> &out, std::vector<uint8_t> &bad) {
-  out.clear();
-  const bool rep = _picture.load(std::memory_order_relaxed).repair;
-  _clicks->begin(rep);
-  bad.clear();
-  const float k = static_cast<float>(_fs_out / (2 * M_PI) / 1e6);  // rad/sample -> MHz
-  constexpr int H = kHb - 1;
-  while (n > 0) {
-    const int m = static_cast<int>(std::min<size_t>(n, kTab));
-    // DC: block mean, smoothed across blocks (the adapter's DC line)
-    float sr = 0, si = 0;
-    for (int i = 0; i < m; i++) {
-      sr += xs[i].real();
-      si += xs[i].imag();
-    }
-    _dc += (cf(sr / m, si / m) - _dc) * 0.3f;
-    const float dr = _dc.real(), di = _dc.imag();
-    const float pr = _rot.real(), pi = _rot.imag();
-    float *wr = _wr.data() + H, *wi = _wi.data() + H;
-    const float *tr = _tr.data(), *ti = _ti.data();
-    for (int i = 0; i < m; i++) {
-      const float xr = xs[i].real() - dr, xi = xs[i].imag() - di;
-      const float cr = pr * tr[i] - pi * ti[i], ci = pr * ti[i] + pi * tr[i];  // rot * step^i
-      wr[i] = xr * cr - xi * ci;
-      wi[i] = xr * ci + xi * cr;
-    }
-    _rot *= _stepN;
-    if (m < kTab) {  // a short chunk: the next one starts at step^m, not step^kTab
-      _rot = cf(pr, pi) * cf(tr[m], ti[m]);
-    }
-    _rot /= std::abs(_rot);
-    // halfband /2 (or pass through), then the discriminator
-    const size_t o0 = out.size();
-    if (_decimate) {
-      const float *r = _wr.data(), *q = _wi.data();
-      int j0 = _phase;
-      const int nout = m - 1 - j0 >= 0 ? (m - 1 - j0) / 2 + 1 : 0;  // windows that end inside this chunk
-      _yr.resize(nout);
-      _yi.resize(nout);
-      for (int j = 0; j < nout; j++) {
-        const int s0 = j0 + 2 * j;
-        float a = 0.5f * r[s0 + kHb / 2], b = 0.5f * q[s0 + kHb / 2];
-        for (int t = 0; t < kHb; t += 2) {
-          a += _h[t] * r[s0 + t];
-          b += _h[t] * q[s0 + t];
-        }
-        _yr[j] = a;
-        _yi[j] = b;
-      }
-      _phase = j0 + 2 * nout - m;  // where the next window starts, relative to the next chunk
-      std::memmove(_wr.data(), _wr.data() + m, H * sizeof(float));
-      std::memmove(_wi.data(), _wi.data() + m, H * sizeof(float));
-    } else {
-      _yr.assign(wr, wr + m);
-      _yi.assign(wi, wi + m);
-    }
-    const int ny = static_cast<int>(_yr.size());
-    out.resize(o0 + ny);
-    float *d = out.data() + o0;
-    float lr = _prev.real(), li = _prev.imag();
-    if (ny > 0) {
-      d[0] = atan2_bf(_yi[0] * lr - _yr[0] * li, _yr[0] * lr + _yi[0] * li) * k;
-      for (int j = 1; j < ny; j++) {
-        const float re = _yr[j] * _yr[j - 1] + _yi[j] * _yi[j - 1];
-        const float im = _yi[j] * _yr[j - 1] - _yr[j] * _yi[j - 1];
-        d[j] = atan2_bf(im, re) * k;
-      }
-      _prev = cf(_yr[ny - 1], _yi[ny - 1]);
-    }
-    if (rep) _clicks->envelope(_yr.data(), _yi.data(), ny);
-    xs += m;
-    n -= m;
-  }
-  if (rep) _clicks->mark(out, bad);
+  return s;
 }
 
 void FrontEnd::decode(const std::vector<float> &d, const std::vector<uint8_t> &bad, double t_end) {
   _dec->push_block(d.data(), bad.size() == d.size() ? bad.data() : nullptr, d.size(), t_end);
+  if (_chan) _chan->steer(_dec->sync(), static_cast<double>(d.size()) / _fs_out);
 }
 
 void FrontEnd::feed(const cf *xs, size_t n) {

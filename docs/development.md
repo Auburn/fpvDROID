@@ -166,7 +166,8 @@ On screen: the OSD pill (channel, frequency, SNR, decode → screen latency) can
 
 ## Layout
 
-- `native/dsp/` — video decoder (`video.cpp`: FM discriminator, sync, fields; the luma and colour filters,
+- `native/dsp/` — video decoder (`video.cpp`: sync, fields; the FM discriminator, acquisition, the sync levels, the
+  hold and channel filter for a weak signal, the colour reference, the luma and colour filters,
   line drawing, sparkle repair and deinterlacing in files of their own), spectrum + pilot finding, the band picture the Spectrum tab draws
   (`BandMap`), a sweep step's 12 ms cut into time and frequency once for every measure that reads it (`step_grid.cpp`),
   DJI, HDZero and other digital signals told apart (`digital.cpp`), the Wi-Fi networks it marks (`wifi.cpp`). No
