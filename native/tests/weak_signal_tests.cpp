@@ -1,6 +1,6 @@
 // kp_weak_signal_tests: the decoder on a weak signal made here (ctest: "weak_signal"): the hold and its fold, a fade,
-// a weak signal from the start, nothing for a moment, a block missing, colour in noise and the channel filter. What
-// it shares with kp_decoder_tests (decoder_tests.cpp) is in decoder_tests.h.
+// a weak signal from the start, nothing for a moment, a dropout, a block missing, colour in noise and the channel
+// filter. What it shares with kp_decoder_tests (decoder_tests.cpp) is in decoder_tests.h.
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -141,8 +141,8 @@ static void a_weak_signal_from_the_start() {
 }
 
 // No signal at all, only noise, for 0.2 s: the grid runs on at the line period, pictures of noise come out in
-// their places, and when the signal is back so are its pictures, to the pixel. For 0.8 s: the lock is given up
-// after half a second, and found again when the signal is back.
+// their places, and when the signal is back so are its pictures, to the pixel. For 0.8 s, after a lock of 0.6 s:
+// the lock is given up after as long as it had lasted, and found again when the signal is back.
 static void nothing_for_a_moment_and_for_long() {
   const Signal s = moving_stripes(1.8);
   const std::vector<Picture> whole = frames_of(s, PictureOpts{});
@@ -156,6 +156,28 @@ static void nothing_for_a_moment_and_for_long() {
                  "re-phases; for 0.8 s: %llu losses, %llu acquisitions, lock %.2f\n", k.w.pics.size(), whole.size(),
                  k.placed, k.same, (unsigned long long)st.losses, (unsigned long long)st.rephases,
                  (unsigned long long)gone.losses, (unsigned long long)gone.acquisitions, gone.lock_recent);
+}
+
+// The signal gone altogether for a second, after 1.4 s of it, as when the transmitter is out of reach for a
+// moment: the lines and the fields coast through the noise (nothing found in it moves them), the lock is kept,
+// and when the signal is back so are its pictures, in their places, to the pixel. Without coasting the lock is
+// given up after half a second and found again only after the signal is back: pictures are missing.
+static void a_dropout_is_coasted_through() {
+  const Signal s = moving_stripes(2.8);
+  const std::vector<Picture> whole = frames_of(s, PictureOpts{});
+  const Signal f = faded(s, 1.4, 2.4, 0.f, 6.f);
+  const Kept k = kept_through(whole, f);
+  const DecoderStats &st = k.w.st;
+  const DecoderStats bare = decode(f, kNoCoast);
+  const bool ok = k.ok && bare.losses == 1 && bare.acquisitions == 2 && bare.frames + 5 <= whole.size();
+  CHECK(ok);
+  if (shown(ok))
+    std::fprintf(stderr, "  gone for 1 s: %zu pictures of %zu, %zu in place, the last 8 the same %d; %llu losses, %llu "
+                 "re-phases, %llu coasted; without coasting %llu pictures, %llu losses, %llu acquisitions\n",
+                 k.w.pics.size(), whole.size(), k.placed, k.same, (unsigned long long)st.losses,
+                 (unsigned long long)st.rephases, (unsigned long long)st.fields_coasted,
+                 (unsigned long long)bare.frames, (unsigned long long)bare.losses,
+                 (unsigned long long)bare.acquisitions);
 }
 
 // A block of samples missing from such a signal, as when the phone drops one: 30 lines and a part of a line. From
@@ -367,6 +389,7 @@ int main() {
   the_grid_is_held_through_a_fade();
   a_weak_signal_from_the_start();
   nothing_for_a_moment_and_for_long();
+  a_dropout_is_coasted_through();
   a_block_missing_from_a_weak_signal();
   a_noisy_signal_keeps_its_colour();
   a_noisy_signal_gets_a_channel_filter();

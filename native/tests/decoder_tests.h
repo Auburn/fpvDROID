@@ -187,7 +187,8 @@ inline std::vector<Picture> frames_of(const Signal &s, PictureOpts p, int *strip
 // hold as well, which keeps the lock through a jump of the levels too (a few lines later than following them does);
 // kNoHold: without the hold alone.
 constexpr DecoderOpts kNoFlywheel{.flywheel = false, .hold = false}, kNoLevels{.follow_levels = false, .hold = false},
-    kNeither{.follow_levels = false, .flywheel = false, .hold = false}, kNoHold{.hold = false};
+    kNeither{.follow_levels = false, .flywheel = false, .hold = false}, kNoHold{.hold = false},
+    kNoCoast{.coast = false};
 
 // back: only that many of the last pictures of each are compared (0: all of them, and as many of them). within: how
 // far a pixel's red, green or blue may differ (the same signal at other sample numbers is drawn the same to a

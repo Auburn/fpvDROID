@@ -58,6 +58,8 @@ public:
   // the rhythm the same way, each where the standard's rhythm leads from the one before, and the fields begin
   // where they say.
   std::optional<FieldStart> seen(FieldStart in_hand, FieldStart s, int64_t field_lines, Signal signal);
+  // The step from a field of this kind to the next is known: overdue() begins the field after one.
+  bool knows(int kind) const { return believed(kind); }
 
 private:
   static constexpr int kNear = 2, kOff = 3;

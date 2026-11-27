@@ -507,10 +507,7 @@ void Radio::note_faults(const wsdr::RxStatus &st) {
 // time offset is measured again (it is a number of samples, so it depends on the rate).
 void Radio::new_front_end(const Bank &b) {
   DecoderOpts o;
-  o.follow_levels = _follow_levels.load(std::memory_order_relaxed);
-  o.flywheel = _flywheel.load(std::memory_order_relaxed);
-  o.hold = _hold.load(std::memory_order_relaxed);
-  o.channel_filter = _channel_filter.load(std::memory_order_relaxed);
+  _helps.fill(o);
   _fe = std::make_shared<FrontEnd>(b.fs, b.shift_hz, _gate.sink(), o, _picture.load());
   _fe_fs = b.fs;
   _fe_shift = b.shift_hz;

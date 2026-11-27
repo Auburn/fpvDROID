@@ -62,10 +62,8 @@ int main(int argc, char **argv) {
   // the radio's debug switches (radio.h), as environment variables here: read once, before the radio has any threads
   if (const char *e = std::getenv("KP_CONCEAL")) radio.set_conceal(*e != '0');
   if (const char *e = std::getenv("KP_FAST_CPUS")) radio.set_fast_cores(*e != '0');
-  if (const char *e = std::getenv("KP_LEVELS")) radio.set_follow_levels(*e != '0');
-  if (const char *e = std::getenv("KP_FLYWHEEL")) radio.set_flywheel(*e != '0');
-  if (const char *e = std::getenv("KP_HOLD")) radio.set_hold(*e != '0');
-  if (const char *e = std::getenv("KP_FILTER")) radio.set_channel_filter(*e != '0');
+  for (const DecoderHelp &h : kDecoderHelps)
+    if (const char *e = std::getenv(h.name)) radio.set_decoder_help(h.name, *e != '0');
   try {
     radio.open(-1);
   } catch (const std::exception &e) {

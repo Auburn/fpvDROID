@@ -328,10 +328,10 @@ JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_holdPicture(JNIEnv *, jclass
   if (g_screen) g_screen->hold(ms);
 }
 
-// Debug: a switch by name. The radio's own four are set at once ("0" turns one off; anything else, or nothing, on),
-// and so are the screen's: KP_FRONT_BUFFER, KP_PRESENT_ALIGN, KP_PRESENT_MARGIN_US (render/screen.h).
-// Any other is an environment variable for wifi-sdr / devourer, in place from the next open; an empty value
-// removes it.
+// Debug: a switch by name. The radio's own (KP_CONCEAL, KP_FAST_CPUS and the decoder's helps in decoder_helps.h)
+// are set at once ("0" turns one off; anything else, or nothing, on), and so are the screen's: KP_FRONT_BUFFER,
+// KP_PRESENT_ALIGN, KP_PRESENT_MARGIN_US (render/screen.h). Any other is an environment variable for wifi-sdr /
+// devourer, in place from the next open; an empty value removes it.
 JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_setDebugEnv(JNIEnv *env, jclass, jstring key, jstring value) {
   const std::string k = jstring_of(env, key), v = jstring_of(env, value);
   if (k.empty()) return;
@@ -340,14 +340,8 @@ JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_setDebugEnv(JNIEnv *env, jcl
     if (g_radio) g_radio->set_conceal(on);
   } else if (k == "KP_FAST_CPUS") {
     if (g_radio) g_radio->set_fast_cores(on);
-  } else if (k == "KP_LEVELS") {  // the decoder's following of level jumps, its vertical flywheel, its hold
-    if (g_radio) g_radio->set_follow_levels(on);
-  } else if (k == "KP_FLYWHEEL") {
-    if (g_radio) g_radio->set_flywheel(on);
-  } else if (k == "KP_HOLD") {
-    if (g_radio) g_radio->set_hold(on);
-  } else if (k == "KP_FILTER") {  // the front end's channel filter for a noisy signal
-    if (g_radio) g_radio->set_channel_filter(on);
+  } else if (DecoderHelps::known(k)) {  // the decoder's helps (kDecoderHelps): taken here even with no radio
+    if (g_radio) g_radio->set_decoder_help(k, on);
   } else if (k == "KP_FRONT_BUFFER") {  // "0": no front-buffer drawing with Vsync off (Screen::allow_front_buffer)
     if (g_screen) g_screen->allow_front_buffer(on);
   } else if (k == "KP_PRESENT_ALIGN") {  // how strips go up (Screen::set_present_align, set_present_margin_us)
