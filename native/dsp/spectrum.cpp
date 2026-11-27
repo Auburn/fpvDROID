@@ -192,9 +192,23 @@ constexpr size_t kAnchorBins = 4;     // overlap with fresh bins needed to carry
 constexpr float kAnchorDb = 3.f;      // ... and how far under this step's own quartile it has to be
 }  // namespace
 
+TimedBins::TimedBins(double lo_hz, double hi_hz, double bin_hz)
+    : _lo(lo_hz), _bin(bin_hz), _t(static_cast<size_t>(std::max(1L, std::lround((hi_hz - lo_hz) / bin_hz) + 1)), 0) {}
+
+void TimedBins::inside(double lo_hz, double hi_hz, int *first, int *last) const {
+  *first = std::max(0, static_cast<int>(std::ceil((lo_hz - _lo) / _bin)));
+  *last = std::min(size() - 1, static_cast<int>(std::floor((hi_hz - _lo) / _bin)));
+}
+
+void TimedBins::forget(double lo_hz, double hi_hz, int64_t older_than_ms) {
+  const int j0 = std::max(0, static_cast<int>(std::floor((lo_hz - _lo) / _bin)));
+  const int j1 = std::min(size() - 1, static_cast<int>(std::ceil((hi_hz - _lo) / _bin)));
+  for (int j = j0; j <= j1; j++)
+    if (_t[j] > 0 && _t[j] < older_than_ms) _t[j] = 0;
+}
+
 BandMap::BandMap(double lo_hz, double hi_hz, double bin_hz)
-    : _lo(lo_hz), _bin(bin_hz),
-      _db(static_cast<size_t>(std::max(1L, std::lround((hi_hz - lo_hz) / bin_hz) + 1)), kNone), _t(_db.size(), 0) {}
+    : _bins(lo_hz, hi_hz, bin_hz), _db(static_cast<size_t>(_bins.size()), kNone) {}
 
 void BandMap::add(const std::vector<float> &sm, double fs, double centre_hz, double use_hz, int64_t now_ms) {
   const int n = static_cast<int>(sm.size());
@@ -207,18 +221,18 @@ void BandMap::add(const std::vector<float> &sm, double fs, double centre_hz, dou
   if (in.size() < 8) return;
   std::nth_element(in.begin(), in.begin() + in.size() / 4, in.end());
   float floor = in[in.size() / 4];
-  const int m = static_cast<int>(_db.size());
-  const int j0 = std::max(0, static_cast<int>(std::ceil((centre_hz - use_hz - _lo) / _bin)));
-  const int j1 = std::min(m - 1, static_cast<int>(std::floor((centre_hz + use_hz - _lo) / _bin)));
+  int j0, j1;
+  _bins.inside(centre_hz - use_hz, centre_hz + use_hz, &j0, &j1);
   if (j1 < j0) return;
-  const int64_t t = std::max<int64_t>(now_ms, 1);  // 0 marks a bin never seen
+  const int64_t t = std::max<int64_t>(now_ms, 1);  // as TimedBins::write puts it
+  const double grid = _bins.bin_hz();
   // each bin's level in this step's own terms: the mean of the input bins inside it (or the nearest, should none be)
   std::vector<float> level(static_cast<size_t>(j1 - j0 + 1), kNone);
   for (int j = j0; j <= j1; j++) {
-    const double off = _lo + j * _bin - centre_hz;
+    const double off = _bins.hz(j) - centre_hz;
     if (std::fabs(off) < kDcNotchHz) continue;
-    int i0 = static_cast<int>(std::ceil((off - _bin / 2) / bin)) + n / 2;
-    int i1 = static_cast<int>(std::floor((off + _bin / 2) / bin)) + n / 2;
+    int i0 = static_cast<int>(std::ceil((off - grid / 2) / bin)) + n / 2;
+    int i1 = static_cast<int>(std::floor((off + grid / 2) / bin)) + n / 2;
     if (i1 < i0) i0 = i1 = static_cast<int>(std::lround(off / bin)) + n / 2;
     i0 = std::max(i0, 0);
     i1 = std::min(i1, n - 1);
@@ -234,7 +248,7 @@ void BandMap::add(const std::vector<float> &sm, double fs, double centre_hz, dou
   // or so, and taking the lower of the two every time would walk the floor down, step after step.
   std::vector<float> d;
   for (int j = j0; j <= j1; j++)
-    if (level[j - j0] != kNone && _t[j] > 0 && t - _t[j] < kAverageMs) d.push_back(level[j - j0] - _db[j]);
+    if (level[j - j0] != kNone && _bins.written(j) > 0 && t - _bins.written(j) < kAverageMs) d.push_back(level[j - j0] - _db[j]);
   if (d.size() >= kAnchorBins) {
     std::nth_element(d.begin(), d.begin() + d.size() / 2, d.end());
     if (d[d.size() / 2] < floor - kAnchorDb) floor = d[d.size() / 2];
@@ -242,29 +256,18 @@ void BandMap::add(const std::vector<float> &sm, double fs, double centre_hz, dou
   for (int j = j0; j <= j1; j++) {
     if (level[j - j0] == kNone) continue;
     const float v = level[j - j0] - floor;
-    _db[j] = _t[j] > 0 && t - _t[j] < kAverageMs ? 0.5f * (_db[j] + v) : v;
-    _t[j] = t;
+    _db[j] = _bins.written(j) > 0 && t - _bins.written(j) < kAverageMs ? 0.5f * (_db[j] + v) : v;
+    _bins.write(j, t);
   }
 }
 
-void BandMap::forget(double lo_hz, double hi_hz, int64_t older_than_ms) {
-  const int m = static_cast<int>(_db.size());
-  const int j0 = std::max(0, static_cast<int>(std::floor((lo_hz - _lo) / _bin)));
-  const int j1 = std::min(m - 1, static_cast<int>(std::ceil((hi_hz - _lo) / _bin)));
-  for (int j = j0; j <= j1; j++)
-    if (_t[j] > 0 && _t[j] < older_than_ms) {
-      _t[j] = 0;
-      _db[j] = kNone;
-    }
-}
-
 std::vector<float> BandMap::get(double lo_hz, double hi_hz, double *first_hz) const {
-  const long m = static_cast<long>(_db.size());
-  const long j0 = std::clamp(std::lround((lo_hz - _lo) / _bin), 0L, m - 1);
-  const long j1 = std::clamp(std::lround((hi_hz - _lo) / _bin), j0, m - 1);
+  const int m = _bins.size();
+  const int j0 = std::clamp(_bins.nearest(lo_hz), 0, m - 1);
+  const int j1 = std::clamp(_bins.nearest(hi_hz), j0, m - 1);
   std::vector<float> out(static_cast<size_t>(j1 - j0 + 1));
-  for (long j = j0; j <= j1; j++) out[j - j0] = _t[j] > 0 ? _db[j] : kNone;
-  const int maxgap = static_cast<int>(kBridgeHz / _bin);
+  for (int j = j0; j <= j1; j++) out[j - j0] = _bins.written(j) > 0 ? _db[j] : kNone;
+  const int maxgap = static_cast<int>(kBridgeHz / _bins.bin_hz());
   int last = -1;
   for (int k = 0; k < static_cast<int>(out.size()); k++) {
     if (out[k] == kNone) continue;
@@ -272,7 +275,7 @@ std::vector<float> BandMap::get(double lo_hz, double hi_hz, double *first_hz) co
       for (int q = last + 1; q < k; q++) out[q] = out[last] + (out[k] - out[last]) * (q - last) / (k - last);
     last = k;
   }
-  if (first_hz) *first_hz = _lo + j0 * _bin;
+  if (first_hz) *first_hz = _bins.hz(j0);
   return out;
 }
 

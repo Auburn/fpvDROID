@@ -31,12 +31,12 @@ class SpectrumScenariosTest : AppHarness() {
 
     private val graph: SpectrumView get() = views(menu).filterIsInstance<SpectrumView>().single()
 
-    /** The chips under the graph: what the tab says is on the air. */
-    private fun used(): List<String> =
-        views(graph.parent.parent as android.view.View).filterIsInstance<FoundChip>().map { it.contentDescription.toString() }
+    /** The chips under the graph: what the tab says is on the air (the Wi-Fi networks' say whether in use: [wifiChips]). */
+    private fun chips(): List<FoundChip> = views(graph.parent.parent as android.view.View).filterIsInstance<FoundChip>()
 
-    private fun usedChip(name: String): FoundChip =
-        views(graph.parent.parent as android.view.View).filterIsInstance<FoundChip>().first { it.contentDescription == name }
+    private fun used(): List<String> = chips().filter { it.note == null }.map { it.contentDescription.toString() }
+
+    private fun usedChip(name: String): FoundChip = chips().first { it.note == null && it.contentDescription == name }
 
     private fun closeTheMenu() {
         click(preview())   // the picture at the rail's foot closes the menu
@@ -363,6 +363,81 @@ class SpectrumScenariosTest : AppHarness() {
             sp.signals)
         assertEquals(null, sp.carriers.single().kind)
         assertTrue(Spectrum.parse("""{"first_mhz":5735.0,"bin_mhz":0.5,"db":[0],"carriers":[]}""")!!.signals.isEmpty())
+    }
+
+    // ------------------------------------------------------------------------------------------ Wi-Fi
+    private fun wifiChips(): List<String> = chips().filter { it.note != null }.map { it.contentDescription.toString() }
+
+    private fun wifiChip(words: String): FoundChip = chips().first { it.note != null && it.contentDescription == words }
+
+    private fun says(words: String) = views(menu).any { it is android.widget.TextView && it.isShown && it.text.toString() == words }
+
+    /**
+     * The networks the radio has seen: named on the graph and in chips of their own after the others, never tuned. The
+     * carrier a busy one makes (tagged "wifi" by the radio) has no chip of its own beside the network's, and is not said
+     * apart from it; a tap on it tunes nothing either.
+     */
+    @Test
+    fun wifiNetworksAreNamedButNotTuned() {
+        running()
+        fake.carriers += Carrier(5769.2, 12.0, 31f)   // R4
+        fake.carriers += Carrier(5745.3, 17.5, 20f, SignalKind.WIFI)   // the network on 149, in use: on the air, on A7's frequency
+        fake.signals += Signal(5735.0, 5755.0, SignalKind.WIFI, "Wi-Fi 149", active = true)
+        fake.signals += Signal(5855.0, 5895.0, SignalKind.WIFI, "Wi-Fi 173\u2013177", active = false)   // 40 MHz, only its beacons heard
+        showTab("Spectrum")
+        advance(300)
+        assertEquals(listOf("R4"), used())   // no "A7" beside "Wi-Fi 149"
+        assertEquals(listOf("Wi-Fi 149, in use", "Wi-Fi 173\u2013177, idle"), wifiChips())
+        assertEquals(listOf("Wi-Fi 149", "Wi-Fi 173\u2013177"), graph.wifi.map { it.label })
+        assertEquals(SignalKind.WIFI, graph.onAir.first { it.carrier.mhz == 5745.3 }.spot.kind)
+        val words = graph.contentDescription.toString()
+        assertTrue(words, words.endsWith("In use: R4. Wi-Fi: Wi-Fi 149, in use, Wi-Fi 173\u2013177, idle"))
+        assertTrue(says("In use"))
+
+        fake.clearCalls()
+        click(wifiChip("Wi-Fi 173\u2013177, idle"))   // there is no picture to be had from it
+        assertEquals(0, fake.count("watch"))
+        assertEquals("sweep", fake.mode)
+        assertTrue(says("Only analog video can be shown"))
+        val g = graph
+        tap(g, ((5745.3 - 5635) / (5955 - 5635) * g.width).toFloat(), g.height * 0.3f)   // the network's carrier on the graph
+        assertEquals(0, fake.count("watch"))
+
+        // the low band's span holds none of them
+        val bands = Channels.bands.map { it.first }
+        pick(segmented("Band"), bands.indexOf('L'), bands.size)
+        advance(300)
+        assertEquals(emptyList<String>(), wifiChips())
+        assertTrue(graph.wifi.isEmpty())
+    }
+
+    /** With nothing on the air but networks only heard sending their beacons, the tab does not say "In use". */
+    @Test
+    fun onlyIdleNetworksAreNotInUse() {
+        running()
+        fake.signals += Signal(5735.0, 5755.0, SignalKind.WIFI, "Wi-Fi 149", active = false)
+        showTab("Spectrum")
+        advance(300)
+        assertEquals(listOf("Wi-Fi 149, idle"), wifiChips())
+        assertTrue(says("Only idle Wi-Fi"))
+        assertFalse(says("In use"))
+    }
+
+    /** Names and tags packed in two rows: a third label that would run into both goes where the rows end sooner. */
+    @Test
+    fun labelsArePackedInTwoRows() {
+        assertEquals(listOf(0, 1, 0), SpectrumView.twoRows(listOf(100f to 10f, 112f to 10f, 124f to 10f), 6f))   // was 0, 1, 1
+        assertEquals(listOf(0, 0, 1), SpectrumView.twoRows(listOf(100f to 10f, 130f to 10f, 140f to 10f), 6f))
+        assertEquals(listOf(0, 1, 1), SpectrumView.twoRows(listOf(100f to 30f, 110f to 10f, 140f to 10f), 6f))
+    }
+
+    /** The radio's networks as it sends them: signals of kind "wifi", the label as it is (an en dash), a broken one left out. */
+    @Test
+    fun theRadiosNetworksAreReadAsSent() {
+        val sp = Spectrum.parse("""{"first_mhz":5635,"bin_mhz":0.5,"db":[0,null],"carriers":[],"signals":[""" +
+            """{"lo_mhz":5490.0,"hi_mhz":5570.0,"kind":"wifi","label":"Wi-Fi 100\u2013112","active":true},""" +
+            """{"lo_mhz":5600,"hi_mhz":5580,"kind":"wifi","label":"Wi-Fi 120","active":false}]}""")
+        assertEquals(listOf(Signal(5490.0, 5570.0, SignalKind.WIFI, "Wi-Fi 100\u2013112", true)), sp!!.signals)
     }
 
     @Test

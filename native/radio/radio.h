@@ -64,7 +64,7 @@ public:
   // Sweep lo..hi at 40 MS/s until the next mode call (sweep.h: a retune every 30 MHz), each step's spectrum into the
   // band picture (spectrum_json). One pass over 300 MHz is 11 or 12 retunes. Scans add their steps to it too. Each
   // sweep step's capture also says what it recognises on the air (sweep.h: StepAnalysers), such as which signals are
-  // DJI, HDZero or another digital system (digital.h); scans do not judge that.
+  // DJI, HDZero or another digital system (digital.h) and where Wi-Fi networks are (wifi.h); scans do not judge that.
   void sweep(double lo_hz, double hi_hz);
   void idle();
   // The three setters below only take effect at the next watch() (the next tune). Each returns true when it
@@ -115,6 +115,9 @@ public:
   //   "dji", "hdzero", "hdzero_narrow" or "digital": digital video (digital.h), the edges of its block as measured.
   //   "label" is the system ("DJI", "HDZero", "HDZero narrow", "Digital"), "active" true (a video link sends all the
   //   time it is on). Kept until the sweeps over it have not found it for 8 s, and after the sweep stops.
+  //   "wifi": a Wi-Fi network (wifi.h), the 20, 40, 80 or 160 MHz of its channels; "label" "Wi-Fi 149" or
+  //   "Wi-Fi 100-112" (an en dash), "active" once seen in use (false: only its beacons seen). Kept 5 minutes from the
+  //   last time a sweep saw it (a quiet one is caught about one pass in eight), and after the sweep stops.
   // Other kinds may join the list (a reader skips one it does not know): "active" says in use, false on the air but
   // idle. A carrier on a signal has that signal's "kind"; one with none is not recognised (analog, or not judged).
   std::string spectrum_json(double lo_hz, double hi_hz);

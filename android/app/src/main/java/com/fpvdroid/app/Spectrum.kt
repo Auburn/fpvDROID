@@ -13,13 +13,15 @@ data class Carrier(val mhz: Double, val widthMhz: Double, val snrDb: Float, val 
  * What the radio recognises on the air by itself while it sweeps (Radio::spectrum_json's "kind" of a signal, and of the
  * carriers on it; native/radio/radio.h): digital video by its system (native/dsp/digital.h), DJI by its 2.5 ms TDD
  * frame, HDZero by a flat block sent without a break on one of its channels, 27 MHz wide or 17 in its narrow mode, and
- * any other flat, wide one as plain digital. [label]: what the Spectrum tab calls it, before the channel's name.
+ * any other flat, wide one as plain digital; and 5 GHz Wi-Fi networks (native/dsp/wifi.h), quiet ones included, by how
+ * their bursts light a whole channel at once. [label]: what the Spectrum tab calls it, before the channel's name.
  */
 enum class SignalKind(val code: String, val label: String) {
     DJI("dji", "DJI"),
     HDZERO("hdzero", "HDZero"),
     HDZERO_NARROW("hdzero_narrow", "HDZero narrow"),
-    DIGITAL("digital", "Digital");
+    DIGITAL("digital", "Digital"),
+    WIFI("wifi", "Wi-Fi");
 
     companion object {
         /** The kind the radio named, or null (none, or one this app does not know). */
@@ -29,8 +31,10 @@ enum class SignalKind(val code: String, val label: String) {
 
 /**
  * Something the radio has recognised on the air by itself (Radio::spectrum_json's "signals"): what [kind] of signal
- * takes the band from [loMhz] to [hiMhz], and what the radio calls it ([label]: "DJI", "HDZero narrow"). [active]: in
- * use; false: on the air but idle. A digital video link is always active: it sends all the time it is on.
+ * takes the band from [loMhz] to [hiMhz], and what the radio calls it ([label]: "DJI", "HDZero narrow", "Wi-Fi 149",
+ * "Wi-Fi 100–112"). [active]: in use; false: on the air but idle. A digital video link is always active: it sends all
+ * the time it is on. A Wi-Fi network is active once seen in use; else it has only been heard sending its beacons, and
+ * may take its channels (and with 40 MHz or more, its whole block) as soon as someone uses it.
  */
 data class Signal(val loMhz: Double, val hiMhz: Double, val kind: SignalKind, val label: String, val active: Boolean = true)
 

@@ -53,7 +53,7 @@ it, a picture that has stopped), full size or in the preview, colour bars show t
   gaps), **HDZero** by a flat block that is sent without a break, 22–31 MHz wide and within 2 MHz of one of its
   channels (R1–R8, E1, F1, F2, F4, L1–L8), **HDZero narrow** the same 14–22 MHz wide (its 17 MHz mode), and
   **Digital** any other flat block 12–31 MHz wide that is there all the time or in a regular frame of its own.
-  Analog video (its spectrum is not flat), Wi-Fi (bursts with no rhythm), and anything narrower than 12 MHz
+  Analog video (its spectrum is not flat), Wi-Fi (bursts with no rhythm: named below), and anything narrower than 12 MHz
   (DJI's 10 MHz channels) or wider than 31 (DJI's 40 and 60 MHz modes: wider than a retune can see) are not
   judged and keep their channel's name alone. A chip that says DJI, HDZero or Digital tunes nothing either. A
   signal does not always fit in one retune's 33 MHz: one cut between two neighbouring retunes is put back
@@ -66,6 +66,31 @@ it, a picture that has stopped), full size or in the preview, colour bars show t
   synthetic signals (continuous OFDM 27 and 17 MHz wide, as Divimath describes HDZero), so a real HDZero may go
   unnamed, or be named Digital, until it has been tried. fpvDROID's own tests are synthetic too: none of it has
   been tried yet with the adapter on a real DJI or HDZero transmitter.
+
+  It also recognises **5 GHz Wi-Fi** networks, the most common thing in the way at 5.8 GHz, and marks each one on
+  the graph as a span of its own, named at the top (**Wi-Fi 149**, or **Wi-Fi 100–112** for one of 80 MHz), with a
+  chip after the others that says whether it is **in use** (on the air 5 % of the time or more) or **idle**. A
+  network is a channel of the Wi-Fi grid whose whole 16.6 MHz lights up at once, evenly, in bursts, and goes quiet
+  again: each retune's 12 ms are looked at a tenth of a millisecond at a time, in the same slices as the digital
+  signals (it adds about 0.02 ms to a retune on a PC: `kp_wifi_tests --time`). Analog video (a few MHz wide at any
+  instant, its sync pulses there all the time) and a digital link that never stops are not taken for one. An idle
+  network only sends its beacons (a few tenths of a millisecond, ten times a second), so it barely shows in the band
+  picture, but takes its channel as soon as someone uses it. It is only caught now and then and may take a minute
+  to show; every network seen stays marked for 5 minutes after it was last seen (and with the rest of the picture
+  when the sweep stops), with dashed edges while only its beacons have been heard (a network of 40 or 80 MHz sends
+  them on one 20 MHz channel, and lights its whole block only when it is in use). One in use shows in the band
+  picture too, as something on the air: it lights its channel under the graph but has no chip beside the network's.
+  Channels next to one another within one 40, 80 or 160 MHz block of the Wi-Fi grid read as one network. Every
+  region's channels are looked for (36–177, the US plan, which holds Europe's): a router only uses what its country
+  allows, so what is seen is what is there, and there is nothing to set. Not marked: a network right under a VTX
+  that is on (that channel is taken anyway), a network so busy it is never off (it shows as something on the air),
+  the shoulders of a strong network, the bursts that a VTX very close to the phone makes 10 to 45 MHz either side
+  of it, and what the adapter itself makes of a network and a VTX: its third-order product, at twice the VTX's
+  frequency less the network's, bursts with the network and is as flat as it, so it looks like one (a VTX on R3
+  beside a network on 149 put a weak, idle "network" on 144 on a phone), and a channel there that is weaker than
+  both is taken for it. Tapping a Wi-Fi chip tunes nothing. The radio lists the networks with the digital signals
+  (`spectrum_json`'s "signals", of kind "wifi", in use or idle as "active"; a busy one's carrier has its kind). The
+  idea comes from the channel analyser of [FPVDesktopWiFiReceiver](https://github.com/Pwn3dP4nd4/FPVDesktopWiFiReceiver).
 - **View** — aspect ratio (4:3, or 16:9 for a widescreen camera), scaling (**Fit** the whole picture,
   **Stretch** it to the screen, or **Crop** it to fill the screen), size (50–150 %), and **Goggles**: the
   picture twice, side by side, for goggles that hold a phone. Goggles have a size of their own (in place of
@@ -141,7 +166,8 @@ On screen: the OSD pill (channel, frequency, SNR, decode → screen latency) can
 - `native/dsp/` — video decoder (`video.cpp`: FM discriminator, sync, fields; the luma and colour filters,
   line drawing, sparkle repair and deinterlacing in files of their own), spectrum + pilot finding, the band picture the Spectrum tab draws
   (`BandMap`), a sweep step's 12 ms cut into time and frequency once for every measure that reads it (`step_grid.cpp`),
-  DJI, HDZero and other digital signals told apart (`digital.cpp`). No hardware.
+  DJI, HDZero and other digital signals told apart (`digital.cpp`), the Wi-Fi networks it marks (`wifi.cpp`). No
+  hardware.
 - `native/radio/` — the adapter (wifi-sdr `Receiver`) + a DSP thread: scan, watch, sweep, stream test; antenna
   combining (`combine.cpp`); when 40 MS/s gives way to 20 (`fallback_policy.cpp`); torn frames kept off the
   screen (`frame_gate.cpp`); the retunes of a scan or sweep and each one's capture (`steps.cpp`); the scan's
@@ -150,14 +176,15 @@ On screen: the OSD pill (channel, frequency, SNR, decode → screen latency) can
   capture is measured for, and the band picture that goes into, as the app reads it, with the signals the sweep
   has recognised in it (`sweep.cpp`).
 - `native/tests/` — unit tests of the radio's and the scan's rules, the decoder's sync, the Spectrum tab's band
-  picture (and the FFT under it) and its telling digital signals apart, no hardware (`ctest`;
+  picture (and the FFT under it), its telling digital signals apart and its Wi-Fi networks, no hardware (`ctest`;
   `scripts/build-desktop.sh` runs them).
 - `native/render/` — the picture on screen (OpenGL ES 3): layout, side-by-side view, the menu's preview,
   the NO SIGNAL card.
 - `native/jni/` — the app's native side; a render thread draws each frame on the video Surface as it is decoded.
 - `native/tools/` — desktop: `kp_replay` (recordings), `kp_live` (adapter on this PC), `kp_sim` (kp_live
-  against a recording played back as a tunable adapter), `kp_gen` (a synthetic transmitter, analog or digital:
-  recordings to test with), `kp_render` (the app's renderer off screen, to a picture file).
+  against a recording played back as a tunable adapter), `kp_gen` (a synthetic transmitter, analog or digital, and
+  Wi-Fi beside a VTX: recordings to test with; its OFDM, `digital_tx.h`, is the tests' too), `kp_render` (the app's
+  renderer off screen, to a picture file).
 - `android/` — the app (Kotlin, plain Views): `MainActivity` (the screen), `MenuView` + `Widgets` (the menu),
   `UsbLink` (the adapter's life: permission, USB 3 switch, open, watch over, reopen), `Settings`.
 - `patches/` — Play RX's changes to wifi-sdr and devourer, applied to the submodules by the build
@@ -234,6 +261,9 @@ build/desktop/kp_gen rec/dji --digital dji --mhz 5770 --centre 5770   # a digita
 KP_SIM_FILE=rec/dji.cs16 build/desktop/kp_sim --sweep 5635 5955   # ... among the band picture's "signals", its carrier with "kind":"dji"
 build/desktop/kp_digital_tests --time   # what a sweep step costs: its spectrum, its grid, telling digital signals apart
 build/desktop/kp_spectrum_tests --time  # an FFT, planned and as it was before (twiddles by recurrence)
+build/desktop/kp_gen rec/wifi --mhz 5785 --centre 5770 --wifi 153   # a Wi-Fi network in use on channel 153 beside a VTX (--wifi-quiet 153: beacons only)
+KP_SIM_FILE=rec/wifi.cs16 build/desktop/kp_sim --sweep 5635 5955   # ... among the "signals", one of "kind":"wifi": Wi-Fi 153 within a second (a quiet one: within a minute)
+build/desktop/kp_wifi_tests --time   # what reading a sweep step's bursts for Wi-Fi costs, against the whole step
 KP_SIM_FILE=rec/r4.cs16 KP_SIM_DROP_EVERY=700 build/desktop/kp_sim --watch 5769   # a link that loses every 700th block: falls back to 20 MS/s (after the 10 s grace)
 KP_SIM_FILE=rec/r4.cs16 KP_SIM_RESTART_EVERY_MS=1500 build/desktop/kp_sim --watch 5769   # a stream that restarts every 1.5 s: torn frames hidden, then 20 MS/s
 KP_SIM_FILE=rec/r4.cs16 build/desktop/kp_sim --watch 5769 --msps 20               # watch at 20 MS/s (kp_live takes --msps too)

@@ -30,16 +30,20 @@ StepFindings StepAnalysers::step(const std::vector<cf> &iq, double fs, double ce
   f.spectrum = smooth_db(_psd.db(), fs / _psd.size());
   _grid.build(iq.data(), iq.size(), fs, edge_hz);
   f.digital = _digital.step(f.spectrum, _grid, centre_hz, edge_hz);
-  // Wi-Fi plugs in here: f.bursts = measure_bursts(_grid, centre_hz, Sweep::kStep / 2, edge_hz)
+  // the bins handed on reach half a step either side: a pass measures every frequency once
+  f.bursts = measure_bursts(_grid, centre_hz, Sweep::kStep / 2);
   return f;
 }
 
-BandPicture::BandPicture() : _band(Sweep::kBandLo, Sweep::kBandHi, Sweep::kBandBin) {}
+BandPicture::BandPicture()
+    : _band(Sweep::kBandLo, Sweep::kBandHi, Sweep::kBandBin), _wifi(Sweep::kBandLo, Sweep::kBandHi, Sweep::kBandBin) {}
 
 void BandPicture::sweep_started(double lo_hz, double hi_hz, int64_t now_ms) {
   _band.forget(lo_hz, hi_hz, now_ms - Sweep::kStaleMs);
   _digital.forget(lo_hz, hi_hz, now_ms - Sweep::kStaleMs);
-  // Wi-Fi plugs in here: forget in its WifiWatch too, and keep lo..hi
+  _wifi.forget(lo_hz, hi_hz, now_ms - Sweep::kStaleMs);
+  _lo = lo_hz;
+  _hi = hi_hz;
 }
 
 void BandPicture::add(const StepFindings &f, int64_t now_ms) {
@@ -48,7 +52,9 @@ void BandPicture::add(const StepFindings &f, int64_t now_ms) {
   // Over the step's whole reach, which goes past the ends of the sweep's span: a signal centred just outside it is
   // judged by the step at that end, and goes the same way.
   _digital.forget(f.centre_hz - f.edge_hz, f.centre_hz + f.edge_hz, now_ms - DigitalMap::kKeepMs);
-  // Wi-Fi plugs in here: its bursts, against the carriers of the picture with this step in
+  double first_hz = 0;
+  const std::vector<float> db = _band.get(_lo, _hi, &first_hz);
+  _wifi.add(f.bursts, _lo, _hi, find_carriers(db, first_hz, _band.bin_hz()), now_ms);
 }
 
 void BandPicture::add_levels(const std::vector<float> &sm, double fs, double centre_hz, double edge_hz, int64_t now_ms) {
@@ -70,7 +76,11 @@ std::string BandPicture::json(double lo_hz, double hi_hz, double at_hz, double a
   }
   for (size_t i = 0; i < carriers.size(); i++)
     if (const DigitalSignal *d = digital_for(_digital.all(), carriers[i])) kind[i] = digital_code(d->kind);
-  // Wi-Fi plugs in here: its networks that reach into lo..hi, and the carriers on them
+  // Wi-Fi: each network that reaches into lo..hi, active once seen in use, and the carrier a busy one makes
+  const std::vector<WifiNet> nets = _wifi.networks(lo_hz, hi_hz);
+  for (const auto &n : nets) signals.push_back(Signal{n.lo_mhz * 1e6, n.hi_mhz * 1e6, "wifi", n.label(), n.busy});
+  for (size_t i = 0; i < carriers.size(); i++)
+    if (!kind[i] && wifi_for(nets, carriers[i])) kind[i] = "wifi";
   std::sort(signals.begin(), signals.end(), [](const Signal &a, const Signal &b) { return a.lo_hz < b.lo_hz; });
 
   std::ostringstream o;

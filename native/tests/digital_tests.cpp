@@ -407,8 +407,8 @@ static void the_map_of_verdicts() {
 }
 
 // Through the band picture, as the app reads it: what is on the 5.8 GHz band, swept with the chip's DC notch, comes
-// out of BandPicture::json as signals, and each carrier on one with its kind (none for the analog transmitter and
-// Wi-Fi's bursts).
+// out of BandPicture::json as signals, and each carrier on one with its kind (none for the analog transmitter). Wi-Fi's
+// bursts are no digital video, but a Wi-Fi network (wifi.h), and the carrier they make is that network's.
 struct JsonCarrier {
   double mhz, width;
   std::string kind;
@@ -470,19 +470,20 @@ static void kinds_come_out_with_the_band_picture() {
   CHECK(h && h->kind == "hdzero");
   CHECK(d && d->kind == "dji");
   CHECK(a && a->kind.empty());
-  CHECK(!w || w->kind.empty());  // at 30 % of the time it may not stand 6 dB over the floor at all
+  CHECK(!w || w->kind == "wifi");  // at 30 % of the time it may not stand 6 dB over the floor at all
   CHECK(n && n->kind == "hdzero_narrow");
   const auto sig = signals_in(json);
   for (const auto &g : sig)
     std::printf("signal %.1f..%.1f MHz: %s (%s)%s\n", g.lo, g.hi, g.kind.c_str(), g.label.c_str(), g.active ? "" : ", idle");
-  CHECK(sig.size() == 3);
-  if (sig.size() == 3) {
+  CHECK(sig.size() == 4);
+  if (sig.size() == 4) {
     CHECK(sig[0].kind == "hdzero" && sig[0].label == "HDZero" && sig[0].lo < 5658 && sig[0].hi > 5658);
     CHECK(sig[1].kind == "dji" && sig[1].label == "DJI" && sig[1].lo < 5735 && sig[1].hi > 5735);
-    CHECK(sig[2].kind == "hdzero_narrow" && sig[2].label == "HDZero narrow" && sig[2].lo < 5917 && sig[2].hi > 5917);
-    CHECK(sig[0].active && sig[1].active && sig[2].active);
+    CHECK(sig[2].kind == "wifi" && sig[2].label == "Wi-Fi 173" && sig[2].lo == 5855 && sig[2].hi == 5875);
+    CHECK(sig[3].kind == "hdzero_narrow" && sig[3].label == "HDZero narrow" && sig[3].lo < 5917 && sig[3].hi > 5917);
+    CHECK(sig[0].active && sig[1].active && sig[2].active && sig[3].active);
   }
-  CHECK(signals_in(s.picture.json(5800e6, 5955e6, 0, 2 * kEdge, 4)).size() == 1);  // the ones reaching into the span
+  CHECK(signals_in(s.picture.json(5800e6, 5955e6, 0, 2 * kEdge, 4)).size() == 2);  // the ones reaching into the span
 
   // A scan's steps judge nothing: the same air seen by them alone gives the carriers with no "kind", and no signals.
   BandPicture scanned;

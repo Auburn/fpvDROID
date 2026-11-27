@@ -17,7 +17,7 @@ import kotlin.math.abs
  * mode under the lock before returning) and only while open; [open] resets the bank counter and the dead flag and
  * leaves the mode idle; [close] marks it closed and idle; a scan ends (when the test says [finishScan]) on the
  * preferred channel if it was found, else on the strongest found, else on the preferred one, else idle. A [sweep]
- * goes on until the next mode call; [spectrum] draws [carriers].
+ * goes on until the next mode call; [spectrum] draws [carriers] and lists [wifi].
  *
  * Called from the main thread (status, settings, tuning) and from UsbLink's worker (usb3Switch, open, close): every
  * method is synchronized, except that a held [open] waits outside the lock.
@@ -193,7 +193,10 @@ class FakeEngine : Engine {
     // ------------------------------------------------------------------------------------- the spectrum page
     /** What the band picture shows on the air (dB over the floor at their peak), for [spectrum]. */
     val carriers = ArrayList<Carrier>()
-    /** What the radio has recognised besides the carriers with a kind (each of which is on a signal of its own). */
+    /**
+     * What the radio has recognised besides the carriers with a kind (each of which is on a signal of its own, unless it
+     * is on one of these: a Wi-Fi network's).
+     */
     val signals = ArrayList<Signal>()
     /** Passes the sweep has finished ("sweeps" in the spectrum). */
     var sweeps = 0
@@ -235,7 +238,9 @@ class FakeEngine : Engine {
             })
             put("signals", JSONArray().apply {
                 if (!isOpen) return@apply
-                val all = carriers.mapNotNull { c -> c.kind?.let { Signal(c.mhz - c.widthMhz / 2, c.mhz + c.widthMhz / 2, it, it.label) } } + signals
+                // a carrier on one of [signals] (a busy Wi-Fi network's) is that one
+                val all = carriers.filter { c -> signals.none { it.kind == c.kind && c.mhz in it.loMhz..it.hiMhz } }
+                    .mapNotNull { c -> c.kind?.let { Signal(c.mhz - c.widthMhz / 2, c.mhz + c.widthMhz / 2, it, it.label) } } + signals
                 for (s in all) put(JSONObject().put("lo_mhz", s.loMhz).put("hi_mhz", s.hiMhz).put("kind", s.kind.code)
                     .put("label", s.label).put("active", s.active))
             })

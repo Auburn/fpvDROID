@@ -10,7 +10,7 @@ option(FPVDROID_RADIO "Build the radio (wifi-sdr + devourer + libusb)" ON)
 
 # ---- DSP: no hardware, shared by the app and the desktop tools ----
 add_library(fpvdroid_dsp STATIC dsp/video.cpp dsp/deinterlace.cpp dsp/line_draw.cpp dsp/picture_filters.cpp
-            dsp/sparkle.cpp dsp/spectrum.cpp dsp/step_grid.cpp dsp/digital.cpp dsp/log.cpp)
+            dsp/sparkle.cpp dsp/spectrum.cpp dsp/step_grid.cpp dsp/digital.cpp dsp/wifi.cpp dsp/log.cpp)
 target_include_directories(fpvdroid_dsp PUBLIC dsp)
 target_compile_options(fpvdroid_dsp PRIVATE -O3 -ffast-math -Wall -Wextra)
 if(ANDROID)
@@ -125,6 +125,12 @@ if(NOT ANDROID)
   target_link_libraries(kp_digital_tests PRIVATE fpvdroid_dsp)
   target_compile_options(kp_digital_tests PRIVATE -O2 -Wall -Wextra)
   add_test(NAME digital COMMAND kp_digital_tests)
+  # the Spectrum tab's Wi-Fi networks, from sweep steps of synthetic IQ
+  add_executable(kp_wifi_tests tests/wifi_tests.cpp radio/sweep.cpp)
+  target_include_directories(kp_wifi_tests PRIVATE radio tools)
+  target_link_libraries(kp_wifi_tests PRIVATE fpvdroid_dsp)
+  target_compile_options(kp_wifi_tests PRIVATE -O2 -Wall -Wextra)
+  add_test(NAME wifi COMMAND kp_wifi_tests)
   # the screen's picture delay (render/latency.h: no GL in it)
   add_executable(kp_screen_tests tests/screen_tests.cpp render/latency.cpp)
   target_include_directories(kp_screen_tests PRIVATE render)

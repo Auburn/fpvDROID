@@ -15,6 +15,7 @@
 #include "digital.h"
 #include "spectrum.h"
 #include "step_grid.h"
+#include "wifi.h"
 
 namespace kp {
 
@@ -64,7 +65,7 @@ struct StepFindings {
   double edge_hz = 0;    // +- of the centre used
   std::vector<float> spectrum;         // the step's spectrum (Psd::db()) through smooth_db: the band picture's levels
   std::vector<DigitalSignal> digital;  // digital video whole in it, or joined with the step below (DigitalScan)
-  // Wi-Fi plugs in here: the bursts of its 0.1 ms slices (wifi.h's BurstStep, measured off StepAnalysers' grid).
+  BurstStep bursts;                    // what came and went in its 0.1 ms slices, for the Wi-Fi networks (wifi.h)
 };
 
 // The measures of a sweep's steps: the costly part, which needs a step's IQ, taken on the DSP thread with no lock held.
@@ -86,14 +87,15 @@ private:
 // Something the sweep has recognised on the air: a span of the band and what it is (spectrum_json's "signals").
 struct Signal {
   double lo_hz = 0, hi_hz = 0;
-  const char *kind = "";  // digital_code() for digital video; Wi-Fi adds "wifi"
+  const char *kind = "";  // digital_code() for digital video, "wifi" for a Wi-Fi network
   std::string label;      // what the Spectrum tab calls it (no quotes or backslashes in it)
   bool active = true;     // in use; false: on the air but idle
 };
 
 // The band picture the Spectrum tab draws, from the steps of sweeps and of scans: the levels (BandMap, over
-// Sweep::kBandLo..kBandHi) and what the sweeps have recognised in them: digital video (DigitalMap). Not thread-safe:
-// the Radio keeps it under its lock, so that a step's levels and what it recognised go in together.
+// Sweep::kBandLo..kBandHi) and what the sweeps have recognised in them: digital video (DigitalMap) and Wi-Fi networks
+// (WifiWatch). Not thread-safe: the Radio keeps it under its lock, so that a step's levels and what it recognised go
+// in together.
 class BandPicture {
 public:
   BandPicture();
@@ -101,22 +103,26 @@ public:
   void sweep_started(double lo_hz, double hi_hz, int64_t now_ms);
   // A sweep step: its levels, and what it recognised. A digital verdict within the step's reach that the steps over it
   // have not found again for DigitalMap::kKeepMs goes: the levels fade by themselves, being averaged with new ones,
-  // but a verdict is only ever confirmed. Once the sweep stops, both stay as last seen.
+  // but a verdict is only ever confirmed. The step's bursts are weighed against the carriers of the sweep's span with
+  // its levels in (a pilot's sidebands are not Wi-Fi). Once the sweep stops, all of it stays as last seen.
   void add(const StepFindings &f, int64_t now_ms);
   // A scan step: its spectrum through smooth_db, into the levels alone (a scan judges nothing).
   void add_levels(const std::vector<float> &sm, double fs, double centre_hz, double edge_hz, int64_t now_ms);
   // The picture over lo..hi, as Radio::spectrum_json gives it (radio.h has the format): at_hz the step being taken now
   // (0: none), at_width_hz what a step covers, sweeps the passes finished. Its carriers are found here (find_carriers),
-  // each tagged with the kind of the signal it is on, if any.
+  // each tagged with the kind of the signal it is on, if any: a busy Wi-Fi network is a carrier of its own in the
+  // levels, which the network's signal names.
   std::string json(double lo_hz, double hi_hz, double at_hz, double at_width_hz, uint64_t sweeps) const;
 
   const BandMap &band() const { return _band; }
   const DigitalMap &digital() const { return _digital; }
+  const WifiWatch &wifi() const { return _wifi; }
 
 private:
   BandMap _band;
   DigitalMap _digital;
-  // Wi-Fi plugs in here: its WifiWatch, and lo..hi from sweep_started for the carriers it weighs bursts against.
+  WifiWatch _wifi;
+  double _lo = Sweep::kBandLo, _hi = Sweep::kBandHi;  // the sweep's span (sweep_started): the carriers Wi-Fi is weighed against
 };
 
 }  // namespace kp

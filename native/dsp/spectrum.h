@@ -1,5 +1,7 @@
 // fpvDROID: power spectrum and analog-video signal finding (the scanner's DSP half).
 #pragma once
+#include <algorithm>
+#include <cmath>
 #include <complex>
 #include <cstddef>
 #include <cstdint>
@@ -95,6 +97,29 @@ std::vector<Hump> find_humps(const std::vector<float> &db, double fs, double edg
 // Hump::snr_db for a signal that leaves part of the span free; a very wide, close signal reads lower.
 float carrier_snr(const std::vector<float> &db, double fs, double span_hz, double carrier_hz = 0, double pass_hz = 0);
 
+// A stretch of the band in bins of bin_hz from lo_hz, each with the time it was last written (0: never, or forgotten):
+// the grid that the band picture (BandMap) and the Wi-Fi networks' bursts (wifi.cpp) lay their retunes on, and what
+// they do with it alike: which bins a span holds, and forgetting the old ones.
+class TimedBins {
+public:
+  TimedBins(double lo_hz, double hi_hz, double bin_hz);
+  int size() const { return static_cast<int>(_t.size()); }
+  double bin_hz() const { return _bin; }
+  double hz(int j) const { return _lo + j * _bin; }  // bin j's centre
+  // The bin nearest hz (it may be past either end).
+  int nearest(double hz) const { return static_cast<int>(std::lround((hz - _lo) / _bin)); }
+  // The bins whose centres lie in lo..hi: first to last, none when last < first.
+  void inside(double lo_hz, double hi_hz, int *first, int *last) const;
+  int64_t written(int j) const { return _t[j]; }
+  void write(int j, int64_t now_ms) { _t[j] = std::max<int64_t>(now_ms, 1); }
+  // Bins in lo..hi (and the ones it reaches into) last written before older_than_ms are forgotten.
+  void forget(double lo_hz, double hi_hz, int64_t older_than_ms);
+
+private:
+  double _lo, _bin;
+  std::vector<int64_t> _t;
+};
+
 // The bands as one picture, for the spectrum page: the spectrum of every retune (a scan step, a sweep step) laid on
 // one grid, each in dB over its own noise floor. Only the floor makes two steps comparable: the chip's AGC picks a
 // gain of its own at every retune. Not thread-safe.
@@ -110,16 +135,15 @@ public:
   // in the last few seconds is averaged with the new value, so a burst of Wi-Fi does not flicker.
   void add(const std::vector<float> &smoothed, double fs, double centre_hz, double use_hz, int64_t now_ms);
   // Bins in lo..hi last seen before older_than_ms are forgotten.
-  void forget(double lo_hz, double hi_hz, int64_t older_than_ms);
+  void forget(double lo_hz, double hi_hz, int64_t older_than_ms) { _bins.forget(lo_hz, hi_hz, older_than_ms); }
   // lo..hi on the grid (first bin at *first_hz): dB over the floor, kNone where nothing has been seen. A gap of up
   // to 3 MHz between seen bins (the DC points of a scan, which steps 20 MHz) is bridged.
   std::vector<float> get(double lo_hz, double hi_hz, double *first_hz) const;
-  double bin_hz() const { return _bin; }
+  double bin_hz() const { return _bins.bin_hz(); }
 
 private:
-  double _lo, _bin;
-  std::vector<float> _db;
-  std::vector<int64_t> _t;  // when each bin was last written
+  TimedBins _bins;
+  std::vector<float> _db;  // a bin's level, while it is written
 };
 
 // Something on the air in a BandMap picture: a run at least 2 MHz wide standing 6 dB over the floor (dips under

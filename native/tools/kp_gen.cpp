@@ -3,6 +3,7 @@
 //
 //   kp_gen OUT [--mhz 5769] [--centre MHZ (default --mhz)] [--frames 30] [--dev 8] [--cnr 25] [--pal] [--label R4]
 //              [--copy MHZ DB] [--mirror DB]
+//              [--wifi CH | --wifi-quiet CH] [--wifi-db 20]
 //   kp_gen OUT --digital KIND [--mhz 5769] [--centre MHZ] [--snr 20] [--width MHZ] [--seconds 0.25]
 //
 // Writes OUT.cs16 (int16 I,Q at 40 MS/s, 12-bit values << 4, like wsdr_probe) and OUT.json (sample_rate,
@@ -20,6 +21,11 @@
 // Picture: 75 % colour bars (top two thirds), a grey ramp, and a white box that moves across the bottom band
 // once per loop, so a frozen picture is obvious; --label puts big text over the bars. Composite levels in IRE
 // (sync -40, blank 0, black 7.5 for NTSC, white 100), FM-modulated so that sync tip -> -dev/2, white -> +dev/2.
+//
+// --wifi CH adds a 5 GHz Wi-Fi network in use on channel CH (802.11a OFDM, --wifi-db over the noise: digital_tx.h),
+// --wifi-quiet CH one that only sends its beacons, for the Spectrum tab's Wi-Fi (dsp/wifi.h). kp_sim takes the
+// recording for one centred on 5770 MHz and moves it without filtering, and the subcarriers past 18 MHz of the centre
+// are left out, so keep the channel near the middle: 153 (5765 MHz) with --centre 5770, and the VTX off it (--mhz 5785).
 #include <cmath>
 #include <complex>
 #include <cstdint>
@@ -164,6 +170,7 @@ int main(int argc, char **argv) {
   if (argc < 2) {
     std::fprintf(stderr, "usage: kp_gen OUT [--mhz F] [--centre F] [--frames N] [--dev MHZ] [--cnr DB] [--pal] [--label TEXT]"
                          " [--copy MHZ DB] [--mirror DB]\n"
+                         "              [--wifi CH | --wifi-quiet CH] [--wifi-db DB]\n"
                          "       kp_gen OUT --digital hdzero|narrow|dji|dji_idle|wifi|ofdm [--mhz F] [--centre F] [--snr DB]"
                          " [--width MHZ] [--seconds S]\n");
     return 2;
@@ -174,6 +181,9 @@ int main(int argc, char **argv) {
   int frames = 30;
   bool pal = false;
   std::string label;  // big text over the bars (a channel name), so feeds are easy to tell apart
+  int wifi_ch = 0;    // a Wi-Fi network on this channel (0: none)
+  bool wifi_quiet = false;
+  double wifi_db = 20;
   std::string digital;  // --digital: a digital transmitter instead
   double snr_db = 20, width_mhz = 0, seconds = 0.25;
   for (int i = 2; i < argc; i++) {
@@ -188,6 +198,9 @@ int main(int argc, char **argv) {
     else if (k == "--label" && i + 1 < argc) label = argv[++i];
     else if (k == "--copy") { copy_mhz = v(); copy_db = v(); }
     else if (k == "--mirror") mirror_db = v();
+    else if (k == "--wifi") wifi_ch = static_cast<int>(v());
+    else if (k == "--wifi-quiet") { wifi_ch = static_cast<int>(v()); wifi_quiet = true; }
+    else if (k == "--wifi-db") wifi_db = v();
     else if (k == "--digital" && i + 1 < argc) digital = argv[++i];
     else if (k == "--snr") snr_db = v();
     else if (k == "--width") width_mhz = v();
@@ -221,6 +234,16 @@ int main(int argc, char **argv) {
   std::mt19937 rng(1);
   std::normal_distribution<double> nd(0, std::sqrt(noise_pow / 2));
 
+  // The Wi-Fi network (digital_tx.h): 52 subcarriers 312.5 kHz apart around 5000 + 5 CH MHz, symbols of 4 us, on for
+  // a beacon of 0.4 ms every 102.4 ms and, in use, in a quarter of its 0.5 ms frames at random; its density wifi_db
+  // over the noise's. Made a piece at a time on the recording's own clock, so that the pieces join up.
+  kp::tx::Ofdm wifi;
+  wifi.offset_hz = (5000 + 5.0 * wifi_ch - centre_mhz) * 1e6;
+  wifi.width_hz = 16.25e6;
+  wifi.snr_db = wifi_db;
+  wifi.wifi = true;
+  wifi.on = wifi_quiet ? kp::tx::beacons(0) : kp::tx::traffic(0.25, 2);
+  std::vector<kp::cf> piece(1 << 16);
   double phase = 0;
   const double w_sc = 2 * M_PI * S.fsc;
   std::string extra = std::string("\"std\": \"") + (pal ? "PAL" : "NTSC") + "\"";
@@ -313,7 +336,16 @@ int main(int argc, char **argv) {
       x += mirror_gain * cp;
       y -= mirror_gain * sp;
     }
-    const double re = amp * x + nd(rng), im = amp * y + nd(rng);
+    double re = amp * x + nd(rng), im = amp * y + nd(rng);
+    if (wifi_ch) {
+      if (i % piece.size() == 0) {
+        std::fill(piece.begin(), piece.end(), kp::cf(0, 0));
+        wifi.t0_s = i / fs;
+        kp::tx::add_ofdm(piece, wifi, std::sqrt(noise_pow / 2), rng);
+      }
+      re += piece[i % piece.size()].real();
+      im += piece[i % piece.size()].imag();
+    }
     return std::complex<double>(re, im);
   });
   if (e) return e;
