@@ -62,13 +62,30 @@ std::vector<float> smooth_db(const std::vector<float> &db, double bin_hz);
 // The median of v (the upper one of an even count); 0 for none.
 float median_of(std::vector<float> v);
 
-// A hump in the spectrum that looks like an FM video carrier (3.5..24 MHz wide at floor + 6 dB).
+// A hump in the spectrum that looks like an FM video carrier: kHumpMinHz..kHumpMaxHz wide at floor + 6 dB (a VTX
+// next to the phone is about 16 MHz wide).
+inline constexpr double kHumpMinHz = 3.5e6, kHumpMaxHz = 24e6;
 struct Hump {
   double offset_hz;  // centroid, relative to the stream centre
   double width_hz;
   float peak_db, snr_db;
 };
-// Humps fully inside +-edge_hz of the centre.
+// A signal that runs on past one edge of +-edge_hz, so that it is no hump: f0..f1 the part of it inside (relative to
+// the centre, at least kHumpMinHz), snr_db that part's median over the floor.
+struct CutSignal {
+  double f0_hz = 0, f1_hz = 0;
+  bool cut_hi = false;  // it goes on past the top edge; else past the bottom one
+  float snr_db = 0;
+};
+// One spectrum's signals over one floor: the humps fully inside +-edge_hz of the centre, and the signals cut by one
+// edge. One past both edges is wider than the span, no VTX, and left out. (With edge_hz over 3/8 of fs there is none:
+// it would hold over three quarters of the bins, and the floor is their lower quartile.)
+struct StepSignals {
+  std::vector<Hump> whole;
+  std::vector<CutSignal> cut;
+};
+StepSignals find_step_signals(const std::vector<float> &db, double fs, double edge_hz);
+// Its humps alone.
 std::vector<Hump> find_humps(const std::vector<float> &db, double fs, double edge_hz);
 
 // Live SNR of the carrier being watched (dB): the strongest point of the smoothed spectrum against the noise

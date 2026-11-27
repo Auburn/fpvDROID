@@ -246,6 +246,7 @@ JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_setPicture(JNIEnv *, jclass,
   p.chroma_comb = colour_comb;
   p.strips = strips;
   if (g_radio) g_radio->set_picture(p);
+  if (g_screen) g_screen->set_strips(p.strips);
 }
 
 // The picture's delay on screen (render/latency.h), over the last second, as JSON.
@@ -338,8 +339,8 @@ JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_setDebugEnv(JNIEnv *env, jcl
     if (g_radio) g_radio->set_conceal(on);
   } else if (k == "KP_FAST_CPUS") {
     if (g_radio) g_radio->set_fast_cores(on);
-  } else if (k == "KP_FRONT_BUFFER") {  // front-buffer drawing (a prototype: Screen::set_front_buffer)
-    if (g_screen) g_screen->set_front_buffer(on);
+  } else if (k == "KP_FRONT_BUFFER") {  // "0": no front-buffer drawing with Vsync off (Screen::allow_front_buffer)
+    if (g_screen) g_screen->allow_front_buffer(on);
   } else if (k == "KP_PRESENT_ALIGN") {  // how strips go up (Screen::set_present_align, set_present_margin_us)
     if (g_screen) g_screen->set_present_align(on);
   } else if (k == "KP_PRESENT_MARGIN_US") {

@@ -28,8 +28,11 @@ it, a picture that has stopped), full size or in the preview, colour bars show t
 **NO SIGNAL** before one has been chosen.
 
 - **Channel** — the band (Raceband, Fatshark, Boscam A / B / E, Lowband) and its eight channels. **Scan** is
-  optional: it sweeps every band, marks the channels with video on them and tunes the strongest (or the one
-  you were on, if it is still there). The channel is remembered for the next start.
+  optional: it sweeps every band, marks the channels with video on them and tunes the strongest it found (or the
+  one you were on, if it found that one again). It retunes every 20 MHz and sees 33 MHz at each, so a transmitter
+  close by (15–20 MHz wide) may never be whole in one: F1–F8 and R7 sit halfway between two retunes, E8 past the
+  highest. Such a transmitter gets a retune of its own as soon as the scan knows where it is (up to eight a scan,
+  each one more in the count under Scan). The channel is remembered for the next start.
 - **Spectrum** — a spectrum analyser: the band swept over and over (5635–5955 MHz, or 5340–5640 for Lowband),
   each channel of the chosen band marked under it, the ones with something on the air lit and listed (any
   transmitter, analog or not, at least 2 MHz wide and 6 dB over the noise). A pass takes about two seconds
@@ -76,10 +79,12 @@ it, a picture that has stopped), full size or in the preview, colour bars show t
   (Battery Saver, heat and the phone's own refresh-rate setting can still cap it), and says under it what rate
   the screen runs at; off, the display is asked for the camera's field rate, which suits a screen that has such a
   mode. **Vsync** (off by default) shows each picture whole, once its field has ended; off, each part of the
-  picture goes up as soon as its lines are decoded, a strip of 32 lines at a time, and the top of the picture
-  reaches the compositor a field (~17 ms) sooner. How much of that reaches the screen depends on the phone's
-  compositor; the Signal tab's numbers include the picture's delay, from the adapter taking its top and bottom
-  lines to the display.
+  picture goes up as soon as its lines are decoded, a strip of 32 lines at a time. Where the phone's graphics
+  allow it, each strip is drawn straight into the buffer the display is showing, past the compositor: on a Pixel
+  8 Pro at 120 Hz the top line is then drawn 5 ms after the adapter took it, where the compositor shows it after
+  34 ms (the app's own readout), for a quarter of a core more. On other phones the strips go to the compositor
+  once a refresh. The Signal tab's numbers include the picture's delay, from the adapter taking its top and
+  bottom lines to the display, and say when the picture is drawn straight to the screen.
 - **Signal** — sample rate (40 MS/s, or 20 for a USB link that cannot carry 40; the app also falls back by
   itself when 40 keeps restarting or losing blocks past the first 10 s of watching, and stops doing so for the
   session once 20 has locked up on that phone, where 20 is the worse of the two), diversity (both antennas combined: fit two; it adds
@@ -87,6 +92,14 @@ it, a picture that has stopped), full size or in the preview, colour bars show t
   picture off the chip's DC point; at 40 MS/s only: at 20 the stream is too narrow and the radio stays on
   the channel), gain (automatic, or by hand for a very close transmitter), and a line of numbers (USB speed,
   processing load, drops, restarts).
+
+A scan marks a channel as found when a picture locks on the signal there. A strong analog transmitter close by (a
+quad on the table next to the phone) can show a copy of itself a few dB weaker beside it, whose picture locks too:
+FPVDesktopWiFiReceiver measured one on R3 at 5731 MHz with a copy at 5743 MHz, which it listed as A7. So a signal
+within 15 MHz of one at least 2 dB stronger is taken for that one's copy: it is not marked, and the scan never tunes
+it. Two real transmitters that close would spoil each other's picture anyway. The chosen channel is the exception:
+whether a signal there is a copy cannot be told for sure, so it stays marked beside the stronger one, and the scan
+does not move you from it to another transmitter.
 
 The status at the top left says what the adapter is doing. Nothing there needs attention unless it says so:
 a radio that does not start, or stops delivering samples, is closed and started again by itself, on the
@@ -120,7 +133,8 @@ adapter over WebUSB, and it watches at 20 MS/s (what WebUSB can carry). It is no
 - **macOS:** nothing to set up.
 
 On screen: the OSD pill (channel, frequency, SNR, decode → screen latency) can be dragged, ✕ / **O** hides it;
-⚙ (top right) has Channels and Scan; full screen bottom right or **F**.
+⚙ (top right) has Scan and the channels the last scan found (click one to watch it); full screen bottom right or
+**F**.
 
 ## Layout
 
@@ -130,11 +144,14 @@ On screen: the OSD pill (channel, frequency, SNR, decode → screen latency) can
   DJI, HDZero and other digital signals told apart (`digital.cpp`). No hardware.
 - `native/radio/` — the adapter (wifi-sdr `Receiver`) + a DSP thread: scan, watch, sweep, stream test; antenna
   combining (`combine.cpp`); when 40 MS/s gives way to 20 (`fallback_policy.cpp`); torn frames kept off the
-  screen (`frame_gate.cpp`); the retunes of a scan or sweep and each one's capture (`steps.cpp`); the sweep's
-  passes, what each step's capture is measured for, and the band picture that goes into, as the app reads it, with
-  the signals the sweep has recognised in it (`sweep.cpp`).
-- `native/tests/` — unit tests of the radio's rules, the decoder's sync, the Spectrum tab's band picture (and the FFT
-  under it) and its telling digital signals apart, no hardware (`ctest`; `scripts/build-desktop.sh` runs them).
+  screen (`frame_gate.cpp`); the retunes of a scan or sweep and each one's capture (`steps.cpp`); the scan's
+  plan and the retunes it adds for a transmitter none of them sees whole (`scan.cpp`); what a scan found,
+  less a strong transmitter's copy, and what it watches after (`pilots.cpp`); the sweep's passes, what each step's
+  capture is measured for, and the band picture that goes into, as the app reads it, with the signals the sweep
+  has recognised in it (`sweep.cpp`).
+- `native/tests/` — unit tests of the radio's and the scan's rules, the decoder's sync, the Spectrum tab's band
+  picture (and the FFT under it) and its telling digital signals apart, no hardware (`ctest`;
+  `scripts/build-desktop.sh` runs them).
 - `native/render/` — the picture on screen (OpenGL ES 3): layout, side-by-side view, the menu's preview,
   the NO SIGNAL card.
 - `native/jni/` — the app's native side; a render thread draws each frame on the video Surface as it is decoded.
@@ -196,10 +213,10 @@ off the chip's own recovery from the adapter's USB 3 lock-up (it frees itself wi
 line counts that as `unwedged`), so that each lock-up shows in the log as a stream fault. The app's own, under the same
 extra: `KP_CONCEAL=0` shows the frames torn by a stream restart (at once), and `KP_FAST_CPUS=0` lets Android put
 the two processing threads on any core (from the next open; by default they are kept off the phone's slowest
-cores, where they fall behind). The screen's, at once: `KP_PRESENT_ALIGN=0` puts each strip up as it comes (by
-default they go up once a refresh, `KP_PRESENT_MARGIN_US` before the compositor's next frame), `KP_FRONT_BUFFER=1`
-tries front-buffer drawing (a prototype: straight into the buffer the display shows, no queue; the log says
-whether the phone can). And `--ez vsync true|false`, `--es refresh field|max|none` (the display rate asked for,
+cores, where they fall behind). The screen's, at once: `KP_FRONT_BUFFER=0` keeps Vsync off from drawing straight
+into the buffer the display shows (the log says whether the phone can), so that the strips go through the
+compositor; `KP_PRESENT_ALIGN=0` then puts each strip up as it comes (by default they go up once a refresh,
+`KP_PRESENT_MARGIN_US` before the compositor's next frame). And `--ez vsync true|false`, `--es refresh field|max|none` (the display rate asked for,
 in place of what Max screen Hz says) and `--ez menu false` (the menu closed, as when flying) for measuring the
 picture's delay.
 
@@ -207,6 +224,8 @@ picture's delay.
 
 ```sh
 build/desktop/kp_gen rec/r4 --mhz 5769 --label R4 --cnr 12   # a synthetic transmitter: rec/r4.cs16 + .json
+build/desktop/kp_gen rec/cp --mhz 5764 --centre 5770 --dev 5 --cnr 35 --copy 5776 4   # + a copy at 5776, 4 dB under (--mirror DB: its mirror image)
+KP_SIM_FILE=rec/cp.cs16 build/desktop/kp_sim --scan   # "5776.2 MHz taken as a copy of 5764.2 MHz": one pilot found
 build/desktop/kp_replay rec/r4.cs16 --luma-comb --adaptive --smooth --repair   # the picture switches (--comb: colour comb)
 KP_SIM_FILE=rec/r4.cs16 build/desktop/kp_sim --scan --offset-tune --diversity   # the radio's switches, no hardware
 KP_SIM_FILE=rec/r4.cs16 KP_SIM_LEAD_NS=146 build/desktop/kp_sim --watch 5769 --diversity   # path B 146 ns ahead of A: the combiner measures and undoes it
@@ -225,6 +244,8 @@ build/desktop/kp_replay ../vtx-spike/rec/demo.cs16            # lock numbers
 build/desktop/kp_replay ../vtx-spike/rec/r4.cs16 --cnr 8      # with noise added (CNR in an 18 MHz channel)
 build/desktop/kp_replay ../vtx-spike/rec/r4.cs16 --frames | ffplay -f rawvideo -pixel_format rgb0 -video_size 720x480 -i -
 KP_SIM_FILE=../vtx-spike/rec/r4.cs16 build/desktop/kp_sim --scan   # scan -> watch without hardware
+build/desktop/kp_gen rec/f2 --mhz 5760 --centre 5770 --cnr 35 --label F2   # F2, halfway between the 5750 and 5770 retunes
+KP_SIM_FILE=rec/f2.cs16 build/desktop/kp_sim --scan   # right after 5770, a retune at 5760 for it ("scan: 5770.0 MHz step: extra step at 5760...")
 build/desktop/kp_live --scan --frames | ffplay -f rawvideo -pixel_format rgb0 -video_size 720x480 -framerate 60 -fflags nobuffer -i -
 ```
 

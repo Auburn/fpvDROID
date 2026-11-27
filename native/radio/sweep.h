@@ -27,7 +27,7 @@ namespace kp {
 // thread, passes() from the spectrum poll).
 class Sweep {
 public:
-  // Steps this far apart: each one's +-16.5 MHz (radio.cpp's kEdge) overlaps its neighbours' by 3 MHz.
+  // Steps this far apart: each one's +-16.5 MHz (ScanPlan::kEdge) overlaps its neighbours' by 3 MHz.
   static constexpr double kStep = 30e6;
   // The band picture (BandMap) the Radio keeps: every analog FPV channel (L1 5362 .. E8 5945) with room either side,
   // in half-MHz bins. A sweep's span is kept inside it.

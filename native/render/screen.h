@@ -1,13 +1,13 @@
 // fpvDROID: the app's screen on Android (the Kotlin app's Surface; fpvdroid_jni.cpp hands it frames and settings).
 // Frames go straight to the video Surface: a render thread owns an EGL context on it and draws each frame as
 // it arrives (latest frame wins; the decode thread never waits for the display, only for its lines to be copied).
-// With low latency (PictureOpts::strips) the picture comes in strips instead, and goes up once a refresh, just
-// before the compositor takes its next frame, with the strips that have come by then: only the rows that changed
-// go to the GPU.
+// With Vsync off (PictureOpts::strips) the picture comes in strips instead, and only the rows that changed go to
+// the GPU. Where the phone can, each strip is drawn as it comes, straight into the buffer the display shows
+// (front-buffer drawing, front_buffer.h). Where it cannot, the strips go up once a refresh, just before the
+// compositor takes its next frame, with the strips that have come by then.
 //
 // How old the picture is when it is shown is measured as it goes (latency.h), with the display's own timing where
-// it gives any (display_timing.h). Behind a debug switch: front-buffer drawing (front_buffer.h), where each strip
-// is drawn as it comes, straight into the buffer the display shows.
+// it gives any (display_timing.h).
 #pragma once
 #include <EGL/egl.h>
 #include <android/native_window.h>
@@ -111,10 +111,11 @@ public:
     _cv.notify_one();
   }
 
-  // Debug (KP_PRESENT_ALIGN): strips go up once a refresh, just before the compositor's next composition (on, the
-  // default), or each as it comes (off). Measured on a Pixel 8 Pro at 120 Hz: a present for every strip (~350 a
-  // second) made the compositor show each frame a refresh later than one a refresh did, and the display's history
-  // of frame times was too short to say when strips went up.
+  // Debug (KP_PRESENT_ALIGN), for strips that go through the compositor (no front-buffer drawing): they go up once
+  // a refresh, just before the compositor's next composition (on, the default), or each as it comes (off).
+  // Measured on a Pixel 8 Pro at 120 Hz: a present for every strip (~350 a second) made the compositor show each
+  // frame a refresh later than one a refresh did, and the display's history of frame times was too short to say
+  // when strips went up.
   void set_present_align(bool on) {
     _align = on;
     _cv.notify_one();
@@ -125,14 +126,18 @@ public:
     _cv.notify_one();
   }
 
-  // Debug (KP_FRONT_BUFFER): front-buffer drawing (front_buffer.h), from a fresh start of EGL on the window.
-  void set_front_buffer(bool on) {
-    if (!_front.ask(on)) return;
-    {
-      std::lock_guard<std::mutex> l(_m);
-      _rebuild = true;
-    }
-    _cv.notify_one();
+  // The picture comes in strips (PictureOpts::strips, Vsync off): where the phone can, they are drawn straight into
+  // the buffer the display shows (front_buffer.h), from a fresh start of EGL on the window.
+  void set_strips(bool on) {
+    std::lock_guard<std::mutex> l(_m);
+    _front_wanted = on;
+    front_changed();
+  }
+  // Debug (KP_FRONT_BUFFER=0): never that. Strips then go up once a refresh, as on a phone that cannot.
+  void allow_front_buffer(bool on) {
+    std::lock_guard<std::mutex> l(_m);
+    _front_allowed = on;
+    front_changed();
   }
 
   // The display's refresh rate as the app sees it (its Display's mode), each time that changes. The readout takes
@@ -225,6 +230,16 @@ private:
   static constexpr double kStaleSeconds = 1.2;   // no frame for this long: the picture is not live any more ...
   static constexpr float kFadeSeconds = 0.5f;    // ... and fades into NO SIGNAL over this, dimming on the way ...
   static constexpr float kStaleBright = 0.6f;    // ... to this; while held (hold()) it stays up, only dimmed
+
+  // Under _m: front-buffer drawing is asked for ...
+  bool front_asked() const { return _front_wanted && _front_allowed; }
+  // ... and where that is not what EGL was last started for (egl_up), it is started again. Not on a phone whose EGL
+  // has no way to it: nothing would change.
+  void front_changed() {
+    if (!_front_possible || front_asked() == _front_built) return;
+    _rebuild = true;
+    _cv.notify_one();
+  }
 
   // A fade's next step toward `to`: by `up` if it rises, `down` if it falls.
   static float approach(float v, float to, float up, float down) {
@@ -352,7 +367,12 @@ private:
       KP_LOGE("screen: no EGL display (0x%x)", eglGetError());
       return false;
     }
-    _cfg = pick_config(_dpy, _front.wants_config(_dpy));
+    {
+      std::lock_guard<std::mutex> l(_m);  // what this start of EGL is for: front_changed asks for another
+      _front_possible = FrontBuffer::available(_dpy);
+      _front_built = front_asked();
+    }
+    _cfg = pick_config(_dpy, _front_built && _front_possible);
     if (!_cfg) {
       KP_LOGE("screen: no OpenGL ES 3 config (0x%x)", eglGetError());
       return false;
@@ -405,7 +425,7 @@ private:
     _tex_stale = true;
     _gl.forget_drawn();
     // front-buffer drawing queues no frames: nothing for the display to give times of
-    if (_front.start(_dpy, _surf, _ctx, _cfg)) _timing.stop_frame_times();
+    if (_front_built && _front.start(_dpy, _surf, _ctx, _cfg)) _timing.stop_frame_times();
   }
 
   // EGL and GL from scratch on the same window (the GPU was reset under us, or front-buffer drawing was switched:
@@ -503,11 +523,13 @@ private:
           _win_done = seq;
           _done.notify_all();
         }
-        if (_rebuild) {  // front-buffer drawing switched (set_front_buffer)
+        if (_rebuild) {  // front-buffer drawing switched (set_strips, allow_front_buffer)
           _rebuild = false;
-          l.unlock();
-          restart_egl(true);
-          l.lock();
+          if (front_asked() != _front_built) {  // and not switched back since
+            l.unlock();
+            restart_egl(true);
+            l.lock();
+          }
         }
         in = take_picture();
         cleared = _clear;
@@ -591,7 +613,11 @@ private:
   std::atomic<bool> _align{true};    // set_present_align
   std::atomic<int> _margin_us{2500};  // set_present_margin_us
   bool _have = false, _clear = false, _dirty = false, _stop = false;
-  bool _rebuild = false;              // EGL to be started again (set_front_buffer)
+  bool _front_wanted = false, _front_allowed = true;  // set_strips, allow_front_buffer
+  // Front-buffer drawing as EGL was last started for it, and whether this EGL has the way to it (true until EGL
+  // says no). Written by the render thread alone (egl_up), which reads them without the lock.
+  bool _front_built = false, _front_possible = true;
+  bool _rebuild = false;              // EGL to be started again (front_changed)
   std::atomic<float> _display_hz{0};  // set_display_hz (0: not said)
   Clock::time_point _quiet_until{};
   Clock::time_point _hold_until{};
@@ -610,7 +636,7 @@ private:
   bool _gl_ready = false, _tex_stale = false;
   std::vector<uint8_t> _last;  // the picture in hand, whole (rows go up as they change; all of it after a GL restart)
   int _lw = 0, _lh = 0;
-  FrontBuffer _front;          // front-buffer drawing (asked for from any thread: set_front_buffer)
+  FrontBuffer _front;          // front-buffer drawing, where it is on
   DisplayTiming _timing;       // the display's own timing, where it gives any
   // the picture's delay (latency.h)
   LatencyMeter _lat;
