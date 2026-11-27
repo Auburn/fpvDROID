@@ -2,9 +2,11 @@
 #pragma once
 #include <complex>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 #include "rings.h"
+#include "sync_levels.h"
 #include "video.h"
 
 namespace kp {
@@ -22,6 +24,9 @@ struct LineInfo {
   uint64_t epoch = 0;  // which stretch of unbroken stream it is in (lines across a jump don't comb)
   double phase = 0;    // the burst's reference phase and amplitude after this line's burst
   float mag = 0;
+  // Its sync was at other levels than the decoder's (the signal has jumped: SyncLevels::look): it is drawn
+  // against these, its own
+  std::optional<LevelPair> own;
 };
 
 // What a line is drawn with besides itself: the decoder's levels and timing as of now.

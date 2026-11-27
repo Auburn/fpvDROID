@@ -1,11 +1,16 @@
 // kp_replay: run fpvDROID's scanner DSP and video decoder over a recording (.cs16 + .json from wsdr_probe,
 // or .sigmf-data + .sigmf-meta) and print lock numbers. The bench for lock robustness.
 //
-//   kp_replay REC.cs16 [--offset HZ] [--start S] [--seconds S] [--cnr DB] [--fs HZ] [--mix HZ] [--as20]
-//             [--frames] [--woven] [--comb] [--luma-comb] [--adaptive] [--smooth] [--repair] [-v]
+//   kp_replay REC.cs16 [--offset HZ] [--start S] [--seconds S] [--cnr DB] [--fs HZ] [--mix HZ] [--flash MHZ]
+//             [--as20] [--frames] [--woven] [--comb] [--luma-comb] [--adaptive] [--smooth] [--repair]
+//             [--no-levels] [--no-flywheel] [-v]
 //   --comb: the 3-line colour comb. --luma-comb, --adaptive, --smooth, --repair: the picture switches of video.h
 //   (comb filter, clean OSD edges, smooth lines, sparkle repair). --as20: as the adapter delivers it at 20 MS/s.
 //   --mix HZ: the recording shifted by HZ first (scanner edge tests). --fs HZ: for a recording without a .json.
+//   --flash MHZ: the transmitter's frequency down by MHZ for half of every 1/7 s, as when its sync levels jump with
+//   a light flashing in the picture (an AC-coupled video input): the lock should hold through it.
+//   --no-levels, --no-flywheel: without the decoder's following of such jumps, without its vertical flywheel
+//   (DecoderOpts), to see what each does by itself.
 //   kp_replay REC.cs16 --frames | ffplay -f rawvideo -pixel_format rgb0 -video_size 720x480 -i -
 #include <chrono>
 #include <cmath>
@@ -32,9 +37,10 @@ static double json_number(const std::string &txt, const char *key) {
 
 int main(int argc, char **argv) {
   std::string file;
-  double offset = NAN, start = 0, seconds = 0, cnr = 0, fs = 40e6, mix = 0;
-  bool frames = false, woven = false, as20 = false;
+  double offset = NAN, start = 0, seconds = 0, cnr = 0, fs = 40e6, mix = 0, flash = 0;
+  bool frames = false, as20 = false;
   PictureOpts pic;
+  DecoderOpts dec;
   for (int i = 1; i < argc; i++) {
     const std::string k = argv[i];
     auto v = [&] { return i + 1 < argc ? argv[++i] : (std::fprintf(stderr, "missing value\n"), std::exit(2), ""); };
@@ -44,9 +50,12 @@ int main(int argc, char **argv) {
     else if (k == "--cnr") cnr = std::atof(v());
     else if (k == "--fs") fs = std::atof(v());
     else if (k == "--mix") mix = std::atof(v());
+    else if (k == "--flash") flash = std::atof(v());
+    else if (k == "--no-levels") dec.follow_levels = false;
+    else if (k == "--no-flywheel") dec.flywheel = false;
     else if (k == "--as20") as20 = true;  // emulate the adapter at 20 MS/s: ~18.4 MHz filter, decimate by 2
     else if (k == "--frames") frames = true;
-    else if (k == "--woven") woven = true;
+    else if (k == "--woven") dec.fields = false;
     else if (k == "--comb") pic.chroma_comb = true;
     else if (k == "--luma-comb") pic.luma_comb = true;
     else if (k == "--adaptive") pic.adaptive_comb = true;
@@ -55,8 +64,9 @@ int main(int argc, char **argv) {
     else if (k == "-v") set_log_debug(true);
     else if (k[0] != '-') file = k;
     else {
-      std::fprintf(stderr, "usage: kp_replay REC.cs16 [--offset HZ] [--start S] [--seconds S] [--cnr DB] [--fs HZ] [--mix HZ]\n"
-                           "       [--as20] [--frames] [--woven] [--comb] [--luma-comb] [--adaptive] [--smooth] [--repair] [-v]\n");
+      std::fprintf(stderr, "usage: kp_replay REC.cs16 [--offset HZ] [--start S] [--seconds S] [--cnr DB] [--fs HZ] [--mix HZ] [--flash MHZ]\n"
+                           "       [--as20] [--frames] [--woven] [--comb] [--luma-comb] [--adaptive] [--smooth] [--repair]\n"
+                           "       [--no-levels] [--no-flywheel] [-v]\n");
       return 2;
     }
   }
@@ -156,14 +166,12 @@ int main(int argc, char **argv) {
     return o;
   };
   const double fs_dec = as20 ? fs / 2 : fs;
-  DecoderOpts o;
-  o.fields = !woven;
   int fw = 0, fh = 0;
   FrontEnd fe(fs_dec, offset, [&](const Frame &fr) {
     fw = fr.width;
     fh = fr.height;
     if (frames) std::fwrite(fr.data, 1, static_cast<size_t>(fr.width) * fr.height * 4, stdout);
-  }, o, pic);
+  }, dec, pic);
   std::mt19937 rng(1);
   std::normal_distribution<float> nd(0.f, 1.f);
   float noise_sd = 0;
@@ -180,13 +188,19 @@ int main(int argc, char **argv) {
   }
   std::vector<float> dbuf;
   std::vector<uint8_t> bad;
-  double t_demod = 0, t_decode = 0;
+  double t_demod = 0, t_decode = 0, flash_ph = 0;
   size_t done = 0, next_report = static_cast<size_t>(fs);
   uint64_t last_frames = 0;
   const auto t0 = std::chrono::steady_clock::now();
   while (done < total) {
     const size_t n = read_block(std::min<size_t>(65536, total - done));
     if (!n) break;
+    if (flash != 0)
+      for (size_t i = 0; i < n; i++) {
+        const double t7 = static_cast<double>(done + i) / fs * 7;
+        if (t7 - std::floor(t7) >= 0.5) flash_ph = std::remainder(flash_ph - 2 * M_PI * flash * 1e6 / fs, 2 * M_PI);
+        x[i] *= cf(static_cast<float>(std::cos(flash_ph)), static_cast<float>(std::sin(flash_ph)));
+      }
     if (noise_sd > 0)
       for (size_t i = 0; i < n; i++) x[i] += cf(noise_sd * nd(rng), noise_sd * nd(rng));
     const auto ta = std::chrono::steady_clock::now();
@@ -212,10 +226,12 @@ int main(int argc, char **argv) {
   const double dt = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   const auto s = fe.stats();
   std::fprintf(stderr, "done: %.2f s of IQ in %.2f s (%.1fx realtime), offset %+.3f MHz, frames %llu (%dx%d), "
-               "acquisitions %llu, losses %llu, re-phases %llu, lines locked %.1f%%\n",
+               "acquisitions %llu, losses %llu, re-phases %llu, level jumps %llu, fields coasted %llu put right %llu, "
+               "lines locked %.1f%%\n",
                done / fs, dt, done / fs / dt, offset / 1e6, (unsigned long long)s.frames, fw, fh,
                (unsigned long long)s.acquisitions, (unsigned long long)s.losses, (unsigned long long)s.rephases,
-               s.lines ? 100.0 * s.lines_locked / s.lines : 0.0);
+               (unsigned long long)s.level_jumps, (unsigned long long)s.fields_coasted,
+               (unsigned long long)s.starts_put_right, s.lines ? 100.0 * s.lines_locked / s.lines : 0.0);
   std::fprintf(stderr, "cpu per second of IQ: demod %.0f ms, decode %.0f ms\n", t_demod / (done / fs) * 1e3,
                t_decode / (done / fs) * 1e3);
   if (pic.repair)

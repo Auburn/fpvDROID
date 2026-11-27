@@ -22,6 +22,7 @@ struct VideoStd {
   double aw_us;  // active video width
   int active;    // active lines per field
   int skip;      // lines from the field's first broad pulse to the first active line
+  int field_lines;  // whole lines in an odd field; an even one has one more
   const char *name;
 };
 extern const VideoStd kNtsc, kPal;
@@ -58,6 +59,9 @@ struct DecoderStats {
   uint64_t fields = 0, frames = 0;        // since construction
   uint64_t acquisitions = 0, losses = 0;  // successful acquisitions, lock losses
   uint64_t rephases = 0;                  // line grid moved onto a jumped signal without re-acquiring
+  uint64_t level_jumps = 0;               // sync levels moved onto a signal that jumped up or down, likewise
+  uint64_t fields_coasted = 0;            // fields begun by the flywheel, their vertical sync not found ...
+  uint64_t starts_put_right = 0;          // ... and field starts found a line or two off, begun where it said
   uint64_t clicks_repaired = 0;           // sparkle repair: FM clicks patched over ...
   uint64_t lines_mended = 0;              // ... and badly hit lines redrawn from the lines above and below
   double line_us = 0;                     // tracked line period
@@ -73,6 +77,10 @@ struct DecoderOpts {
   int std_force = 0;           // 0 auto, 1 NTSC, 2 PAL
   bool force_invert = false;   // only try sync at the high-frequency end
   bool colour = true;          // decode colour (falls back to grey when there is no usable burst)
+  // Two things the decoder does to keep its picture, each of which the bench and the tests can turn off to see
+  // what the other does by itself (kp_replay --no-levels, --no-flywheel):
+  bool follow_levels = true;   // the sync levels follow a signal that jumps up or down
+  bool flywheel = true;        // a field begins where the fields before say, when its vertical sync is not found
 };
 
 // The picture switches: one value, given to a FrontEnd when it is made and changed with set_picture(). A new set

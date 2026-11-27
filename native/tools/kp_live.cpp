@@ -59,9 +59,11 @@ int main(int argc, char **argv) {
       std::fflush(stdout);
     }
   });
-  // the app's two debug switches, as environment variables here: read once, before the radio has any threads
+  // the radio's debug switches (radio.h), as environment variables here: read once, before the radio has any threads
   if (const char *e = std::getenv("KP_CONCEAL")) radio.set_conceal(*e != '0');
   if (const char *e = std::getenv("KP_FAST_CPUS")) radio.set_fast_cores(*e != '0');
+  if (const char *e = std::getenv("KP_LEVELS")) radio.set_follow_levels(*e != '0');
+  if (const char *e = std::getenv("KP_FLYWHEEL")) radio.set_flywheel(*e != '0');
   try {
     radio.open(-1);
   } catch (const std::exception &e) {

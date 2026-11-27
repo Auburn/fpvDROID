@@ -7,43 +7,48 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <optional>
+#include <utility>
 
 #include "biquad.h"
 #include "deinterlace.h"
+#include "field_rhythm.h"
 #include "line_draw.h"
 #include "log.h"
 #include "picture_filters.h"
 #include "rings.h"
 #include "sparkle.h"
+#include "sync_levels.h"
 
 namespace kp {
 
-const VideoStd kNtsc{63.5556, 9.4, 52.6, 240, 18, "NTSC"};
-const VideoStd kPal{64.0, 10.5, 52.0, 288, 22, "PAL"};
+const VideoStd kNtsc{63.5556, 9.4, 52.6, 240, 18, 262, "NTSC"};
+const VideoStd kPal{64.0, 10.5, 52.0, 288, 22, 312, "PAL"};
 
 // ---- the decoder: discriminator output (MHz) in, frames out ---------------------------------------------
-// It finds the sync pulses (levels, acquisition, a line PLL that freewheels and re-phases), which is all its own;
-// for the rest it runs the modules: the luma and colour paths behind the pulse tracking into the sample rings
-// (picture_filters.h, rings.h), and as each line ends, its burst, sparkle repair (sparkle.h), the line into a row
-// (line_draw.h) and, as each field ends, the frame (deinterlace.h); with strips (PictureOpts::strips), the frame a
-// strip at a time as the rows come in.
+// It finds the sync pulses (acquisition, a line PLL that freewheels and re-phases, the field starts), which is its
+// own; for the rest it runs the modules: the levels the pulses are found by (sync_levels.h) and where a field begins
+// when its vertical sync is not found (field_rhythm.h); the luma and colour paths behind the pulse tracking into
+// the sample rings (picture_filters.h, rings.h), and as each line ends, its burst, sparkle repair (sparkle.h), the
+// line into a row (line_draw.h) and, as each field ends, the frame (deinterlace.h); with strips
+// (PictureOpts::strips), the frame a strip at a time as the rows come in.
 class Decoder {
 public:
   // picture: the switches, which whoever owns the decoder may change at any time (FrontEnd::set_picture)
   Decoder(double fs, FrameSink sink, const DecoderOpts &o, const std::atomic<PictureOpts> &picture)
-      : fs(fs), sink(std::move(sink)), o(o), picture(picture), drawer(o.width, fs), filt(fs, o.colour), spark(fs) {
+      : fs(fs), sink(std::move(sink)), o(o), picture(picture), levels(fs), drawer(o.width, fs), filt(fs, o.colour),
+        spark(fs) {
     lp_sync.design(1.0e6, fs);
     acq.resize(static_cast<size_t>(fs * 0.06));  // 60 ms
-    hist.assign(800, 0);
     set_std(o.std_force == 2 ? kPal : kNtsc);
   }
 
   DecoderStats stats() const {
     DecoderStats s;
     s.acquiring = acquiring;
-    s.sign = sign;
-    s.tip = tip;
-    s.blank = blank;
+    s.sign = levels.sign;
+    s.tip = levels.tip;
+    s.blank = levels.blank;
     s.lines = lines;
     s.lines_locked = lines_locked;
     s.fields = fields_seen;
@@ -54,6 +59,9 @@ public:
     s.lock_recent = recent_n ? static_cast<float>(recent_locked) / recent_n : 0.f;
     s.std_name = std_->name;
     s.rephases = rephases;
+    s.level_jumps = levels.jumps;
+    s.fields_coasted = fields_coasted;
+    s.starts_put_right = starts_put_right;
     s.colour = colour_on;
     s.burst_err = c_err;
     s.clicks_repaired = spark.clicks_repaired;
@@ -111,8 +119,8 @@ private:
   const std::atomic<PictureOpts> &picture;
   PictureOpts pic;  // ... as of the start of the line being received (refresh_switches)
   const VideoStd *std_ = &kNtsc;
-  float sign = +1, tip = -1, blank = 0, thr = -0.5f;
-  uint64_t n = 0;  // samples taken (the pulse tracking's count)
+  SyncLevels levels;  // the polarity, the sync tip and blanking levels, the threshold the pulses are found by
+  uint64_t n = 0;     // samples taken (the pulse tracking's count)
   // push_block: the piece in hand (piece_n0: n at its first sample)
   static constexpr size_t kPiece = 512;
   const float *piece_d = nullptr;
@@ -155,11 +163,15 @@ private:
   static constexpr double kHsMinUs = 3.0, kHsMaxUs = 6.5;  // an hsync: a pulse this long (4.7 us nominal)
   double hs_len = 0;  // how long hsyncs have been lately, in samples (on_hsync)
   double T = 0, line_start = -1;
-  uint64_t lines = 0, lines_locked = 0, line_idx = 0, acquisitions = 0, losses = 0;
+  uint64_t lines = 0, lines_locked = 0, acquisitions = 0, losses = 0;
+  int64_t line_idx = 0;  // the line in hand, counted from construction
   uint64_t line_low = 0;
   bool line_has_longrun = false;
   uint64_t line_longrun_start = 0;
   bool prev_line_vsync = false;
+  std::optional<FieldStart> pending_start;  // a field start found, which waits for the lines after it (close_line)
+  FieldRhythm rhythm;  // fpvDROID: the vertical flywheel (DecoderOpts::flywheel): where a field is due to begin
+  uint64_t fields_coasted = 0, starts_put_right = 0;
   std::vector<float> acq;
   size_t acq_n = 0;
   bool acquiring = true;
@@ -174,14 +186,6 @@ private:
   int part_y = 0;             // the frame's lines [0, part_y) are in and out already
   std::vector<double> row_t;  // when the samples each of the field's rows was drawn from were taken (LineTimes)
   uint64_t frames_out = 0, fields_seen = 0;
-  std::vector<uint32_t> hist;
-  double hlo = -8, hhi = 8;
-  int hdec = 0;
-  uint64_t hist_count = 0;
-  // fpvDROID: sync-gated levels: sync tip from the middle of each hsync pulse, blanking from the back porch,
-  // measured on locked active lines and smoothed over ~64 lines. Picture content cannot move them (the
-  // spike's histogram peaks could, and the threshold wandered with the scene).
-  uint64_t gated_lines = 0;
   // fpvDROID: re-phase instead of re-acquire. After a jump in the signal (stream restart, a dropped bank)
   // the hsyncs keep coming, one line apart, but outside the PLL's window. A run of them on a steady grid
   // while the PLL freewheels moves the line grid onto them within a few lines.
@@ -206,8 +210,8 @@ private:
       }
       return;
     }
-    if (gated_lines < 64) track_levels(m);  // until the sync-gated measurement has settled
-    const float w = sign * m;
+    if (!levels.settled()) levels.track(m);  // until the sync-gated measurement has settled
+    const float w = levels.sign * m, thr = levels.thr;
     if (!low && w < thr) {
       low = true;
       low_start = now;
@@ -237,25 +241,44 @@ private:
     // hsync after it, until the run of strays re-phased the grid six lines on.
     if (now > overdue_at() && !(low && (now - low_start) / fs * 1e6 < kHsMaxUs)) {
       filter_to(n);
-      const double ls = line_start;
       miss_run++;
-      count_line(false);
-      render_line(ls, false);
-      close_line(ls + T);
-      check_lost();
+      end_line(line_start + T, false);
     }
   }
+
+  // The line in hand has ended, on its hsync (locked) or overdue without one, and the next begins at next_start:
+  // it is counted, its sync looked at for levels that have moved (DecoderOpts::follow_levels), drawn and closed.
+  void end_line(double next_start, bool locked) {
+    const double ls = line_start;
+    count_line(locked);
+    LineLevels sync;
+    if (o.follow_levels) {
+      const float was = levels.tip;
+      sync = levels.look(R, ls);
+      if (sync.jumped) {
+        KP_LOGD("video: the levels moved by %+.2f MHz, to tip %.2f blank %.2f, at line %lld of the field",
+                levels.tip - was, levels.tip, levels.blank, line_in_field());
+        pending_start.reset();  // the field start that waits (close_line) was the signal dropping
+      }
+    }
+    render_line(ls, locked, sync.own);
+    close_line(next_start, sync.own.has_value());
+    check_lost();
+  }
+
+  // Which line of the field in hand the line in hand is, for the log (-1: no field)
+  long long line_in_field() const { return cur_field < 0 ? -1LL : static_cast<long long>(line_idx - field_line0); }
 
   // How many of the next samples (sync-path values m[0..cnt)) track() would do nothing with: locked on (not
   // acquiring, the levels settled), between pulses, still above the threshold, and the line not yet overdue.
   // They are passed over here, n moved on past them; the first that would do something is left to track().
   // ~90 % of the samples, looked at eight at a time (a vector compare), where track() takes each on its own.
   size_t quiet_run(const float *m, size_t cnt) {
-    if (acquiring || gated_lines < 64 || low) return 0;
+    if (acquiring || !levels.settled() || low) return 0;
     const uint64_t od = overdue_at();
     if (od < n) return 0;  // the next sample is overdue
     if (od - n < cnt) cnt = static_cast<size_t>(od - n) + 1;  // samples up to and including od are not
-    const float s = sign, t = thr;
+    const float s = levels.sign, t = levels.thr;
     size_t j = 0;
     for (; j + 8 <= cnt; j += 8) {
       bool hit = false;
@@ -291,6 +314,7 @@ private:
 
   void set_std(const VideoStd &s) {
     std_ = &s;
+    rhythm.reset();
     T = s.T_us * 1e-6 * fs;
     fieldA.assign(static_cast<size_t>(o.width) * s.active * 4, 0);
     fieldB = fieldA;
@@ -319,7 +343,7 @@ private:
       comb_epoch++;
       comb_up = comb_mid = LineInfo{};
     }
-    inv_depth = 1.f / std::max(blank - tip, 0.2f);
+    inv_depth = 1.f / std::max(levels.blank - levels.tip, 0.2f);
     filt.set_line(luma_comb, luma_comb && pic.adaptive_comb, comb, T, inv_depth);
   }
 
@@ -336,7 +360,7 @@ private:
   // fpvDROID: lost when fewer than 40 % of the last ~2 fields' lines found their hsync (a healthy picture
   // locks ~90 %: only the vertical interval freewheels). The spike used the ratio since acquisition.
   void check_lost() {
-    const int window = std::min(kRecent, 2 * (std_ == &kPal ? 312 : 262));
+    const int window = std::min(kRecent, 2 * std_->field_lines);
     if (recent_n < window) return;
     if (recent_locked * 10 < recent_n * 4) {
       losses++;
@@ -354,101 +378,13 @@ private:
     haveA = haveB = false;
     recent_n = recent_locked = recent_pos = 0;
     line_start = -1;
-    gated_lines = 0;
+    levels.restart();
+    pending_start.reset();
+    rhythm.reset();
     miss_run = stray_run = 0;
     last_stray = -1;
     hs_len = 0;
     comb_epoch++;
-  }
-
-  void track_levels(float m) {
-    // level tracking histogram (every 8th sample), refreshed every ~40 ms
-    if ((++hdec & 7) != 0) return;
-    const float v = sign * m;
-    const int nb = static_cast<int>(hist.size());
-    const int b = static_cast<int>((v - hlo) / (hhi - hlo) * nb);
-    if (b >= 0 && b < nb) {
-      hist[b]++;
-      hist_count++;
-    }
-    if (hist_count >= static_cast<uint64_t>(fs * 0.04 / 8)) {
-      float t, bl;
-      if (levels_from_hist(static_cast<uint32_t>(hist_count), t, bl)) {
-        tip = 0.8f * tip + 0.2f * t;
-        blank = 0.8f * blank + 0.2f * bl;
-        thr = 0.5f * (tip + blank);
-      }
-      std::fill(hist.begin(), hist.end(), 0);
-      hist_count = 0;
-    }
-  }
-
-  bool levels_from(const std::vector<float> &buf, size_t cnt, float sgn, float &tip_o, float &blank_o) {
-    std::fill(hist.begin(), hist.end(), 0);
-    const int nb = static_cast<int>(hist.size());
-    uint32_t total = 0;
-    for (size_t i = 0; i < cnt; i += 4) {
-      const float v = sgn * buf[i];
-      const int b = static_cast<int>((v - hlo) / (hhi - hlo) * nb);
-      if (b < 0 || b >= nb) continue;
-      hist[b]++;
-      total++;
-    }
-    const bool ok = levels_from_hist(total, tip_o, blank_o);
-    std::fill(hist.begin(), hist.end(), 0);
-    return ok;
-  }
-
-  bool levels_from_hist(uint32_t total, float &tip_o, float &blank_o) {
-    const int nb = static_cast<int>(hist.size());
-    if (total < 1000) return false;
-    uint32_t c = 0;
-    int p0 = 0, p1 = nb - 1;
-    for (int i = 0; i < nb; i++) {
-      c += hist[i];
-      if (c >= total * 0.005) { p0 = i; break; }
-    }
-    c = 0;
-    for (int i = nb - 1; i >= 0; i--) {
-      c += hist[i];
-      if (c >= total * 0.005) { p1 = i; break; }
-    }
-    if (p1 - p0 < 20) return false;
-    std::vector<float> sm(nb, 0);
-    for (int i = 0; i < nb; i++) {
-      float s = 0;
-      for (int k = -4; k <= 4; k++) {
-        const int j = i + k;
-        if (j >= 0 && j < nb) s += hist[j];
-      }
-      sm[i] = s / 9;
-    }
-    float mx = 0;
-    for (int i = p0; i <= p1; i++) mx = std::max(mx, sm[i]);
-    std::vector<int> peaks;
-    const int dist = std::max(3, (p1 - p0) / 40);
-    for (int i = p0; i <= p1; i++) {
-      if (sm[i] < mx * 0.02) continue;
-      bool ok = true;
-      for (int k = -dist; k <= dist && ok; k++) {
-        const int j = i + k;
-        if (k != 0 && j >= 0 && j < nb && sm[j] > sm[i]) ok = false;
-      }
-      if (ok && (peaks.empty() || i - peaks.back() > dist)) peaks.push_back(i);
-    }
-    if (peaks.size() < 2) return false;
-    const float bw = static_cast<float>((hhi - hlo) / nb);
-    const float tipv = static_cast<float>(hlo) + (peaks[0] + 0.5f) * bw;
-    const float span = (p1 - p0) * bw;
-    for (size_t k = 1; k < peaks.size(); k++) {
-      const float v = static_cast<float>(hlo) + (peaks[k] + 0.5f) * bw;
-      if (v - tipv > 0.12f * span) {
-        tip_o = tipv;
-        blank_o = v;
-        return true;
-      }
-    }
-    return false;
   }
 
   // acquisition: pick polarity + levels + line period from a 60 ms buffer
@@ -457,7 +393,7 @@ private:
     for (float sgn : {+1.f, -1.f}) {
       if (o.force_invert && sgn > 0) continue;
       float t, b;
-      if (!levels_from(acq, acq_n, sgn, t, b)) continue;
+      if (!levels.survey(acq, acq_n, sgn, t, b)) continue;
       const float th = 0.5f * (t + b);
       std::vector<double> edges;
       bool lo = false;
@@ -496,15 +432,12 @@ private:
       }
     }
     if (best > 0.3f) {
-      sign = bs;
-      tip = bt;
-      blank = bb;
-      thr = 0.5f * (tip + blank);
+      levels.acquired(bs, bt, bb);
       acquiring = false;
       line_start = -1;
       acquisitions++;
       KP_LOGI("video: acquired, sync %s end, tip %.2f blank %.2f MHz, line %.3f us -> %s, score %.2f",
-              sign > 0 ? "low" : "high", tip, blank, T / fs * 1e6, std_->name, best);
+              bs > 0 ? "low" : "high", bt, bb, T / fs * 1e6, std_->name, best);
     }
     acq_n = 0;
   }
@@ -519,7 +452,7 @@ private:
     for (int64_t i = i0; i < i1; i++) b += R.chroma[i & R.mask];
     b /= static_cast<float>(i1 - i0);
     const float mag = std::abs(b);
-    const int64_t li = static_cast<int64_t>(line_idx);
+    const int64_t li = line_idx;
     const double pred = c_last_line < 0 ? std::arg(b) : c_phase + c_dphi * (li - c_last_line);
     double e = std::arg(b * std::polar(1.f, static_cast<float>(-pred)));
     pal_v = false;
@@ -542,7 +475,7 @@ private:
     c_mag += 0.05f * (mag - c_mag);
     c_err += 0.05f * (static_cast<float>(std::fabs(e)) - c_err);
     // colour killer, with hysteresis: a burst near the expected size (~1/4 of the sync depth) and steady
-    const bool ok = c_mag > 0.08f * (blank - tip) && c_err < 0.5f;
+    const bool ok = c_mag > 0.08f * (levels.blank - levels.tip) && c_err < 0.5f;
     c_good = ok ? std::min(c_good + 1, 60) : std::max(c_good - 2, 0);
     if (!colour_on && c_good >= 40) colour_on = true;
     if (colour_on && c_good == 0) colour_on = false;
@@ -551,17 +484,19 @@ private:
 
   bool in_picture(int64_t k) const { return k >= 0 && k < std_->active; }
 
-  // The line that has just ended (ls: its start; k: its row; locked: its hsync was found), ready to be drawn:
-  // levels measured on it, then its picture put right in the rings (the top line with the luma comb, sparkle
-  // repair), then its burst. In that order: each reads what the one before left.
-  LineInfo measure(double ls, int64_t k, bool locked) {
+  // The line that has just ended (ls: its start; k: its row; locked: its hsync was found; own: the levels of its
+  // sync, where they are not the kept ones), ready to be drawn: levels measured on it, then its picture put right
+  // in the rings (the top line with the luma comb, sparkle repair), then its burst. In that order: each reads what
+  // the one before left.
+  LineInfo measure(double ls, int64_t k, bool locked, const std::optional<LevelPair> &own) {
     LineInfo l;
     l.ls = ls;
     l.k = k;
     l.field = cur_field;
     l.epoch = comb_epoch;
+    l.own = own;
     if (!in_picture(k)) return l;
-    if (locked) measure_levels(ls);
+    if (locked && !own) levels.measure(R, ls);
     if (filt.luma_comb()) top_line(ls, k);
     l.hit = pic.repair && patch_line(ls);
     l.col = o.colour && locked && burst(ls, l.pal_v);
@@ -573,9 +508,9 @@ private:
   }
 
   // A line has ended: it is drawn, or with the 3-line comb the one before it is.
-  void render_line(double ls, bool locked) {
+  void render_line(double ls, bool locked, const std::optional<LevelPair> &own) {
     if (cur_field < 0) return;
-    const LineInfo cur = measure(ls, static_cast<int64_t>(line_idx) - field_line0 - std_->skip, locked);
+    const LineInfo cur = measure(ls, line_idx - field_line0 - std_->skip, locked, own);
     if (comb) {
       comb_line(cur);
     } else if (in_picture(cur.k)) {
@@ -606,7 +541,8 @@ private:
   // below (comb_line).
   void draw_line(const LineInfo &l, bool up, bool dn) {
     uint32_t *row = reinterpret_cast<uint32_t *>((cur_field == 0 ? fieldA : fieldB).data()) + static_cast<size_t>(l.k) * o.width;
-    drawer.draw(row, R, l, up, dn, DrawParams{sign, tip, blank, T, filt.cdel()});
+    const LevelPair lv = l.own.value_or(LevelPair{levels.tip, levels.blank});
+    drawer.draw(row, R, l, up, dn, DrawParams{levels.sign, lv.tip, lv.blank, T, filt.cdel()});
   }
 
   // The top of the picture with the luma comb. The first picture line of a field has blanking above it, not
@@ -636,7 +572,7 @@ private:
     // no picture over the part [x0, x1) of the width of the line that starts at l?
     const auto blanking = [&](double l, double x0, double x1, float limit = kTopBlank) {
       float m;
-      return ring_mean(l + a0 + aw * x0, l + a0 + aw * x1, m) && (m - blank) * inv_depth < limit;
+      return levels.mean(R, l + a0 + aw * x0, l + a0 + aw * x1, m) && (m - levels.blank) * inv_depth < limit;
     };
     if (blanking(ls, 0, 1, kTopPicture)) return;
     for (int64_t up = 2; up <= k + 1; up++)  // the rows above the line before, and the line before row 0
@@ -654,30 +590,6 @@ private:
   }
   void mend_rows(int64_t k, bool hit) {
     spark.mend_rows((cur_field == 0 ? fieldA : fieldB).data(), o.width, fields_seen, cur_field, k, hit);
-  }
-
-  // The mean of R.luma over [from, to) into out; false when that stretch is not in the ring. (Not a NaN
-  // return: this file is built with -ffast-math, under which a test for NaN may be compiled away.)
-  bool ring_mean(double from, double to, float &out) {
-    const int64_t i0 = static_cast<int64_t>(from), i1 = static_cast<int64_t>(to);
-    if (!R.has(i0, i1)) return false;
-    float s = 0;
-    for (int64_t i = i0; i < i1; i++) s += R.luma[i & R.mask];
-    out = sign * s / static_cast<float>(i1 - i0);
-    return true;
-  }
-
-  void measure_levels(double ls) {
-    const double us = 1e-6 * fs;
-    float t, b;
-    if (!ring_mean(ls + 1.2 * us, ls + 3.6 * us, t)) return;  // hsync is 4.7 us
-    if (!ring_mean(ls + 5.8 * us, ls + 8.8 * us, b)) return;  // back porch (burst averages out)
-    if (b - t < 0.05f) return;
-    const float a = gated_lines < 64 ? 0.1f : 1.f / 64;
-    tip += a * (t - tip);
-    blank += a * (b - blank);
-    thr = 0.5f * (tip + blank);
-    gated_lines++;
   }
 
   // Row k of the field has been drawn, and sparkle repair has done what it can with it so far. With strips, the frame
@@ -740,26 +652,30 @@ private:
     if (sink) sink(Frame{frame.data(), o.width, H, std_, y0, y1, t});
   }
 
-  void close_line(double next_start) {
+  // The line in hand is closed, and the next begins at next_start. moved: its sync was at other levels than the
+  // kept ones (end_line).
+  void close_line(double next_start, bool moved) {
+    // A line whose levels have moved was low against a threshold that was no longer right: it starts no field.
+    // Nor does the line before the first of them, the one the signal dropped in, low from there to its end (the
+    // picture's black under the old threshold). So a field start waits for the line after it, in a vertical sync
+    // another of its lines, and while lines say the levels have moved: when they have (end_line), it is dropped.
     const bool vs = line_low > 0.5 * T;
-    if (vs && !prev_line_vsync && line_has_longrun) {
-      // field start: phase of the broad-pulse start inside this line
-      double ph = (static_cast<double>(line_longrun_start) - line_start) / T;
-      ph -= std::floor(ph + 0.25);  // -> [-0.25, 0.75)
-      const bool odd = std::fabs(ph) < 0.25;
-      // smooth lines: A is the lower field, B the upper one (B's line k is drawn above A's line k)
-      if (cur_field == 0) haveA = true;
-      if (cur_field == 1) haveB = true;
-      if (o.fields && cur_field >= 0) field_done();
-      if (!o.fields && haveA && haveB) {
-        emit(fieldA, fieldB);
-        haveA = haveB = false;
+    if (!moved) {
+      if (pending_start) {
+        found_start(*std::exchange(pending_start, std::nullopt));
+      } else if (vs && !prev_line_vsync && line_has_longrun) {
+        // field start: phase of the broad-pulse start inside this line
+        double ph = (static_cast<double>(line_longrun_start) - line_start) / T;
+        ph -= std::floor(ph + 0.25);  // -> [-0.25, 0.75)
+        pending_start = FieldStart{std::fabs(ph) < 0.25 ? 0 : 1, line_idx};
       }
-      cur_field = odd ? 0 : 1;
-      field_line0 = static_cast<int64_t>(line_idx);
-      fields_seen++;
-      if (odd) haveB = false;  // a frame is A then B
-      begin_field();
+    }
+    // the flywheel: no vertical sync where the field in hand should end, and none waited on
+    if (!pending_start) {
+      if (const std::optional<FieldStart> due = rhythm.overdue({cur_field, field_line0}, line_idx)) {
+        fields_coasted++;
+        start_field(*due);
+      }
     }
     prev_line_vsync = vs;
     line_idx++;
@@ -767,6 +683,32 @@ private:
     line_has_longrun = false;
     line_start = next_start;
     refresh_switches();
+  }
+
+  // A field start has been found: the field begins there, or with the flywheel where the fields' rhythm says it
+  // is due (the start is put right), or the start is passed over (field_rhythm.h).
+  void found_start(FieldStart s) {
+    const std::optional<FieldStart> at = o.flywheel ? rhythm.found({cur_field, field_line0}, s, std_->field_lines) : s;
+    if (!at) return;
+    if (*at != s) starts_put_right++;
+    start_field(*at);
+  }
+
+  // A field begins, at line s.line (the first of its vertical sync): the one before it is done.
+  void start_field(FieldStart s) {
+    // smooth lines: A is the lower field, B the upper one (B's line k is drawn above A's line k)
+    if (cur_field == 0) haveA = true;
+    if (cur_field == 1) haveB = true;
+    if (o.fields && cur_field >= 0) field_done();
+    if (!o.fields && haveA && haveB) {
+      emit(fieldA, fieldB);
+      haveA = haveB = false;
+    }
+    cur_field = s.kind;
+    field_line0 = s.line;
+    fields_seen++;
+    if (s.kind == 0) haveB = false;  // a frame is A then B
+    begin_field();
   }
 
   // An hsync-width pulse has ended: it began at edge and was len samples long.
@@ -795,10 +737,7 @@ private:
       T = 0.995 * T + 0.005 * (ns - line_start);
       miss_run = 0;
       stray_run = 0;
-      count_line(true);
-      render_line(line_start, true);
-      close_line(ns);
-      check_lost();
+      end_line(ns, true);
       return;
     }
     // an hsync-width pulse off the grid: noise, an equalising pulse, or the picture has jumped
@@ -808,14 +747,14 @@ private:
     if (stray_run >= 6 && miss_run >= 4) {
       rephases++;
       comb_epoch++;
+      rhythm.forget();
       // In the log every time, with how far the grid moved (the shorter way round), because that says why. A
       // block of samples lost on the way here (the decode queue drops 4096 at a time, the stream a bank, which
       // is as many) moves it by that many samples less whole lines: -14.1 us for each at 20 MS/s NTSC, -12.8 us
       // PAL. A stream restart moves it by anything. A small move the late way (+) with nothing lost is hsyncs
       // that came later than their line.
       KP_LOGI("video: re-phased the line grid by %+.2f us at line %lld of the field, after %d lines without an hsync",
-              std::remainder(edge - line_start, T) / fs * 1e6,
-              cur_field < 0 ? -1LL : static_cast<long long>(line_idx) - static_cast<long long>(field_line0), miss_run);
+              std::remainder(edge - line_start, T) / fs * 1e6, line_in_field(), miss_run);
       line_start = edge;
       line_low = 0;
       line_has_longrun = false;
