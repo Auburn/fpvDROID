@@ -188,9 +188,9 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     // Everything the pages read while they are built has to be declared above this point: Kotlin runs property
     // initialisers and init blocks in the order they are written.
     private val fitWords = listOf(
-        "Black bars on the side",
-        "Image stretched to fill the screen",
-        "Fills the screen, the picture's edges cut off",
+        "Black bars",
+        "Stretch to fill the screen",
+        "Crop edges to fill the screen",
     )
 
     init {
@@ -560,7 +560,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
     // ------------------------------------------------------------------------------------------ view
     private fun buildViewPage(): View {
         val p = page()
-        p.addView(SettingRow(context, "Aspect ratio", "The aspect ratio of the camera feed",
+        p.addView(SettingRow(context, "Aspect ratio", "Camera's aspect ratio",
             Segmented(context, listOf("4:3", "16:9"), if (s.wide) 1 else 0) { i ->
                 s.wide = i == 1
                 requestLayout()   // the preview takes the picture's shape
@@ -597,7 +597,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         // Set: the value's row under the choice
         val brightnessRows = listOf(divider(context),
             sliderRow("Brightness value", { "${percent(s.brightness)}%" }, 0f, 1f, s.brightness, 1f) { s.brightness = it })
-        p.addView(SettingRow(context, "Screen brightness", "Let the phone manage it, or set one for the picture with the menu closed",
+        p.addView(SettingRow(context, "Screen brightness", "Forced screen brightness",
             Segmented(context, listOf("Auto", "Set"), if (s.brightnessSet) 1 else 0) { i ->
                 s.brightnessSet = i == 1
                 showRows(s.brightnessSet, brightnessRows)
@@ -606,7 +606,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         for (v in brightnessRows) p.addView(v)
         showRows(s.brightnessSet, brightnessRows)
         p.addView(divider(context))
-        p.addView(SettingRow(context, "Goggles", "Show the image twice, side by side for goggles that hold a phone",
+        p.addView(SettingRow(context, "Goggles", "Show the picture twice, side by side, for goggles that hold a phone",
             Toggle(context, s.goggles) { v ->
                 s.goggles = v
                 showEyeRows()
@@ -669,7 +669,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
         maxHzRow = toggle("Max screen Hz", MAX_HZ_WORDS, s.maxScreenHz) { s.maxScreenHz = it }
         p.addView(maxHzRow)
         p.addView(divider(context))
-        vsyncRow = toggle("Vsync", "Shows each picture only when it is complete. Turned off, each part shows as soon as it is decoded, for less delay",
+        vsyncRow = toggle("Vsync", "On: Show only complete video frames. Off: Draw rows of each frame as they arrive, minimises latency",
             s.vsync) { s.vsync = it }
         p.addView(vsyncRow)
         return p
@@ -706,7 +706,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
             Toggle(context, s.diversity) { v -> s.diversity = v; on.onSignal() }))
         p.addView(divider(context))
         // at 20 MS/s the stream is too narrow to sit beside the channel, and the radio stays centred whatever this says
-        offsetRow = SettingRow(context, "Tune beside the channel", "Keeps the picture clear of the chip's blind spot: no stripes at the left edge, no ghost outlines. Needs sample rate 40",
+        offsetRow = SettingRow(context, "Tune beside the channel", "Keeps the chip's blind spot out of the picture, where it would show as stripes at the left edge and ghost outlines. Needs sample rate 40",
             Toggle(context, s.offsetTune) { v -> s.offsetTune = v; on.onSignal() })
         offsetRow.setAvailable(s.rate40)
         p.addView(offsetRow)
@@ -755,8 +755,7 @@ class MenuView(ctx: Context, private val s: Settings, private val on: Listener) 
 
     companion object {
         /** What Max screen Hz says of itself; the screen's rate now goes under it ([showScreenHz]). */
-        const val MAX_HZ_WORDS = "Runs the screen at its fastest rate so the picture shows sooner, at the cost of more battery. " +
-            "Turned off, it requests the camera's rate from the screen"
+        const val MAX_HZ_WORDS = "Force max screen refresh rate, minimises latency"
         const val RAIL_DP = 204f
         /** A screen lower than this is short: most phones held sideways are, by a little. */
         const val SHORT_DP = 400f
