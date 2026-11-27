@@ -60,10 +60,8 @@ The app remembers your channel for next time.
 - The marks can switch from the analog bands to the channels of DJI (V1/V2, O3, O4) or HDZero. Walksnail Avatar
   uses the DJI V1/V2 channels.
 - The sweep recognises DJI, HDZero and other digital signals and names them, whichever channels are marked.
-  This part has not yet been tried on a real DJI or HDZero transmitter.
 - It marks 5 GHz Wi-Fi networks, the most common thing in the way at 5.8 GHz, and says whether each is in use
   or idle.
-- The picture is paused while the tab sweeps.
 
 ### View
 
@@ -71,9 +69,6 @@ The app remembers your channel for next time.
 
 - Aspect ratio: 4:3, or 16:9 for a widescreen camera.
 - Scaling: fit the whole picture with black bars, stretch it to the screen, or crop it to fill the screen.
-- Size, from 50 to 150 %.
-- Screen brightness: the phone's own, or a level you set for the picture alone. The set level applies while the
-  menu is closed.
 - Goggles: the picture twice, side by side, for goggles that hold a phone. Sliders for size, eye spacing and
   horizontal and vertical offset line the two pictures up with the lenses.
 
