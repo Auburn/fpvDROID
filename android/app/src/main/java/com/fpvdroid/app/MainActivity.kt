@@ -547,8 +547,10 @@ class MainActivity : Activity(), MenuView.Listener, UsbLink.Events {
         val locked = v?.locked ?: false
         val watchHz = st.watchHz
 
-        // The radio remembers every signal it has ever seen; what the menu shows as found is what the last scan
-        // saw (a transmitter that has since landed is not "found", and its old frequency is no guide to tuning).
+        // What the menu shows as found is what the last scan saw (a transmitter that has since landed is not
+        // "found", and its old frequency is no guide to tuning). The radio lists only its last scan's pilots too, but
+        // it empties the list when its own thread takes a scan up, and before this activity's first scan the list
+        // may be one from before.
         val sinceScan = android.os.SystemClock.elapsedRealtime() - scanStartedAt
         found = if (scanStartedAt == 0L) emptyList() else st.pilots
             .filter { it.mhz > 0 && it.ageS * 1000 <= sinceScan + 1500 }   // seen in this scan

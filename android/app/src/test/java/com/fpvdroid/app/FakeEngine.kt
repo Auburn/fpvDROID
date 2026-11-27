@@ -74,9 +74,10 @@ class FakeEngine : Engine {
     var dspLoad = 0.3
     val pilots = ArrayList<Pilot>()
     /**
-     * When each pilot (by frequency) was last seen, on the fake clock: as the real radio, which keeps every pilot it has
-     * ever seen and reports "age_s", the whole seconds since it last saw each. A pilot added to [pilots] by hand has
-     * age 0 (always fresh). [agePilots] makes them all older at once.
+     * When each pilot (by frequency) was last seen, on the fake clock, for "age_s": the whole seconds since the radio
+     * last saw each. The fake keeps every pilot it has ever seen, where the real radio lists only its last scan's (from
+     * when its thread takes a scan up): the harder case for the app, which leaves older ones out by their age itself.
+     * A pilot added to [pilots] by hand has age 0 (always fresh). [agePilots] makes them all older at once.
      */
     val seenAt = HashMap<Double, Long>()
 

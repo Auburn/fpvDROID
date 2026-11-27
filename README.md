@@ -70,6 +70,14 @@ it, a picture that has stopped), full size or in the preview, colour bars show t
   the channel), gain (automatic, or by hand for a very close transmitter), and a line of numbers (USB speed,
   processing load, drops, restarts).
 
+A scan marks a channel as found when a picture locks on the signal there. A strong analog transmitter close by (a
+quad on the table next to the phone) can show a copy of itself a few dB weaker beside it, whose picture locks too:
+FPVDesktopWiFiReceiver measured one on R3 at 5731 MHz with a copy at 5743 MHz, which it listed as A7. So a signal
+within 15 MHz of one at least 2 dB stronger is taken for that one's copy: it is not marked, and the scan never tunes
+it. Two real transmitters that close would spoil each other's picture anyway. The chosen channel is the exception:
+whether a signal there is a copy cannot be told for sure, so it stays marked beside the stronger one, and the scan
+does not move you from it to another transmitter.
+
 The status at the top left says what the adapter is doing. Nothing there needs attention unless it says so:
 a radio that does not start, or stops delivering samples, is closed and started again by itself, on the
 channel it was on. On some phones' USB 3 ports (a Pixel 8 Pro's, for one) the chip's USB data path locks up
@@ -102,7 +110,8 @@ adapter over WebUSB, and it watches at 20 MS/s (what WebUSB can carry). It is no
 - **macOS:** nothing to set up.
 
 On screen: the OSD pill (channel, frequency, SNR, decode → screen latency) can be dragged, ✕ / **O** hides it;
-⚙ (top right) has Channels and Scan; full screen bottom right or **F**.
+⚙ (top right) has Scan and the channels the last scan found (click one to watch it); full screen bottom right or
+**F**.
 
 ## Layout
 
@@ -111,10 +120,11 @@ On screen: the OSD pill (channel, frequency, SNR, decode → screen latency) can
   (`BandMap`). No hardware.
 - `native/radio/` — the adapter (wifi-sdr `Receiver`) + a DSP thread: scan, watch, sweep, stream test; antenna
   combining (`combine.cpp`); when 40 MS/s gives way to 20 (`fallback_policy.cpp`); torn frames kept off the
-  screen (`frame_gate.cpp`); the retunes of a scan or sweep and each one's capture (`steps.cpp`); the sweep's
-  passes and the band picture as the app reads it (`sweep.cpp`).
-- `native/tests/` — unit tests of the radio's rules, the decoder's sync and the Spectrum tab's band picture, no
-  hardware (`ctest`; `scripts/build-desktop.sh` runs them).
+  screen (`frame_gate.cpp`); the retunes of a scan or sweep and each one's capture (`steps.cpp`); what a scan
+  found, less a strong transmitter's copy, and what it watches after (`pilots.cpp`); the sweep's passes and the band
+  picture as the app reads it (`sweep.cpp`).
+- `native/tests/` — unit tests of the radio's and the scan's rules, the decoder's sync and the Spectrum tab's band
+  picture, no hardware (`ctest`; `scripts/build-desktop.sh` runs them).
 - `native/render/` — the picture on screen (OpenGL ES 3): layout, side-by-side view, the menu's preview,
   the NO SIGNAL card.
 - `native/jni/` — the app's native side; a render thread draws each frame on the video Surface as it is decoded.
@@ -187,6 +197,8 @@ picture's delay.
 
 ```sh
 build/desktop/kp_gen rec/r4 --mhz 5769 --label R4 --cnr 12   # a synthetic transmitter: rec/r4.cs16 + .json
+build/desktop/kp_gen rec/cp --mhz 5764 --centre 5770 --dev 5 --cnr 35 --copy 5776 4   # + a copy at 5776, 4 dB under (--mirror DB: its mirror image)
+KP_SIM_FILE=rec/cp.cs16 build/desktop/kp_sim --scan   # "5776.2 MHz taken as a copy of 5764.2 MHz": one pilot found
 build/desktop/kp_replay rec/r4.cs16 --luma-comb --adaptive --smooth --repair   # the picture switches (--comb: colour comb)
 KP_SIM_FILE=rec/r4.cs16 build/desktop/kp_sim --scan --offset-tune --diversity   # the radio's switches, no hardware
 KP_SIM_FILE=rec/r4.cs16 KP_SIM_LEAD_NS=146 build/desktop/kp_sim --watch 5769 --diversity   # path B 146 ns ahead of A: the combiner measures and undoes it
