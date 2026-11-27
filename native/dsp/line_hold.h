@@ -16,9 +16,9 @@
 //  - While the fold does not show the pulse either, the grid runs on at the line period. That is known from a
 //    long stretch of lines (period) far better than the lines' own tracking has it: to a few parts in ten
 //    million, a fraction of a microsecond over a second. The lock is lost only when that has lasted kHoldS (lost).
-//  - ... or, coasting (set_coast), as long as the lock had lasted before, and meanwhile nothing found in the noise
-//    moves the grid: the fold's say does not end on pulses of noise (coasting, single_lines_can), and the
-//    decoder takes no vertical sync from it either.
+//  - ... or, coasting (the constructor's coast_s), as long as the lock had lasted before, and meanwhile nothing
+//    found in the noise moves the grid: the fold's say does not end on pulses of noise (coasting,
+//    single_lines_can), and the decoder takes no vertical sync from it either.
 //  - With some noise in the signal but each line's hsync still steering, the fold guards the grid: a pulse far
 //    from where the fold shows the hsync is not taken for one (pulses).
 //  - ... and when the signal has moved. The fold looks kLookUs either side of the grid. A block of samples lost on
@@ -51,16 +51,12 @@ public:
   // A pulse this near to where the hsync is due counts as the line's, held; and is taken for it, guarded.
   static constexpr double kTightUs = 1.0, kNearUs = 1.5;
 
-  explicit LineHold(double fs);
+  // coast_s: coasting through a dropout (DecoderOpts::coast), for so many seconds at most; 0: no coasting.
+  LineHold(double fs, double coast_s);
   // A new standard, with its line period T (samples): nothing is known of the transmitter's own any more.
   void set_std(double T);
   // The lock is lost.
   void restart();
-  // Coasting through a dropout (DecoderOpts::coast): on, and for how long at most (seconds).
-  void set_coast(bool on, double max_s) {
-    _coast = on;
-    _coast_s = max_s;
-  }
   // The signal was acquired by the fold of its lines: held from its first line on.
   void acquired();
   // The decoder has moved the grid onto a run of hsyncs somewhere else. Six hsyncs running: the signal is no weak
@@ -103,14 +99,13 @@ public:
   bool lately(int lines) const { return _weak || _weak_ago < lines; }
   // Nearly every line finds its own hsync.
   bool clean() const { return !_weak && found64() >= kClean; }
-  // Holding, and the fold has not shown the hsync for kHoldS; coasting, for as long as the lock had lasted until
-  // then (lines: since the acquisition; a lock a second old has earned a second of trust, one of moments found in
-  // a signal that then went has not), kHoldS at least and set_coast's most (silent_s: for how long): the lock is
-  // lost.
+  // Holding, and the fold has not shown the hsync for as long as the lock had lasted when it last did (lines:
+  // since the acquisition; a lock a second old has earned a second of trust, one of moments found in a signal
+  // that then went has not): for kHoldS at least, and for the constructor's coast_s at most, which without
+  // coasting is no more than that (silent_s: for how long). The lock is lost.
   bool lost(double T, uint64_t lines) const {
-    double limit = kHoldS * _fs;
-    if (_coast) limit = std::min(_coast_s * _fs, std::max(limit, (static_cast<double>(lines) - _unseen) * T));
-    return _unseen * T > limit;
+    const double lasted = (static_cast<double>(lines) - _unseen) * T;
+    return _unseen * T > std::clamp(lasted, kHoldS * _fs, std::max(kHoldS, _coast_s) * _fs);
   }
   // A dropout: holding, and the fold has shown nothing of the hsync for kCoastLines lines, so nothing of the
   // signal is left, and whatever is found in what comes in is noise. (Noise as large as the sync was deep crosses
@@ -119,7 +114,7 @@ public:
   // syncs now and then, which put the fields somewhere else. A signal that came back after a second or two then
   // found neither where it had left them.) So the lines run on at their period and the fields at their rhythm,
   // and nothing moves either, until the fold shows the pulse again or the lock is given up (lost).
-  bool coasting() const { return _coast && _weak && _unseen >= kCoastLines; }
+  bool coasting() const { return _coast_s > 0 && _weak && _unseen >= kCoastLines; }
   double silent_s(double T) const { return _unseen * T / _fs; }
   // The transmitter's line period, where a long stretch of lines has shown it (samples).
   std::optional<double> period() const { return _long_ok ? std::optional<double>(_T_long) : std::nullopt; }
@@ -149,7 +144,7 @@ private:
   // Can a line find its own hsync in this noise? The sync's depth over its noise: lines that nearly all find
   // theirs have 8 and over, a dropout 0.3 to 0.5 against the depth the signal had. (Yes while it is not known.)
   static constexpr float kSingleSnr = 3;
-  bool single_lines_can(const Line &l) const { return !_coast || !(l.snr > 0) || l.snr >= kSingleSnr; }
+  bool single_lines_can(const Line &l) const { return !(_coast_s > 0) || !(l.snr > 0) || l.snr >= kSingleSnr; }
 
   struct Seen {
     double pos;        // where the fold has the hsync's edge, from the line's start (samples)
@@ -168,10 +163,9 @@ private:
   void stale();
 
   double _fs;
+  double _coast_s;          // coasting through a dropout: for so long at most (0: no coasting)
   uint64_t _found = ~0ull;  // the last 64 lines, 1: its hsync was found
   bool _weak = false;       // holding
-  bool _coast = false;      // set_coast()
-  double _coast_s = 0;
   int _weak_lines = 0;      // lines held so far
   int _weak_ago = kNever;   // lines since the fold last held
   int _unseen = 0;          // holding: lines since the fold last showed the pulse

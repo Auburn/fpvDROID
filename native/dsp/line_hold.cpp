@@ -10,7 +10,7 @@
 
 namespace kp {
 
-LineHold::LineHold(double fs) : _fs(fs) {
+LineHold::LineHold(double fs, double coast_s) : _fs(fs), _coast_s(coast_s) {
   _before = static_cast<int>(std::lround(kFoldBeforeUs * 1e-6 * fs));
   _ref = kRefUs * 1e-6 * fs;
   _fold.shape(static_cast<size_t>(std::lround(kFoldUs * 1e-6 * fs)), fs, 1, false);

@@ -44,11 +44,10 @@ public:
   // picture: the switches, which whoever owns the decoder may change at any time (FrontEnd::set_picture)
   Decoder(double fs, FrameSink sink, const DecoderOpts &o, const std::atomic<PictureOpts> &picture)
       : fs(fs), sink(std::move(sink)), o(o), picture(picture), levels(fs), drawer(o.width, fs), burst(fs, o.hold), filt(fs, o.colour),
-        spark(fs), hold(fs) {
+        spark(fs), hold(fs, o.coast ? o.coast_s : 0) {
     lp_sync.design(1.0e6, fs);
     acq.resize(static_cast<size_t>(fs * 0.06));  // 60 ms
     set_std(o.std_force == 2 ? kPal : kNtsc);
-    hold.set_coast(o.coast, o.coast_s);
   }
 
   DecoderStats stats() const {
@@ -676,8 +675,10 @@ private:
     const bool vs = line_low > 0.5 * T;
     if (o.hold) {  // the vertical sync by what its half lines are, which shows in noise
       // (not in a dropout: its half lines are noise, and the fields go by their rhythm, where there is one to go
-      // by: the flywheel's, with a field in hand)
-      if (hold.coasting() && cur_field >= 0 && rhythm.knows(cur_field)) {
+      // by: the flywheel's, with a field in hand. Reset, it also calls none of the dropout's lines one of broad
+      // pulses (broad, below), so all of them go into the fold: left running on the noise it kept some out, and
+      // after a gap the lines and the fields were right a little less of the time.)
+      if (hold.coasting() && rhythm.knows(cur_field)) {
         vert.reset();
       } else if (const std::optional<FieldStart> s = vert.line(sync_now(), line_start, T, fs, levels.sign,
                                                                {levels.tip, levels.blank}, std_ == &kPal, line_idx)) {

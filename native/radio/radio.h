@@ -94,17 +94,17 @@ public:
     Combiner::Stats s;  // the last second; the time offset between the paths as of its end
   };
   ComboStatus combine_status();
-  // Debug switches (the app's "env" extra: KP_CONCEAL, KP_FAST_CPUS, KP_LEVELS, KP_FLYWHEEL, KP_HOLD, KP_FILTER;
-  // kp_live reads the same variables once, before open()). All on by default; any may be called from any thread,
+  // Debug switches (the app's "env" extra: KP_CONCEAL, KP_FAST_CPUS, KP_LEVELS, KP_FLYWHEEL, KP_HOLD, KP_COAST,
+  // KP_FILTER; kp_live reads the same variables once, before open()). All on by default; any may be called from any thread,
   // open or not.
   // Torn frames hidden (FrameGate); off: every frame is shown. Takes effect at once.
   void set_conceal(bool on);
   // The DSP and decode threads kept off the slowest cores (thread_placement.h); off: left to the OS. Takes
   // effect when those threads next start: at the next open().
   void set_fast_cores(bool on);
-  // The decoder's helps, to see each by itself (KP_LEVELS, KP_FLYWHEEL, KP_HOLD, KP_FILTER;
-  // DecoderOpts::follow_levels, flywheel, hold, channel_filter). Each takes effect with the next decoder: at the
-  // next carrier or rate watched.
+  // The decoder's helps, to see each by itself (KP_LEVELS, KP_FLYWHEEL, KP_HOLD, KP_COAST, KP_FILTER;
+  // DecoderOpts::follow_levels, flywheel, hold, coast, channel_filter). Each takes effect with the next decoder:
+  // at the next carrier or rate watched.
   void set_follow_levels(bool on) { _follow_levels.store(on, std::memory_order_relaxed); }
   void set_flywheel(bool on) { _flywheel.store(on, std::memory_order_relaxed); }
   void set_hold(bool on) { _hold.store(on, std::memory_order_relaxed); }

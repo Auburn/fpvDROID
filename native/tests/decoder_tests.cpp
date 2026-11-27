@@ -932,20 +932,19 @@ static void a_dropout_is_coasted_through() {
   const std::vector<Picture> whole = frames_of(s, PictureOpts{});
   const Signal f = faded(s, 1.4, 2.4, 0.f, 6.f);
   const std::vector<Picture> got = frames_of(f, PictureOpts{}, nullptr, DecoderOpts{}, 18);
-  const std::vector<Picture> bare_got = frames_of(f, PictureOpts{}, nullptr, kNoCoast, 18);
   const DecoderStats st = decode(f), bare = decode(f, kNoCoast);
   const size_t placed = in_place(whole, got);
   const bool same = same_pictures(whole, got, 8, 3);
   const bool ok = st.losses == 0 && st.acquisitions == 1 && st.rephases == 0 && got.size() == whole.size() &&
                   placed == got.size() && same && bare.losses == 1 && bare.acquisitions == 2 &&
-                  bare_got.size() + 5 <= whole.size();
+                  bare.frames + 5 <= whole.size();
   CHECK(ok);
   if (shown(ok))
     std::fprintf(stderr, "  gone for 1 s: %zu pictures of %zu, %zu in place, the last 8 the same %d; %llu losses, %llu "
-                 "re-phases, %llu coasted; without coasting %zu pictures, %llu losses, %llu acquisitions\n", got.size(),
+                 "re-phases, %llu coasted; without coasting %llu pictures, %llu losses, %llu acquisitions\n", got.size(),
                  whole.size(), placed, same, (unsigned long long)st.losses, (unsigned long long)st.rephases,
-                 (unsigned long long)st.fields_coasted, bare_got.size(), (unsigned long long)bare.losses,
-                 (unsigned long long)bare.acquisitions);
+                 (unsigned long long)st.fields_coasted, (unsigned long long)bare.frames,
+                 (unsigned long long)bare.losses, (unsigned long long)bare.acquisitions);
 }
 
 int main() {
