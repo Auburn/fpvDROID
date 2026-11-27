@@ -346,6 +346,8 @@ JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_setDebugEnv(JNIEnv *env, jcl
     if (g_radio) g_radio->set_flywheel(on);
   } else if (k == "KP_HOLD") {
     if (g_radio) g_radio->set_hold(on);
+  } else if (k == "KP_COAST") {  // the decoder's coasting through a dropout (DecoderOpts::coast)
+    if (g_radio) g_radio->set_coast(on);
   } else if (k == "KP_FILTER") {  // the front end's channel filter for a noisy signal
     if (g_radio) g_radio->set_channel_filter(on);
   } else if (k == "KP_FRONT_BUFFER") {  // "0": no front-buffer drawing with Vsync off (Screen::allow_front_buffer)

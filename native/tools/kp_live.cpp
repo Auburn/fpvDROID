@@ -65,6 +65,7 @@ int main(int argc, char **argv) {
   if (const char *e = std::getenv("KP_LEVELS")) radio.set_follow_levels(*e != '0');
   if (const char *e = std::getenv("KP_FLYWHEEL")) radio.set_flywheel(*e != '0');
   if (const char *e = std::getenv("KP_HOLD")) radio.set_hold(*e != '0');
+  if (const char *e = std::getenv("KP_COAST")) radio.set_coast(*e != '0');
   if (const char *e = std::getenv("KP_FILTER")) radio.set_channel_filter(*e != '0');
   try {
     radio.open(-1);
