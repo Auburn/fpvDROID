@@ -36,8 +36,12 @@ object Skin {
     val ON_LIGHT = Color.rgb(16, 18, 22)   // text on a white control
     val WARN = Color.rgb(255, 182, 72)
     val ERROR = Color.rgb(255, 112, 112)
+    val WIFI = Color.rgb(150, 160, 255)   // a Wi-Fi network on the Spectrum tab
     val MEDIUM: Typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
     val REGULAR: Typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+
+    /** [color] with its alpha set to [a] (0..255). */
+    fun alpha(color: Int, a: Int): Int = (color and 0xFFFFFF) or (a shl 24)
 
     fun mix(a: Int, b: Int, t: Float): Int {
         val u = t.coerceIn(0f, 1f)
@@ -558,17 +562,23 @@ class ChannelTile(ctx: Context) : View(ctx) {
     }
 }
 
-/** A found signal, as a small button: name (or frequency), signal bars. */
+/**
+ * A found signal, as a small button: name (or frequency), then its signal bars, or in place of them a [note] in plain
+ * words (a Wi-Fi network: "in use"). [edge]: the colour it is outlined in.
+ */
 @SuppressLint("ViewConstructor")
-class FoundChip(ctx: Context, private val title: String, private val bars: Int) : View(ctx) {
+class FoundChip(
+    ctx: Context, private val title: String, private val bars: Int = 0, val note: String? = null, private val edge: Int = Skin.STROKE,
+) : View(ctx) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = Skin.MEDIUM; textSize = sp(13.5f); color = Skin.TEXT }
+    private val small = Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = Skin.REGULAR; textSize = sp(12.5f); color = Skin.TEXT_3 }
     private val box = RectF()
 
-    init { isClickable = true; contentDescription = title }
+    init { isClickable = true; contentDescription = if (note != null) "$title, $note" else title }
 
-    override fun onMeasure(w: Int, h: Int) =
-        setMeasuredDimension((text.measureText(title) + dp(52f)).roundToInt(), dpi(36f))
+    override fun onMeasure(w: Int, h: Int) = setMeasuredDimension(
+        (text.measureText(title) + if (note != null) small.measureText(note) + dp(36f) else dp(52f)).roundToInt(), dpi(36f))
 
     override fun onDraw(c: Canvas) {
         val h = height.toFloat()
@@ -578,11 +588,13 @@ class FoundChip(ctx: Context, private val title: String, private val bars: Int) 
         c.drawRoundRect(box, h / 2, h / 2, paint)
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = dp(1f)
-        paint.color = Skin.STROKE
+        paint.color = edge
         c.drawRoundRect(box, h / 2, h / 2, paint)
         paint.style = Paint.Style.FILL
-        c.drawText(title, dp(14f), h / 2 - (text.descent() + text.ascent()) / 2, text)
-        drawBars(c, paint, width - dp(13f), h / 2 + dp(6f), dp(2.6f), bars, Skin.ACCENT, Skin.FILL_STRONG)
+        val base = h / 2 - (text.descent() + text.ascent()) / 2
+        c.drawText(title, dp(14f), base, text)
+        if (note != null) c.drawText(note, dp(14f) + text.measureText(title) + dp(8f), base, small)
+        else drawBars(c, paint, width - dp(13f), h / 2 + dp(6f), dp(2.6f), bars, Skin.ACCENT, Skin.FILL_STRONG)
     }
 
     override fun drawableStateChanged() {

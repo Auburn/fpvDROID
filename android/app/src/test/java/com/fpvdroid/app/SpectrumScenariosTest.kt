@@ -31,12 +31,12 @@ class SpectrumScenariosTest : AppHarness() {
 
     private val graph: SpectrumView get() = views(menu).filterIsInstance<SpectrumView>().single()
 
-    /** The chips under the graph: what the tab says is on the air. */
-    private fun used(): List<String> =
-        views(graph.parent.parent as android.view.View).filterIsInstance<FoundChip>().map { it.contentDescription.toString() }
+    /** The chips under the graph: what the tab says is on the air (the Wi-Fi networks' say whether in use: [wifiChips]). */
+    private fun chips(): List<FoundChip> = views(graph.parent.parent as android.view.View).filterIsInstance<FoundChip>()
 
-    private fun usedChip(name: String): FoundChip =
-        views(graph.parent.parent as android.view.View).filterIsInstance<FoundChip>().first { it.contentDescription == name }
+    private fun used(): List<String> = chips().filter { it.note == null }.map { it.contentDescription.toString() }
+
+    private fun usedChip(name: String): FoundChip = chips().first { it.note == null && it.contentDescription == name }
 
     private fun closeTheMenu() {
         click(preview())   // the picture at the rail's foot closes the menu
@@ -288,6 +288,156 @@ class SpectrumScenariosTest : AppHarness() {
         assertEquals(0, fake.count("watch"))
         assertEquals('L', savedSettings().band)   // the Channel tab's band is left alone
         assertEquals(5436, savedSettings().channelMhz)
+    }
+
+    // ------------------------------------------------------------------------------------------ told apart by the radio
+    /**
+     * What the radio judged digital by itself ("kind" in the spectrum) says so before the channel's name, whose ever
+     * channels are marked, and picking it tunes nothing; an analog signal beside it is named and tuned as ever.
+     */
+    @Test
+    fun whatTheRadioJudgesDigitalSaysSoOnItsChipAndIsNotTuned() {
+        running()
+        fake.carriers += Carrier(5695.2, 18.5, 26f, SignalKind.DJI)              // on R2, DJI V1/V2 CH2
+        fake.carriers += Carrier(5769.1, 27.0, 20f, SignalKind.HDZERO)           // on R4, DJI V1/V2 CH4
+        fake.carriers += Carrier(5806.3, 12.0, 25f)                              // analog, R5
+        fake.carriers += Carrier(5843.0, 17.0, 18f, SignalKind.HDZERO_NARROW)    // R6, 3 MHz from F6
+        fake.carriers += Carrier(5745.0, 18.0, 15f, SignalKind.DIGITAL)          // A7: something else digital
+        showTab("Spectrum")
+        advance(300)
+        assertEquals(SignalKind.DJI, graph.spectrum!!.carriers.first { it.mhz == 5695.2 }.kind)   // parsed from the radio's JSON
+        assertEquals(null, graph.spectrum!!.carriers.first { it.mhz == 5806.3 }.kind)
+        assertEquals(Signal(5695.2 - 18.5 / 2, 5695.2 + 18.5 / 2, SignalKind.DJI, "DJI"), graph.spectrum!!.signals.first())   // and the signals
+        assertEquals(4, graph.spectrum!!.signals.size)
+        // the F band is marked: a signal on one of its channels is named by it, the others by the analog channel they are on
+        assertEquals(listOf("DJI R2", "Digital A7", "HDZero R4", "R5", "HDZero narrow F6"), used())
+
+        fake.clearCalls()
+        click(usedChip("DJI R2"))
+        assertEquals(0, fake.count("watch"))
+        assertEquals("sweep", fake.mode)
+        assertTrue(views(menu).any { it is android.widget.TextView && it.isShown && it.text.toString() == "Only analog video can be shown" })
+
+        // a tap on the graph over it: the same
+        val g = graph
+        tap(g, ((5696.0 - 5635) / (5955 - 5635) * g.width).toFloat(), g.height * 0.3f)
+        assertEquals(0, fake.count("watch"))
+
+        // the system picker still names the channels: the radio's verdict goes before
+        pickSystem(ChannelSystem.DJI)
+        advance(300)
+        assertEquals(listOf("DJI CH2", "Digital A7", "HDZero CH4", "CH5", "HDZero narrow R6"), used())
+        pickSystem(ChannelSystem.HDZERO)
+        advance(300)
+        assertEquals(listOf("DJI R2", "Digital A7", "HDZero R4", "R5", "HDZero narrow R6"), used())
+
+        pickSystem(ChannelSystem.ANALOG)
+        advance(300)
+        click(usedChip("R5"))   // not judged: an analog channel, tuned
+        assertEquals(call("watch", 5806e6, true), fake.last("watch"))
+    }
+
+    /** A verdict that goes (the radio no longer says it) takes the name back to the channel alone, and tuning with it. */
+    @Test
+    fun aSignalNoLongerJudgedDigitalIsTunedAgain() {
+        running()
+        fake.carriers += Carrier(5769.1, 18.0, 22f, SignalKind.DJI)
+        showTab("Spectrum")
+        advance(300)
+        assertEquals(listOf("DJI R4"), used())
+        fake.carriers[0] = Carrier(5769.1, 14.0, 22f)
+        advance(300)
+        assertEquals(listOf("R4"), used())
+        click(usedChip("R4"))
+        assertEquals(call("watch", 5769e6, true), fake.last("watch"))
+    }
+
+    /** The radio's signals as the app reads them: each kind it knows, with its span, label and whether it is active; a kind it does not know yet is left out. */
+    @Test
+    fun theSignalsOfTheSpectrumAreReadAndAnUnknownKindIsSkipped() {
+        val sp = Spectrum.parse("""{"first_mhz":5735.0,"bin_mhz":0.5,"db":[0,0,0],"carriers":[{"mhz":5745.0,"width":16.5,"snr":12.0,"kind":"later"}],
+            "signals":[{"lo_mhz":5726.0,"hi_mhz":5744.0,"kind":"dji","label":"DJI","active":true},
+            {"lo_mhz":5735.0,"hi_mhz":5755.0,"kind":"later","label":"Later 149","active":false},
+            {"lo_mhz":5755.4,"hi_mhz":5782.5,"kind":"hdzero","label":"HDZero","active":false}]}""")!!
+        assertEquals(listOf(Signal(5726.0, 5744.0, SignalKind.DJI, "DJI"), Signal(5755.4, 5782.5, SignalKind.HDZERO, "HDZero", active = false)),
+            sp.signals)
+        assertEquals(null, sp.carriers.single().kind)
+        assertTrue(Spectrum.parse("""{"first_mhz":5735.0,"bin_mhz":0.5,"db":[0],"carriers":[]}""")!!.signals.isEmpty())
+    }
+
+    // ------------------------------------------------------------------------------------------ Wi-Fi
+    private fun wifiChips(): List<String> = chips().filter { it.note != null }.map { it.contentDescription.toString() }
+
+    private fun wifiChip(words: String): FoundChip = chips().first { it.note != null && it.contentDescription == words }
+
+    private fun says(words: String) = views(menu).any { it is android.widget.TextView && it.isShown && it.text.toString() == words }
+
+    /**
+     * The networks the radio has seen: named on the graph and in chips of their own after the others, never tuned. The
+     * carrier a busy one makes (tagged "wifi" by the radio) has no chip of its own beside the network's, and is not said
+     * apart from it; a tap on it tunes nothing either.
+     */
+    @Test
+    fun wifiNetworksAreNamedButNotTuned() {
+        running()
+        fake.carriers += Carrier(5769.2, 12.0, 31f)   // R4
+        fake.carriers += Carrier(5745.3, 17.5, 20f, SignalKind.WIFI)   // the network on 149, in use: on the air, on A7's frequency
+        fake.signals += Signal(5735.0, 5755.0, SignalKind.WIFI, "Wi-Fi 149", active = true)
+        fake.signals += Signal(5855.0, 5895.0, SignalKind.WIFI, "Wi-Fi 173\u2013177", active = false)   // 40 MHz, only its beacons heard
+        showTab("Spectrum")
+        advance(300)
+        assertEquals(listOf("R4"), used())   // no "A7" beside "Wi-Fi 149"
+        assertEquals(listOf("Wi-Fi 149, in use", "Wi-Fi 173\u2013177, idle"), wifiChips())
+        assertEquals(listOf("Wi-Fi 149", "Wi-Fi 173\u2013177"), graph.wifi.map { it.label })
+        assertEquals(SignalKind.WIFI, graph.onAir.first { it.carrier.mhz == 5745.3 }.spot.kind)
+        val words = graph.contentDescription.toString()
+        assertTrue(words, words.endsWith("In use: R4. Wi-Fi: Wi-Fi 149, in use, Wi-Fi 173\u2013177, idle"))
+        assertTrue(says("In use"))
+
+        fake.clearCalls()
+        click(wifiChip("Wi-Fi 173\u2013177, idle"))   // there is no picture to be had from it
+        assertEquals(0, fake.count("watch"))
+        assertEquals("sweep", fake.mode)
+        assertTrue(says("Only analog video can be shown"))
+        val g = graph
+        tap(g, ((5745.3 - 5635) / (5955 - 5635) * g.width).toFloat(), g.height * 0.3f)   // the network's carrier on the graph
+        assertEquals(0, fake.count("watch"))
+
+        // the low band's span holds none of them
+        val bands = Channels.bands.map { it.first }
+        pick(segmented("Band"), bands.indexOf('L'), bands.size)
+        advance(300)
+        assertEquals(emptyList<String>(), wifiChips())
+        assertTrue(graph.wifi.isEmpty())
+    }
+
+    /** With nothing on the air but networks only heard sending their beacons, the tab does not say "In use". */
+    @Test
+    fun onlyIdleNetworksAreNotInUse() {
+        running()
+        fake.signals += Signal(5735.0, 5755.0, SignalKind.WIFI, "Wi-Fi 149", active = false)
+        showTab("Spectrum")
+        advance(300)
+        assertEquals(listOf("Wi-Fi 149, idle"), wifiChips())
+        assertTrue(says("Only idle Wi-Fi"))
+        assertFalse(says("In use"))
+    }
+
+    /** Names and tags packed in two rows: a third label that would run into both goes where the rows end sooner. */
+    @Test
+    fun labelsArePackedInTwoRows() {
+        assertEquals(listOf(0, 1, 0), SpectrumView.twoRows(listOf(100f to 10f, 112f to 10f, 124f to 10f), 6f))   // was 0, 1, 1
+        assertEquals(listOf(0, 0, 1), SpectrumView.twoRows(listOf(100f to 10f, 130f to 10f, 140f to 10f), 6f))
+        assertEquals(listOf(0, 1, 1), SpectrumView.twoRows(listOf(100f to 30f, 110f to 10f, 140f to 10f), 6f))
+    }
+
+    /** The radio's networks as it sends them: signals of kind "wifi", the label as it is (an en dash), a broken one left out. */
+    @Test
+    fun theRadiosNetworksAreReadAsSent() {
+        val sp = Spectrum.parse("""{"first_mhz":5635,"bin_mhz":0.5,"db":[0,null],"carriers":[],"signals":[""" +
+            """{"lo_mhz":5490.0,"hi_mhz":5570.0,"kind":"wifi","label":"Wi-Fi 100\u2013112","active":true},""" +
+            """{"lo_mhz":5600,"hi_mhz":5580,"kind":"wifi","label":"Wi-Fi 120","active":false}]}""")
+        assertEquals(listOf(Signal(5490.0, 5570.0, SignalKind.WIFI, "Wi-Fi 100\u2013112", true)), sp!!.signals)
     }
 
     @Test

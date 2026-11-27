@@ -8,9 +8,10 @@ import android.widget.LinearLayout
 
 /**
  * The menu's Spectrum tab, in [page]: whose channels are marked along the top (an analog band, a DJI model or
- * HDZero), the graph ([SpectrumView]) under it, and at the foot Sweep and a chip for each thing on the air. Like the
- * rest of the menu it changes [Settings] itself and tells the [MenuView.Listener] what it did; it knows nothing of
- * the radio. [syncChannel]: the menu's own, for a change the Channel tab shows too (the band, the channel).
+ * HDZero), the graph ([SpectrumView]) under it, and at the foot Sweep and a chip for each thing on the air and each
+ * Wi-Fi network. Like the rest of the menu it changes [Settings] itself and tells the [MenuView.Listener] what it did;
+ * it knows nothing of the radio. [syncChannel]: the menu's own, for a change the Channel tab shows too (the band, the
+ * channel).
  */
 internal class SpectrumPage(
     private val page: LinearLayout,
@@ -27,6 +28,7 @@ internal class SpectrumPage(
     private val sweepText = label(ctx, "", 12.5f, Skin.TEXT_2)
     private val chipRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
     private var chipsShown: List<Pair<String, Int>>? = null   // name, bars
+    private var wifiShown: List<Signal>? = null
     private var analogOnlyAt = -ANALOG_ONLY_MS                // when a digital channel was last picked (uptimeMillis)
     private var state = MenuState()
 
@@ -99,16 +101,34 @@ internal class SpectrumPage(
         on.onTune()
     }
 
-    /** The chips under the graph: what is on the air, left to right as in the graph, each named where it puts it. */
+    /**
+     * The chips under the graph: what is on the air, left to right as in the graph, each named where it puts it (after
+     * the digital system the radio judged it to be, if any: [Spot.name]); then the Wi-Fi networks, each saying whether
+     * it is in use. A busy network is on the air too, as a carrier the radio tags as the network's: it has no chip of
+     * its own beside the network's, which already says that it is in use.
+     */
     private fun showChips() {
-        val chips = graph.onAir.map { it.spot.name to barsFor(it.carrier.snrDb).coerceAtLeast(1) }
-        if (chips == chipsShown) return
+        val chips = graph.onAir.filter { it.carrier.kind != SignalKind.WIFI }
+            .map { it.spot.name to barsFor(it.carrier.snrDb).coerceAtLeast(1) }
+        val wifi = graph.wifi
+        if (chips == chipsShown && wifi == wifiShown) return
         chipsShown = chips
+        wifiShown = wifi
         chipRow.removeAllViews()
         for ((name, bars) in chips) {
             val chip = FoundChip(ctx, name, bars)
             // what is on the air under that name when the chip is tapped (the chips stay while only the numbers move)
             chip.setOnClickListener { graph.onAir.firstOrNull { it.spot.name == name }?.let { pick(it.spot) } }
+            chipRow.addView(chip, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dpi(8f) })
+        }
+        for (n in wifi) {
+            val chip = FoundChip(ctx, n.label, note = if (n.active) "in use" else "idle",
+                edge = Skin.alpha(Skin.WIFI, if (n.active) 150 else 80))
+            // there is no picture to be had from a network either
+            chip.setOnClickListener {
+                analogOnlyAt = SystemClock.uptimeMillis()
+                render(state)
+            }
             chipRow.addView(chip, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dpi(8f) })
         }
     }
@@ -128,7 +148,8 @@ internal class SpectrumPage(
         val words = when {
             SystemClock.uptimeMillis() - analogOnlyAt < ANALOG_ONLY_MS -> "Only analog video can be shown"
             !st.radioReady -> ""
-            !sp?.carriers.isNullOrEmpty() -> "In use"
+            !sp?.carriers.isNullOrEmpty() || graph.wifi.any { it.active } -> "In use"
+            graph.wifi.isNotEmpty() -> "Only idle Wi-Fi"
             st.scanning -> "Waiting for the scan"
             st.sweeping && (sp == null || sp.sweeps == 0) -> "$lo–$hi MHz"
             sp != null && !sp.empty -> "No signals"

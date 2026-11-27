@@ -10,7 +10,8 @@ option(FPVDROID_RADIO "Build the radio (wifi-sdr + devourer + libusb)" ON)
 
 # ---- DSP: no hardware, shared by the app and the desktop tools ----
 add_library(fpvdroid_dsp STATIC dsp/video.cpp dsp/deinterlace.cpp dsp/field_rhythm.cpp dsp/line_draw.cpp
-            dsp/picture_filters.cpp dsp/sparkle.cpp dsp/spectrum.cpp dsp/sync_levels.cpp dsp/log.cpp)
+            dsp/picture_filters.cpp dsp/sparkle.cpp dsp/spectrum.cpp dsp/step_grid.cpp dsp/digital.cpp dsp/wifi.cpp
+            dsp/sync_levels.cpp dsp/log.cpp)
 target_include_directories(fpvdroid_dsp PUBLIC dsp)
 target_compile_options(fpvdroid_dsp PRIVATE -O3 -ffast-math -Wall -Wextra)
 if(ANDROID)
@@ -56,7 +57,7 @@ if(FPVDROID_RADIO)
   endif()
   # web/CMakeLists.txt lists the same sources
   set(FPVDROID_RADIO_SOURCES radio/radio.cpp radio/combine.cpp radio/decode_queue.cpp radio/fallback_policy.cpp
-      radio/frame_gate.cpp radio/steps.cpp radio/sweep.cpp radio/thread_placement.cpp)
+      radio/frame_gate.cpp radio/pilots.cpp radio/scan.cpp radio/steps.cpp radio/sweep.cpp radio/thread_placement.cpp)
   add_library(fpvdroid_radio STATIC ${FPVDROID_RADIO_SOURCES})
   target_include_directories(fpvdroid_radio PUBLIC radio)
   target_link_libraries(fpvdroid_radio PUBLIC fpvdroid_dsp wsdrcore)
@@ -70,6 +71,7 @@ if(NOT ANDROID)
   target_link_libraries(kp_replay PRIVATE fpvdroid_dsp)
   target_compile_options(kp_replay PRIVATE -O2 -Wall)
   add_executable(kp_gen tools/kp_gen.cpp)  # a synthetic transmitter: recordings to test with, no hardware
+  target_link_libraries(kp_gen PRIVATE fpvdroid_dsp)  # the digital transmitter's FFT
   target_compile_options(kp_gen PRIVATE -O2 -Wall)
   if(TARGET fpvdroid_render)
     add_executable(kp_render tools/kp_render.cpp)  # the app's renderer off screen (needs EGL + OpenGL ES 3)
@@ -100,6 +102,13 @@ if(NOT ANDROID)
   target_link_libraries(kp_radio_tests PRIVATE fpvdroid_dsp Threads::Threads)
   target_compile_options(kp_radio_tests PRIVATE -O2 -Wall -Wextra)
   add_test(NAME radio COMMAND kp_radio_tests)
+  # the scan's rules: its plan and extra steps, what it lists, less a strong transmitter's copy, and what it watches
+  # after
+  add_executable(kp_scan_tests tests/scan_tests.cpp radio/pilots.cpp radio/scan.cpp radio/steps.cpp)
+  target_include_directories(kp_scan_tests PRIVATE radio)
+  target_link_libraries(kp_scan_tests PRIVATE fpvdroid_dsp)
+  target_compile_options(kp_scan_tests PRIVATE -O2 -Wall -Wextra)
+  add_test(NAME scan COMMAND kp_scan_tests)
   # the decoder's sync tracking, on a signal the test makes itself
   add_executable(kp_decoder_tests tests/decoder_tests.cpp)
   target_link_libraries(kp_decoder_tests PRIVATE fpvdroid_dsp)
@@ -111,6 +120,18 @@ if(NOT ANDROID)
   target_link_libraries(kp_spectrum_tests PRIVATE fpvdroid_dsp)
   target_compile_options(kp_spectrum_tests PRIVATE -O2 -Wall -Wextra)
   add_test(NAME spectrum COMMAND kp_spectrum_tests)
+  # the Spectrum tab telling DJI, HDZero and other digital signals apart, from sweep steps of synthetic IQ
+  add_executable(kp_digital_tests tests/digital_tests.cpp radio/sweep.cpp)
+  target_include_directories(kp_digital_tests PRIVATE radio tools)
+  target_link_libraries(kp_digital_tests PRIVATE fpvdroid_dsp)
+  target_compile_options(kp_digital_tests PRIVATE -O2 -Wall -Wextra)
+  add_test(NAME digital COMMAND kp_digital_tests)
+  # the Spectrum tab's Wi-Fi networks, from sweep steps of synthetic IQ
+  add_executable(kp_wifi_tests tests/wifi_tests.cpp radio/sweep.cpp)
+  target_include_directories(kp_wifi_tests PRIVATE radio tools)
+  target_link_libraries(kp_wifi_tests PRIVATE fpvdroid_dsp)
+  target_compile_options(kp_wifi_tests PRIVATE -O2 -Wall -Wextra)
+  add_test(NAME wifi COMMAND kp_wifi_tests)
   # the screen's picture delay (render/latency.h: no GL in it)
   add_executable(kp_screen_tests tests/screen_tests.cpp render/latency.cpp)
   target_include_directories(kp_screen_tests PRIVATE render)

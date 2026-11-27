@@ -2,13 +2,30 @@
 // (github.com/scerstt/PlayRX, tools/gen_testsignal.cpp, GPL-2.0).
 //
 //   kp_gen OUT [--mhz 5769] [--centre MHZ (default --mhz)] [--frames 30] [--dev 8] [--cnr 25] [--pal] [--label R4]
+//              [--copy MHZ DB] [--mirror DB]
+//              [--wifi CH | --wifi-quiet CH] [--wifi-db 20]
+//   kp_gen OUT --digital KIND [--mhz 5769] [--centre MHZ] [--snr 20] [--width MHZ] [--seconds 0.25]
 //
 // Writes OUT.cs16 (int16 I,Q at 40 MS/s, 12-bit values << 4, like wsdr_probe) and OUT.json (sample_rate,
-// centre_hz), which kp_replay and the simulated receiver (kp_sim, KP_SIM_FILE) read.
+// centre_hz, and what is on the air), which kp_replay and the simulated receiver (kp_sim, KP_SIM_FILE) read.
+//
+// --copy adds the same picture at MHZ, DB under the transmitter: the copy a strong analog VTX shows beside itself
+// (radio/pilots.h). --mirror adds its mirror image about the centre, DB under it, as a receiver's IQ imbalance makes
+// one. The transmitter keeps the CNR asked for, and the sum stays inside the 12-bit range.
+//
+// --digital: a digital transmitter in place of analog video, for the Spectrum tab's telling them apart
+// (tools/digital_tx.h: models, not captures). KIND: hdzero (continuous OFDM, 27 MHz), narrow (HDZero's 17 MHz mode),
+// dji (18 MHz in DJI's TDD frame with video), dji_idle (the frame with no goggles linked), wifi (16.25 MHz in bursts,
+// 30 % of the time) or ofdm (continuous, --width wide). --snr: its density over the noise's (dB).
 //
 // Picture: 75 % colour bars (top two thirds), a grey ramp, and a white box that moves across the bottom band
 // once per loop, so a frozen picture is obvious; --label puts big text over the bars. Composite levels in IRE
 // (sync -40, blank 0, black 7.5 for NTSC, white 100), FM-modulated so that sync tip -> -dev/2, white -> +dev/2.
+//
+// --wifi CH adds a 5 GHz Wi-Fi network in use on channel CH (802.11a OFDM, --wifi-db over the noise: digital_tx.h),
+// --wifi-quiet CH one that only sends its beacons, for the Spectrum tab's Wi-Fi (dsp/wifi.h). kp_sim takes the
+// recording for one centred on 5770 MHz and moves it without filtering, and the subcarriers past 18 MHz of the centre
+// are left out, so keep the channel near the middle: 153 (5765 MHz) with --centre 5770, and the VTX off it (--mhz 5785).
 #include <cmath>
 #include <complex>
 #include <cstdint>
@@ -17,6 +34,8 @@
 #include <random>
 #include <string>
 #include <vector>
+
+#include "digital_tx.h"
 
 namespace {
 
@@ -81,18 +100,92 @@ bool label_lit(const std::string &text, double x, double y) {
   return (glyph(text[ci])[row] >> (4 - col)) & 1;
 }
 
+// int16 as wsdr_probe writes them: 12-bit values << 4
+int16_t q12(double v) { return static_cast<int16_t>(std::lround(std::max(-2047.0, std::min(2047.0, v))) * 16); }
+
+// A recording as kp_replay and kp_sim read it: OUT.cs16 from n samples at 40 MS/s, sample(i) giving each in turn from
+// i = 0 (in 12-bit counts), and OUT.json with the sample rate, the centre, the transmitter's frequency and json_extra
+// (more "key": value pairs). 0 once written.
+template <class F>
+int write_recording(const std::string &out, size_t n, double centre_mhz, double vtx_mhz, const std::string &json_extra,
+                    F sample) {
+  FILE *f = std::fopen((out + ".cs16").c_str(), "wb");
+  if (!f) { std::fprintf(stderr, "cannot write %s.cs16\n", out.c_str()); return 1; }
+  std::vector<int16_t> buf;
+  buf.reserve(1 << 20);
+  for (size_t i = 0; i < n; i++) {
+    const std::complex<double> v = sample(i);
+    buf.push_back(q12(v.real()));
+    buf.push_back(q12(v.imag()));
+    if (buf.size() >= (1 << 20)) {
+      std::fwrite(buf.data(), 2, buf.size(), f);
+      buf.clear();
+    }
+  }
+  std::fwrite(buf.data(), 2, buf.size(), f);
+  std::fclose(f);
+  if (FILE *j = std::fopen((out + ".json").c_str(), "w")) {
+    std::fprintf(j, "{\"sample_rate\": %.0f, \"centre_hz\": %.0f, \"vtx_hz\": %.0f, %s, \"synthetic\": true}\n",
+                 kp::tx::kFs, centre_mhz * 1e6, vtx_mhz * 1e6, json_extra.c_str());
+    std::fclose(j);
+  }
+  return 0;
+}
+
+// --digital: the recording of a digital transmitter (digital_tx.h) with noise of 20 counts per I and Q, as the
+// digital tests have it. A whole number of DJI frames (2.5 ms) long, so that the frame goes on unbroken where kp_sim
+// loops the recording.
+int write_digital(const std::string &out, const std::string &kind, double vtx_mhz, double centre_mhz, double snr_db,
+                  double width_mhz, double seconds) {
+  constexpr double kNoise = 20;
+  kp::tx::Ofdm o;
+  o.offset_hz = (vtx_mhz - centre_mhz) * 1e6;
+  o.snr_db = snr_db;
+  if (kind == "hdzero") o.width_hz = 27e6;
+  else if (kind == "narrow") o.width_hz = 17e6;
+  else if (kind == "dji") { o.width_hz = 18e6; o.dji = 1; }
+  else if (kind == "dji_idle") { o.width_hz = 18e6; o.dji = 2; }
+  else if (kind == "wifi") { o.width_hz = 16.25e6; o.duty = 0.3; }
+  else if (kind != "ofdm") { std::fprintf(stderr, "unknown --digital %s\n", kind.c_str()); return 2; }
+  if (width_mhz > 0) o.width_hz = width_mhz * 1e6;
+  const size_t frame = static_cast<size_t>(2.5e-3 * kp::tx::kFs);
+  const size_t n = std::max<size_t>(1, static_cast<size_t>(std::llround(seconds / 2.5e-3))) * frame;
+  std::mt19937 rng(1);
+  std::normal_distribution<float> nd(0, static_cast<float>(kNoise));
+  std::vector<kp::cf> x(n);
+  for (auto &v : x) v = kp::cf(nd(rng), nd(rng));
+  kp::tx::add_ofdm(x, o, kNoise, rng);
+  char extra[96];
+  std::snprintf(extra, sizeof extra, "\"digital\": \"%s\", \"width_hz\": %.0f", kind.c_str(), o.width_hz);
+  if (const int e = write_recording(out, n, centre_mhz, vtx_mhz, extra, [&](size_t i) { return std::complex<double>(x[i]); }))
+    return e;
+  std::fprintf(stderr, "wrote %s.cs16: %zu samples (%.3f s), %s %.1f MHz wide at %.1f MHz, centre %.1f MHz, %.0f dB\n",
+               out.c_str(), n, n / kp::tx::kFs, kind.c_str(), o.width_hz / 1e6, vtx_mhz, centre_mhz, snr_db);
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char **argv) {
   if (argc < 2) {
-    std::fprintf(stderr, "usage: kp_gen OUT [--mhz F] [--centre F] [--frames N] [--dev MHZ] [--cnr DB] [--pal] [--label TEXT]\n");
+    std::fprintf(stderr, "usage: kp_gen OUT [--mhz F] [--centre F] [--frames N] [--dev MHZ] [--cnr DB] [--pal] [--label TEXT]"
+                         " [--copy MHZ DB] [--mirror DB]\n"
+                         "              [--wifi CH | --wifi-quiet CH] [--wifi-db DB]\n"
+                         "       kp_gen OUT --digital hdzero|narrow|dji|dji_idle|wifi|ofdm [--mhz F] [--centre F] [--snr DB]"
+                         " [--width MHZ] [--seconds S]\n");
     return 2;
   }
   const std::string out = argv[1];
   double vtx_mhz = 5769, centre_mhz = NAN, dev_mhz = 8, cnr_db = 25;
+  double copy_mhz = NAN, copy_db = NAN, mirror_db = NAN;  // NAN: none
   int frames = 30;
   bool pal = false;
   std::string label;  // big text over the bars (a channel name), so feeds are easy to tell apart
+  int wifi_ch = 0;    // a Wi-Fi network on this channel (0: none)
+  bool wifi_quiet = false;
+  double wifi_db = 20;
+  std::string digital;  // --digital: a digital transmitter instead
+  double snr_db = 20, width_mhz = 0, seconds = 0.25;
   for (int i = 2; i < argc; i++) {
     const std::string k = argv[i];
     auto v = [&] { return i + 1 < argc ? std::atof(argv[++i]) : (std::fprintf(stderr, "missing value\n"), std::exit(2), 0.0); };
@@ -103,34 +196,68 @@ int main(int argc, char **argv) {
     else if (k == "--cnr") cnr_db = v();
     else if (k == "--pal") pal = true;
     else if (k == "--label" && i + 1 < argc) label = argv[++i];
+    else if (k == "--copy") { copy_mhz = v(); copy_db = v(); }
+    else if (k == "--mirror") mirror_db = v();
+    else if (k == "--wifi") wifi_ch = static_cast<int>(v());
+    else if (k == "--wifi-quiet") { wifi_ch = static_cast<int>(v()); wifi_quiet = true; }
+    else if (k == "--wifi-db") wifi_db = v();
+    else if (k == "--digital" && i + 1 < argc) digital = argv[++i];
+    else if (k == "--snr") snr_db = v();
+    else if (k == "--width") width_mhz = v();
+    else if (k == "--seconds") seconds = v();
     else { std::fprintf(stderr, "unknown option %s\n", k.c_str()); return 2; }
   }
   if (std::isnan(centre_mhz)) centre_mhz = vtx_mhz;  // the recording centred on its transmitter
+  if (!digital.empty()) return write_digital(out, digital, vtx_mhz, centre_mhz, snr_db, width_mhz, seconds);
+  if (std::fabs(copy_mhz - centre_mhz) >= 20) {  // false for NAN: no copy
+    std::fprintf(stderr, "--copy %.1f: outside the recording (%.1f MHz +-20)\n", copy_mhz, centre_mhz);
+    return 2;
+  }
   const Std &S = pal ? kPal : kNtsc;
   const double fs = 40e6;
   const double H = S.H_us * 1e-6, half = H / 2;
   const double frame_s = H * S.half_lines / 2;
   const size_t n = static_cast<size_t>(std::llround(frames * frame_s * fs));
   const double offset_hz = (vtx_mhz - centre_mhz) * 1e6;
+  const double copy_shift_hz = (copy_mhz - vtx_mhz) * 1e6;  // the copy from the transmitter
 
   // 75 % bars: white, yellow, cyan, green, magenta, red, blue, black
   const double bars[8][3] = {{.75, .75, .75}, {.75, .75, 0}, {0, .75, .75}, {0, .75, 0},
                              {.75, 0, .75}, {.75, 0, 0}, {0, 0, .75}, {0, 0, 0}};
 
-  FILE *f = std::fopen((out + ".cs16").c_str(), "wb");
-  if (!f) { std::fprintf(stderr, "cannot write %s.cs16\n", out.c_str()); return 1; }
-
-  const double amp = 1400;  // 12-bit full scale is 2047
+  // 12-bit full scale is 2047; with a copy or a mirror, the first transmitter gives up enough for the sum not to clip
+  const double copy_gain = std::isnan(copy_db) ? 0 : std::pow(10, -copy_db / 20);
+  const double mirror_gain = std::isnan(mirror_db) ? 0 : std::pow(10, -mirror_db / 20);
+  const double amp = 1400 / (1 + copy_gain + mirror_gain);
   // CNR in an 18 MHz channel: noise power over the whole 40 MHz is scaled up by 40/18
   const double noise_pow = amp * amp / std::pow(10, cnr_db / 10) * (fs / 18e6);
   std::mt19937 rng(1);
   std::normal_distribution<double> nd(0, std::sqrt(noise_pow / 2));
 
-  std::vector<int16_t> buf;
-  buf.reserve(1 << 20);
+  // The Wi-Fi network (digital_tx.h): 52 subcarriers 312.5 kHz apart around 5000 + 5 CH MHz, symbols of 4 us, on for
+  // a beacon of 0.4 ms every 102.4 ms and, in use, in a quarter of its 0.5 ms frames at random; its density wifi_db
+  // over the noise's. Made a piece at a time on the recording's own clock, so that the pieces join up.
+  kp::tx::Ofdm wifi;
+  wifi.offset_hz = (5000 + 5.0 * wifi_ch - centre_mhz) * 1e6;
+  wifi.width_hz = 16.25e6;
+  wifi.snr_db = wifi_db;
+  wifi.wifi = true;
+  wifi.on = wifi_quiet ? kp::tx::beacons(0) : kp::tx::traffic(0.25, 2);
+  std::vector<kp::cf> piece(1 << 16);
   double phase = 0;
   const double w_sc = 2 * M_PI * S.fsc;
-  for (size_t i = 0; i < n; i++) {
+  std::string extra = std::string("\"std\": \"") + (pal ? "PAL" : "NTSC") + "\"";
+  char more[160];
+  if (copy_gain > 0) {
+    std::snprintf(more, sizeof more, ", \"copy_hz\": %.0f, \"copy_db\": %g", copy_mhz * 1e6, copy_db);
+    extra += more;
+  }
+  if (mirror_gain > 0) {
+    std::snprintf(more, sizeof more, ", \"mirror_hz\": %.0f, \"mirror_db\": %g", (2 * centre_mhz - vtx_mhz) * 1e6,
+                  mirror_db);
+    extra += more;
+  }
+  const int e = write_recording(out, n, centre_mhz, vtx_mhz, extra, [&](size_t i) {
     const double t = i / fs;
     const double tf = std::fmod(t, frame_s);
     const int frame_no = static_cast<int>(t / frame_s);
@@ -198,23 +325,34 @@ int main(int argc, char **argv) {
     const double fi = offset_hz + dev_mhz * 1e6 * ((ire + 40) / 140.0 - 0.5);
     phase += 2 * M_PI * fi / fs;
     if (phase > M_PI) phase -= 2 * M_PI * std::floor((phase + M_PI) / (2 * M_PI));
-    const double re = amp * std::cos(phase) + nd(rng), im = amp * std::sin(phase) + nd(rng);
-    auto q = [](double v) { return static_cast<int16_t>(std::lround(std::max(-2047.0, std::min(2047.0, v))) * 16); };
-    buf.push_back(q(re));
-    buf.push_back(q(im));
-    if (buf.size() >= (1 << 20)) {
-      std::fwrite(buf.data(), 2, buf.size(), f);
-      buf.clear();
+    const double cp = std::cos(phase), sp = std::sin(phase);
+    double x = cp, y = sp;
+    if (copy_gain > 0) {  // the same modulation, copy_shift_hz away
+      const double c = phase + 2 * M_PI * copy_shift_hz * t;
+      x += copy_gain * std::cos(c);
+      y += copy_gain * std::sin(c);
     }
-  }
-  std::fwrite(buf.data(), 2, buf.size(), f);
-  std::fclose(f);
-  if (FILE *j = std::fopen((out + ".json").c_str(), "w")) {
-    std::fprintf(j, "{\"sample_rate\": %.0f, \"centre_hz\": %.0f, \"vtx_hz\": %.0f, \"std\": \"%s\", \"synthetic\": true}\n",
-                 fs, centre_mhz * 1e6, vtx_mhz * 1e6, pal ? "PAL" : "NTSC");
-    std::fclose(j);
-  }
+    if (mirror_gain > 0) {  // the conjugate: frequency and modulation turned over
+      x += mirror_gain * cp;
+      y -= mirror_gain * sp;
+    }
+    double re = amp * x + nd(rng), im = amp * y + nd(rng);
+    if (wifi_ch) {
+      if (i % piece.size() == 0) {
+        std::fill(piece.begin(), piece.end(), kp::cf(0, 0));
+        wifi.t0_s = i / fs;
+        kp::tx::add_ofdm(piece, wifi, std::sqrt(noise_pow / 2), rng);
+      }
+      re += piece[i % piece.size()].real();
+      im += piece[i % piece.size()].imag();
+    }
+    return std::complex<double>(re, im);
+  });
+  if (e) return e;
   std::fprintf(stderr, "wrote %s.cs16: %zu samples (%.3f s, %d %s frames), VTX %.1f MHz, centre %.1f MHz, CNR %.0f dB\n",
                out.c_str(), n, n / fs, frames, pal ? "PAL" : "NTSC", vtx_mhz, centre_mhz, cnr_db);
+  if (copy_gain > 0) std::fprintf(stderr, "  a copy at %.1f MHz, %.1f dB under it\n", copy_mhz, copy_db);
+  if (mirror_gain > 0)
+    std::fprintf(stderr, "  its mirror at %.1f MHz, %.1f dB under it\n", 2 * centre_mhz - vtx_mhz, mirror_db);
   return 0;
 }

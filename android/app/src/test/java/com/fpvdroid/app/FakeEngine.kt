@@ -17,7 +17,7 @@ import kotlin.math.abs
  * mode under the lock before returning) and only while open; [open] resets the bank counter and the dead flag and
  * leaves the mode idle; [close] marks it closed and idle; a scan ends (when the test says [finishScan]) on the
  * preferred channel if it was found, else on the strongest found, else on the preferred one, else idle. A [sweep]
- * goes on until the next mode call; [spectrum] draws [carriers].
+ * goes on until the next mode call; [spectrum] draws [carriers] and lists [wifi].
  *
  * Called from the main thread (status, settings, tuning) and from UsbLink's worker (usb3Switch, open, close): every
  * method is synchronized, except that a held [open] waits outside the lock.
@@ -74,9 +74,10 @@ class FakeEngine : Engine {
     var dspLoad = 0.3
     val pilots = ArrayList<Pilot>()
     /**
-     * When each pilot (by frequency) was last seen, on the fake clock: as the real radio, which keeps every pilot it has
-     * ever seen and reports "age_s", the whole seconds since it last saw each. A pilot added to [pilots] by hand has
-     * age 0 (always fresh). [agePilots] makes them all older at once.
+     * When each pilot (by frequency) was last seen, on the fake clock, for "age_s": the whole seconds since the radio
+     * last saw each. The fake keeps every pilot it has ever seen, where the real radio lists only its last scan's (from
+     * when its thread takes a scan up): the harder case for the app, which leaves older ones out by their age itself.
+     * A pilot added to [pilots] by hand has age 0 (always fresh). [agePilots] makes them all older at once.
      */
     val seenAt = HashMap<Double, Long>()
 
@@ -192,6 +193,11 @@ class FakeEngine : Engine {
     // ------------------------------------------------------------------------------------- the spectrum page
     /** What the band picture shows on the air (dB over the floor at their peak), for [spectrum]. */
     val carriers = ArrayList<Carrier>()
+    /**
+     * What the radio has recognised besides the carriers with a kind (each of which is on a signal of its own, unless it
+     * is on one of these: a Wi-Fi network's).
+     */
+    val signals = ArrayList<Signal>()
     /** Passes the sweep has finished ("sweeps" in the spectrum). */
     var sweeps = 0
 
@@ -204,7 +210,8 @@ class FakeEngine : Engine {
 
     /**
      * As Radio::spectrum_json: half-MHz bins over the span, the floor at 0 dB and each of [carriers] a hump as wide
-     * as it says; "at_mhz" the middle of the span while sweeping. Nothing seen (every bin null) until open.
+     * as it says; "at_mhz" the middle of the span while sweeping. A carrier with a kind is on a signal of that kind as
+     * wide as it is, listed in "signals" before [signals] (what has no carrier). Nothing seen (every bin null) until open.
      */
     @Synchronized override fun spectrum(loHz: Double, hiHz: Double): String {
         rec("spectrum", loHz, hiHz)
@@ -226,7 +233,16 @@ class FakeEngine : Engine {
                 }
             })
             put("carriers", JSONArray().apply {
-                if (isOpen) for (c in carriers) put(JSONObject().put("mhz", c.mhz).put("width", c.widthMhz).put("snr", c.snrDb.toDouble()))
+                if (isOpen) for (c in carriers) put(JSONObject().put("mhz", c.mhz).put("width", c.widthMhz).put("snr", c.snrDb.toDouble())
+                    .apply { c.kind?.let { put("kind", it.code) } })
+            })
+            put("signals", JSONArray().apply {
+                if (!isOpen) return@apply
+                // a carrier on one of [signals] (a busy Wi-Fi network's) is that one
+                val all = carriers.filter { c -> signals.none { it.kind == c.kind && c.mhz in it.loMhz..it.hiMhz } }
+                    .mapNotNull { c -> c.kind?.let { Signal(c.mhz - c.widthMhz / 2, c.mhz + c.widthMhz / 2, it, it.label) } } + signals
+                for (s in all) put(JSONObject().put("lo_mhz", s.loMhz).put("hi_mhz", s.hiMhz).put("kind", s.kind.code)
+                    .put("label", s.label).put("active", s.active))
             })
         }.toString()
     }

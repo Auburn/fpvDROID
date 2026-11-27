@@ -5,31 +5,59 @@
 
 namespace kp {
 
-void fft_inplace(cf *x, int n) {
-  for (int i = 1, j = 0; i < n; i++) {
-    int bit = n >> 1;
+Fft::Fft(int n) : _n(n), _rev(n), _tw(std::max(1, n - 1)) {
+  for (int i = 0, j = 0; i < n; i++) {
+    _rev[i] = j;
+    int bit = n >> 1;  // j: i with its bits the other way round, counted up from the top bit
     for (; j & bit; bit >>= 1) j ^= bit;
     j ^= bit;
-    if (i < j) std::swap(x[i], x[j]);
   }
-  for (int len = 2; len <= n; len <<= 1) {
-    const double a = -2 * M_PI / len;
-    const cf wl(static_cast<float>(std::cos(a)), static_cast<float>(std::sin(a)));
-    for (int i = 0; i < n; i += len) {
-      cf w(1, 0);
-      for (int k = 0; k < len / 2; k++) {
-        const cf u = x[i + k], v = x[i + k + len / 2] * w;
-        x[i + k] = u + v;
-        x[i + k + len / 2] = u - v;
-        w *= wl;
-      }
+  // each from its own angle, in double: none carries the rounding of the one before
+  for (int h = 1; h < n; h <<= 1)
+    for (int k = 0; k < h; k++) {
+      const double a = -M_PI * k / h;
+      _tw[h - 1 + k] = cf(static_cast<float>(std::cos(a)), static_cast<float>(std::sin(a)));
     }
+}
+
+void Fft::butterflies(cf *x) const {
+  // the first stage's twiddle is 1
+  for (int i = 0; i + 1 < _n; i += 2) {
+    const cf u = x[i], v = x[i + 1];
+    x[i] = u + v;
+    x[i + 1] = u - v;
+  }
+  for (int h = 2; h < _n; h <<= 1) {
+    const cf *w = &_tw[h - 1];
+    for (int i = 0; i < _n; i += 2 * h)
+      for (int k = 0; k < h; k++) {
+        const cf u = x[i + k], v = x[i + k + h] * w[k];
+        x[i + k] = u + v;
+        x[i + k + h] = u - v;
+      }
   }
 }
 
-Psd::Psd(int n) : _n(n), _win(n), _buf(n), _tmp(n), _acc(n, 0.0) {
-  for (int i = 0; i < n; i++) _win[i] = static_cast<float>(0.5 - 0.5 * std::cos(2 * M_PI * i / n));
+void Fft::run(cf *x) const {
+  for (int i = 0; i < _n; i++)
+    if (i < _rev[i]) std::swap(x[i], x[_rev[i]]);
+  butterflies(x);
 }
+
+void Fft::run(const cf *in, const float *win, cf *out) const {
+  for (int i = 0; i < _n; i++) out[_rev[i]] = in[i] * win[i];
+  butterflies(out);
+}
+
+void fft_inplace(cf *x, int n) { Fft(n).run(x); }
+
+std::vector<float> hann(int n) {
+  std::vector<float> w(n);
+  for (int i = 0; i < n; i++) w[i] = static_cast<float>(0.5 - 0.5 * std::cos(2 * M_PI * i / n));
+  return w;
+}
+
+Psd::Psd(int n) : _n(n), _fft(n), _win(hann(n)), _buf(n), _tmp(n), _acc(n, 0.0) {}
 
 void Psd::reset() {
   std::fill(_acc.begin(), _acc.end(), 0.0);
@@ -38,16 +66,20 @@ void Psd::reset() {
 }
 
 void Psd::add(const cf *x, size_t count) {
-  for (size_t i = 0; i < count; i++) {
-    _buf[_fill++] = x[i];
-    if (_fill < static_cast<size_t>(_n)) continue;
-    for (int k = 0; k < _n; k++) _tmp[k] = _buf[k] * _win[k];
-    fft_inplace(_tmp.data(), _n);
-    for (int k = 0; k < _n; k++) _acc[k] += std::norm(_tmp[k]);
+  const size_t n = static_cast<size_t>(_n);
+  while (count > 0) {
+    const size_t take = std::min(count, n - _fill);
+    std::copy(x, x + take, _buf.begin() + static_cast<long>(_fill));
+    x += take;
+    count -= take;
+    _fill += take;
+    if (_fill < n) return;
+    _fft.run(_buf.data(), _win.data(), _tmp.data());
+    for (size_t k = 0; k < n; k++) _acc[k] += std::norm(_tmp[k]);
     _frames++;
     // 50 % overlap
     std::copy(_buf.begin() + _n / 2, _buf.end(), _buf.begin());
-    _fill = _n / 2;
+    _fill = n / 2;
   }
 }
 
@@ -61,11 +93,9 @@ std::vector<float> Psd::db() const {
   return out;
 }
 
-namespace {
-// Median-smoothed spectrum: kills the DC line and narrow carriers (~0.6 MHz window).
-std::vector<float> smooth_db(const std::vector<float> &db, double bin) {
+std::vector<float> smooth_db(const std::vector<float> &db, double bin_hz) {
   const int n = static_cast<int>(db.size());
-  const int hw = std::max(2, static_cast<int>(0.3e6 / bin));
+  const int hw = std::max(2, static_cast<int>(0.3e6 / bin_hz));
   std::vector<float> sm(n), win;
   for (int i = 0; i < n; i++) {
     win.clear();
@@ -75,9 +105,14 @@ std::vector<float> smooth_db(const std::vector<float> &db, double bin) {
   }
   return sm;
 }
-}  // namespace
 
-std::vector<Hump> find_humps(const std::vector<float> &db, double fs, double edge_hz) {
+float median_of(std::vector<float> v) {
+  if (v.empty()) return 0;
+  std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+  return v[v.size() / 2];
+}
+
+StepSignals find_step_signals(const std::vector<float> &db, double fs, double edge_hz) {
   const int n = static_cast<int>(db.size());
   const double bin = fs / n;
   // median-smooth, then floor = lower quartile of the smoothed spectrum
@@ -86,7 +121,7 @@ std::vector<Hump> find_humps(const std::vector<float> &db, double fs, double edg
   std::nth_element(sorted.begin(), sorted.begin() + n / 4, sorted.end());
   const float floor = sorted[n / 4];  // lower quartile: robust even when a wide signal fills much of the span
   const float thr = floor + 6.f;
-  std::vector<Hump> out;
+  StepSignals out;
   int i = 0;
   while (i < n) {
     if (sm[i] <= thr) {
@@ -97,7 +132,8 @@ std::vector<Hump> find_humps(const std::vector<float> &db, double fs, double edg
     while (j < n && sm[j] > thr) j++;
     const double f0 = (i - n / 2) * bin, f1 = (j - 1 - n / 2) * bin;
     const double width = f1 - f0 + bin;
-    if (width >= 3.5e6 && width <= 24e6 && f0 > -edge_hz && f1 < edge_hz) {  // a VTX next to the phone: ~16 MHz
+    const bool lo = f0 <= -edge_hz, hi = f1 >= edge_hz;  // it runs past the bottom, the top edge
+    if (!lo && !hi && width >= kHumpMinHz && width <= kHumpMaxHz) {
       double sw = 0, sf = 0;
       float pk = -1e9f;
       for (int k = i; k < j; k++) {
@@ -106,11 +142,30 @@ std::vector<Hump> find_humps(const std::vector<float> &db, double fs, double edg
         sf += p * (k - n / 2) * bin;
         pk = std::max(pk, sm[k]);
       }
-      out.push_back(Hump{sf / sw, width, pk, pk - floor});
+      out.whole.push_back(Hump{sf / sw, width, pk, pk - floor});
+    } else if (lo != hi) {
+      CutSignal c;
+      c.f0_hz = std::max(f0, -edge_hz);
+      c.f1_hz = std::min(f1 + bin, edge_hz);
+      c.cut_hi = hi;
+      std::vector<float> in;  // its bins inside the span, for their median
+      for (int k = i; k < j; k++) {
+        const double f = (k - n / 2) * bin;
+        if (f >= c.f0_hz && f < c.f1_hz) in.push_back(sm[k]);
+      }
+      if (c.f1_hz - c.f0_hz >= kHumpMinHz && !in.empty()) {
+        std::nth_element(in.begin(), in.begin() + in.size() / 2, in.end());
+        c.snr_db = in[in.size() / 2] - floor;
+        out.cut.push_back(c);
+      }
     }
     i = j;
   }
   return out;
+}
+
+std::vector<Hump> find_humps(const std::vector<float> &db, double fs, double edge_hz) {
+  return find_step_signals(db, fs, edge_hz).whole;
 }
 
 float carrier_snr(const std::vector<float> &db, double fs, double span_hz, double carrier_hz, double pass_hz) {
@@ -131,22 +186,34 @@ float carrier_snr(const std::vector<float> &db, double fs, double span_hz, doubl
 }
 
 namespace {
-constexpr double kDcHz = 0.75e6;      // the DC notch, left out of a retune's spectrum
 constexpr int64_t kAverageMs = 5000;  // a bin seen this recently is averaged with the new value
 constexpr double kBridgeHz = 3e6;     // the widest gap get() fills in
 constexpr size_t kAnchorBins = 4;     // overlap with fresh bins needed to carry their floor over (2 MHz)
 constexpr float kAnchorDb = 3.f;      // ... and how far under this step's own quartile it has to be
 }  // namespace
 
-BandMap::BandMap(double lo_hz, double hi_hz, double bin_hz)
-    : _lo(lo_hz), _bin(bin_hz),
-      _db(static_cast<size_t>(std::max(1L, std::lround((hi_hz - lo_hz) / bin_hz) + 1)), kNone), _t(_db.size(), 0) {}
+TimedBins::TimedBins(double lo_hz, double hi_hz, double bin_hz)
+    : _lo(lo_hz), _bin(bin_hz), _t(static_cast<size_t>(std::max(1L, std::lround((hi_hz - lo_hz) / bin_hz) + 1)), 0) {}
 
-void BandMap::add(const std::vector<float> &db, double fs, double centre_hz, double use_hz, int64_t now_ms) {
-  const int n = static_cast<int>(db.size());
+void TimedBins::inside(double lo_hz, double hi_hz, int *first, int *last) const {
+  *first = std::max(0, static_cast<int>(std::ceil((lo_hz - _lo) / _bin)));
+  *last = std::min(size() - 1, static_cast<int>(std::floor((hi_hz - _lo) / _bin)));
+}
+
+void TimedBins::forget(double lo_hz, double hi_hz, int64_t older_than_ms) {
+  const int j0 = std::max(0, static_cast<int>(std::floor((lo_hz - _lo) / _bin)));
+  const int j1 = std::min(size() - 1, static_cast<int>(std::ceil((hi_hz - _lo) / _bin)));
+  for (int j = j0; j <= j1; j++)
+    if (_t[j] > 0 && _t[j] < older_than_ms) _t[j] = 0;
+}
+
+BandMap::BandMap(double lo_hz, double hi_hz, double bin_hz)
+    : _bins(lo_hz, hi_hz, bin_hz), _db(static_cast<size_t>(_bins.size()), kNone) {}
+
+void BandMap::add(const std::vector<float> &sm, double fs, double centre_hz, double use_hz, int64_t now_ms) {
+  const int n = static_cast<int>(sm.size());
   if (n < 16 || fs <= 0) return;
   const double bin = fs / n;
-  const std::vector<float> sm = smooth_db(db, bin);
   // the floor: the lower quartile of the part that is used (the RX filter's roll-off beyond it would pull it down)
   std::vector<float> in;
   for (int i = 0; i < n; i++)
@@ -154,18 +221,18 @@ void BandMap::add(const std::vector<float> &db, double fs, double centre_hz, dou
   if (in.size() < 8) return;
   std::nth_element(in.begin(), in.begin() + in.size() / 4, in.end());
   float floor = in[in.size() / 4];
-  const int m = static_cast<int>(_db.size());
-  const int j0 = std::max(0, static_cast<int>(std::ceil((centre_hz - use_hz - _lo) / _bin)));
-  const int j1 = std::min(m - 1, static_cast<int>(std::floor((centre_hz + use_hz - _lo) / _bin)));
+  int j0, j1;
+  _bins.inside(centre_hz - use_hz, centre_hz + use_hz, &j0, &j1);
   if (j1 < j0) return;
-  const int64_t t = std::max<int64_t>(now_ms, 1);  // 0 marks a bin never seen
+  const int64_t t = std::max<int64_t>(now_ms, 1);  // as TimedBins::write puts it
+  const double grid = _bins.bin_hz();
   // each bin's level in this step's own terms: the mean of the input bins inside it (or the nearest, should none be)
   std::vector<float> level(static_cast<size_t>(j1 - j0 + 1), kNone);
   for (int j = j0; j <= j1; j++) {
-    const double off = _lo + j * _bin - centre_hz;
-    if (std::fabs(off) < kDcHz) continue;
-    int i0 = static_cast<int>(std::ceil((off - _bin / 2) / bin)) + n / 2;
-    int i1 = static_cast<int>(std::floor((off + _bin / 2) / bin)) + n / 2;
+    const double off = _bins.hz(j) - centre_hz;
+    if (std::fabs(off) < kDcNotchHz) continue;
+    int i0 = static_cast<int>(std::ceil((off - grid / 2) / bin)) + n / 2;
+    int i1 = static_cast<int>(std::floor((off + grid / 2) / bin)) + n / 2;
     if (i1 < i0) i0 = i1 = static_cast<int>(std::lround(off / bin)) + n / 2;
     i0 = std::max(i0, 0);
     i1 = std::min(i1, n - 1);
@@ -181,7 +248,7 @@ void BandMap::add(const std::vector<float> &db, double fs, double centre_hz, dou
   // or so, and taking the lower of the two every time would walk the floor down, step after step.
   std::vector<float> d;
   for (int j = j0; j <= j1; j++)
-    if (level[j - j0] != kNone && _t[j] > 0 && t - _t[j] < kAverageMs) d.push_back(level[j - j0] - _db[j]);
+    if (level[j - j0] != kNone && _bins.written(j) > 0 && t - _bins.written(j) < kAverageMs) d.push_back(level[j - j0] - _db[j]);
   if (d.size() >= kAnchorBins) {
     std::nth_element(d.begin(), d.begin() + d.size() / 2, d.end());
     if (d[d.size() / 2] < floor - kAnchorDb) floor = d[d.size() / 2];
@@ -189,29 +256,18 @@ void BandMap::add(const std::vector<float> &db, double fs, double centre_hz, dou
   for (int j = j0; j <= j1; j++) {
     if (level[j - j0] == kNone) continue;
     const float v = level[j - j0] - floor;
-    _db[j] = _t[j] > 0 && t - _t[j] < kAverageMs ? 0.5f * (_db[j] + v) : v;
-    _t[j] = t;
+    _db[j] = _bins.written(j) > 0 && t - _bins.written(j) < kAverageMs ? 0.5f * (_db[j] + v) : v;
+    _bins.write(j, t);
   }
 }
 
-void BandMap::forget(double lo_hz, double hi_hz, int64_t older_than_ms) {
-  const int m = static_cast<int>(_db.size());
-  const int j0 = std::max(0, static_cast<int>(std::floor((lo_hz - _lo) / _bin)));
-  const int j1 = std::min(m - 1, static_cast<int>(std::ceil((hi_hz - _lo) / _bin)));
-  for (int j = j0; j <= j1; j++)
-    if (_t[j] > 0 && _t[j] < older_than_ms) {
-      _t[j] = 0;
-      _db[j] = kNone;
-    }
-}
-
 std::vector<float> BandMap::get(double lo_hz, double hi_hz, double *first_hz) const {
-  const long m = static_cast<long>(_db.size());
-  const long j0 = std::clamp(std::lround((lo_hz - _lo) / _bin), 0L, m - 1);
-  const long j1 = std::clamp(std::lround((hi_hz - _lo) / _bin), j0, m - 1);
+  const int m = _bins.size();
+  const int j0 = std::clamp(_bins.nearest(lo_hz), 0, m - 1);
+  const int j1 = std::clamp(_bins.nearest(hi_hz), j0, m - 1);
   std::vector<float> out(static_cast<size_t>(j1 - j0 + 1));
-  for (long j = j0; j <= j1; j++) out[j - j0] = _t[j] > 0 ? _db[j] : kNone;
-  const int maxgap = static_cast<int>(kBridgeHz / _bin);
+  for (int j = j0; j <= j1; j++) out[j - j0] = _bins.written(j) > 0 ? _db[j] : kNone;
+  const int maxgap = static_cast<int>(kBridgeHz / _bins.bin_hz());
   int last = -1;
   for (int k = 0; k < static_cast<int>(out.size()); k++) {
     if (out[k] == kNone) continue;
@@ -219,7 +275,7 @@ std::vector<float> BandMap::get(double lo_hz, double hi_hz, double *first_hz) co
       for (int q = last + 1; q < k; q++) out[q] = out[last] + (out[k] - out[last]) * (q - last) / (k - last);
     last = k;
   }
-  if (first_hz) *first_hz = _lo + j0 * _bin;
+  if (first_hz) *first_hz = _bins.hz(j0);
   return out;
 }
 
