@@ -380,7 +380,7 @@ static void fields_coast_through_a_missing_vertical_sync() {
     const auto two_of_three = [](int64_t f0) { return [f0](int64_t f) { return f >= f0 && f % 3 != 0 ? 6 : 0; }; };
     const Signal hit = without_vertical_sync(s, two_of_three(from), per_field);
     const std::vector<Picture> whole = frames_of(s, PictureOpts{});
-    const std::vector<Picture> coasted = frames_of(hit, PictureOpts{}, nullptr, DecoderOpts{}, kLateCoasted);
+    const Watched coasted = watched(hit, PictureOpts{}, nullptr, DecoderOpts{}, kLateCoasted);
     // ... and gone from the very start: the rhythm is had from the fields that are found, a few fields apart
     const DecoderStats sparse = decode(without_vertical_sync(s, two_of_three(0), per_field));
     const bool sparse_ok = sparse.frames + 30 >= whole.size() && sparse.losses == 0;
@@ -389,16 +389,17 @@ static void fields_coast_through_a_missing_vertical_sync() {
       std::fprintf(stderr, "  %d half lines a field, two vertical syncs in three gone from the start: %llu pictures of "
                    "%zu (%llu coasted)\n", per_field, (unsigned long long)sparse.frames, whole.size(),
                    (unsigned long long)sparse.fields_coasted);
-    const DecoderStats st = decode(hit), bare = decode(hit, kNoFlywheel);
+    const DecoderStats &st = coasted.st;
+    const DecoderStats bare = decode(hit, kNoFlywheel);
     const bool learnt = same_pictures(whole, frames_of(s, PictureOpts{}, nullptr, kNoFlywheel), 40);
-    const bool ok = whole.size() >= 50 && same_pictures(whole, coasted) && learnt && st.fields_coasted >= 20 &&
+    const bool ok = whole.size() >= 50 && same_pictures(whole, coasted.pics) && learnt && st.fields_coasted >= 20 &&
                     st.acquisitions == 1 && st.losses == 0 && bare.frames + 20 <= whole.size() &&
                     bare.fields_coasted == 0;
     CHECK(ok);
     if (shown(ok))
       std::fprintf(stderr, "  %d half lines a field: %zu pictures (the last 40 as without the flywheel: %d), %zu with "
                    "two vertical syncs in three gone (%llu coasted), %llu without the flywheel\n", per_field,
-                   whole.size(), learnt, coasted.size(), (unsigned long long)st.fields_coasted,
+                   whole.size(), learnt, coasted.pics.size(), (unsigned long long)st.fields_coasted,
                    (unsigned long long)bare.frames);
   }
 }
@@ -411,9 +412,10 @@ static void a_field_start_found_off_is_put_right() {
   const std::vector<Picture> whole = frames_of(s, PictureOpts{});
   for (const int gone : {1, 2, 3}) {
     const Signal hit = without_vertical_sync(s, [gone](int64_t f) { return f >= 8 && f % 3 != 0 ? gone : 0; });
-    const bool same = same_pictures(whole, frames_of(hit, PictureOpts{}, nullptr, DecoderOpts{}, kLateCoasted));
+    const Watched w = watched(hit, PictureOpts{}, nullptr, DecoderOpts{}, kLateCoasted);
+    const DecoderStats &st = w.st;
+    const bool same = same_pictures(whole, w.pics);
     const bool bare = same_pictures(whole, frames_of(hit, PictureOpts{}, nullptr, kNoFlywheel, kLateCoasted));
-    const DecoderStats st = decode(hit);
     const bool ok = same && !bare && st.starts_put_right + st.fields_coasted >= 15 && st.losses == 0;
     CHECK(ok);
     if (shown(ok))
@@ -433,8 +435,9 @@ static void a_new_rhythm_is_believed() {
   moved_on.d.assign(s.d.begin(), s.d.begin() + at);
   moved_on.d.insert(moved_on.d.end(), s.d.begin() + at + cut, s.d.end());
   const std::vector<Picture> whole = frames_of(s, PictureOpts{});
-  const std::vector<Picture> after = frames_of(moved_on, PictureOpts{}, nullptr, DecoderOpts{}, kLateCoasted);
-  const DecoderStats st = decode(moved_on);
+  const Watched w = watched(moved_on, PictureOpts{}, nullptr, DecoderOpts{}, kLateCoasted);
+  const std::vector<Picture> &after = w.pics;
+  const DecoderStats &st = w.st;
   const bool same = same_pictures(whole, after, 30, 3), ok = same && after.size() + 6 >= whole.size() && st.losses == 0;
   CHECK(ok);
   if (shown(ok))
