@@ -177,11 +177,11 @@ void LineDrawer::draw_colour(uint32_t *row, const SampleRings &R, double base, f
 // A noisy signal's colour (LineInfo::calm). Its coloured snow is as fine as the chroma filter lets it be, a
 // megahertz and more across, and another on every line; the picture's colours change slowly both ways. So U and V
 // are taken at every kCalmStep-th pixel only (a cell: far finer than the smoothing), each cell's are the mean over
-// kCalmCells cells either side, and of that only the share `calm` is this line's: the rest is what the lines above
+// `cells` cells either side (LineInfo::calm_cells), and of that only the share `calm` is this line's: the rest is what the lines above
 // it in the field had there (_calm_u, _calm_v, a cell each). Luma as ever, every pixel. No comb: the neighbours'
 // bursts are noise.
 void LineDrawer::draw_colour_calm(uint32_t *row, const SampleRings &R, double base, float yscale, std::complex<float> rot,
-                                  float k_uv, float calm, int x0, int x1, const DrawParams &p) {
+                                  float k_uv, float calm, int cells, int x0, int x1, const DrawParams &p) {
   using cf = std::complex<float>;
   if (x1 <= x0) return;
   const double *xo = _px_off.data();
@@ -207,7 +207,7 @@ void LineDrawer::draw_colour_calm(uint32_t *row, const SampleRings &R, double ba
   sv[g1 + 1 - g0] = av;
   float *pu = _calm_u.data(), *pv = _calm_v.data();
   for (int g = g0; g <= g1; g++) {
-    const int a = std::max(g0, g - kCalmCells), b = std::min(g1 + 1, g + kCalmCells + 1);
+    const int a = std::max(g0, g - cells), b = std::min(g1 + 1, g + cells + 1);
     const float inv = 1.f / static_cast<float>(b - a);
     pu[g] += calm * ((su[b - g0] - su[a - g0]) * inv - pu[g]);
     pv[g] += calm * ((sv[b - g0] - sv[a - g0]) * inv - pv[g]);
@@ -324,7 +324,7 @@ void LineDrawer::draw(uint32_t *row, const SampleRings &R, const LineInfo &l, bo
     const bool next = l.field == _calm_field && l.k == _calm_k + 1;
     _calm_field = l.field;
     _calm_k = l.k;
-    draw_colour_calm(row, R, base, yscale, rot, k_uv, next ? l.calm : 1.f, x0, x1, p);
+    draw_colour_calm(row, R, base, yscale, rot, k_uv, next ? l.calm : 1.f, l.calm_cells, x0, x1, p);
   } else if (l.col) {
     draw_colour(row, R, base, yscale, rot, k_uv, comb_on, l.pal_v, x0, x1, p);
   } else {

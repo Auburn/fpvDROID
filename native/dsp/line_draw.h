@@ -25,8 +25,11 @@ struct LineInfo {
   double phase = 0;    // the burst's reference phase and amplitude after this line's burst
   float mag = 0;
   // A noisy signal's colour (BurstLock::calm): above 0, U and V are smoothed along the line and down the field,
-  // and this is the share of the line's own in what is drawn (LineDrawer::draw_colour_calm)
+  // and this is the share of the line's own in what is drawn (LineDrawer::draw_colour_calm), smoothed along the
+  // line over calm_cells cells either side (BurstLock::calm_cells: 3 for a noisy signal's averaged colour, fewer
+  // for a moderately noisy one's)
   float calm = 0;
+  int calm_cells = 3;  // ... over so many cells either side along the line
   // Its sync was at other levels than the decoder's (the signal has jumped: SyncLevels::look): it is drawn
   // against these, its own
   std::optional<LevelPair> own;
@@ -61,12 +64,13 @@ private:
   void draw_colour(uint32_t *row, const SampleRings &R, double base, float yscale, std::complex<float> rot, float k_uv,
                    bool comb_on, bool pal_v, int x0, int x1, const DrawParams &p);
   void draw_colour_calm(uint32_t *row, const SampleRings &R, double base, float yscale, std::complex<float> rot,
-                        float k_uv, float calm, int x0, int x1, const DrawParams &p);
+                        float k_uv, float calm, int cells, int x0, int x1, const DrawParams &p);
 
   static constexpr float kCombFull = 0.08f, kCombNone = 0.25f;  // luma mismatch, of black-to-white
   static constexpr int kPad = 3;  // entries past the row's end in what the draw loops read per pixel (set_std)
-  // draw_colour_calm: U and V at every so many pixels (a cell), each the mean over so many cells either side
-  static constexpr int kCalmStep = 4, kCalmCells = 3;
+  // draw_colour_calm: U and V at every so many pixels (a cell), each the mean over LineInfo::calm_cells cells
+  // either side
+  static constexpr int kCalmStep = 4;
   int _w;
   double _fs;
   double _a0 = 0, _aw = 0;  // the picture's start after the line's, and its width, in samples

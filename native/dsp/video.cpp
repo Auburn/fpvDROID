@@ -511,6 +511,7 @@ private:
     l.phase = burst.phase();
     l.mag = burst.size();
     l.calm = l.col ? burst.calm() : 0;
+    l.calm_cells = burst.calm_cells();
     l.fade = filt.fade_noted();
     return l;
   }
