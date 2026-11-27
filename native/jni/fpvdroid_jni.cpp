@@ -72,9 +72,10 @@ void card_start() {
   g_card_on = true;
   g_card = std::thread([] {
     std::vector<uint8_t> px;
+    const int w = DecoderOpts{}.width, h = kNtsc.window.frame_lines();  // the size of an NTSC frame from the decoder
     for (int tick = 1; g_card_on; tick++) {
-      test_card(px, 720, 480, tick);
-      if (g_screen) g_screen->post(Frame{px.data(), 720, 480, &kNtsc, 0, 480});
+      test_card(px, w, h, tick);
+      if (g_screen) g_screen->post(Frame{px.data(), w, h, 0, h});
       std::this_thread::sleep_for(std::chrono::milliseconds(33));
     }
   });

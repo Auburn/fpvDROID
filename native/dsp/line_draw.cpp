@@ -43,8 +43,8 @@ LineDrawer::LineDrawer(int width, double fs) : _w(width), _fs(fs) {
 }
 
 void LineDrawer::set_std(const VideoStd &s, double comb_w) {
-  _a0 = s.a0_us * 1e-6 * _fs;
-  _aw = s.aw_us * 1e-6 * _fs;
+  _a0 = s.window.start_us * 1e-6 * _fs;
+  _aw = s.window.width_us * 1e-6 * _fs;
   _pal = &s == &kPal;
   _comb_w = comb_w;
   // The draw loops take four pixels at a time and may start anywhere (draw), so their last four can reach up
@@ -62,7 +62,7 @@ void LineDrawer::set_std(const VideoStd &s, double comb_w) {
   _calm_v.assign(cells, 0.f);
   _calm_k = -2;
   _px_off.resize(_w + kPad);
-  for (int x = 0; x < _w + kPad; x++) _px_off[x] = s.aw_us * 1e-6 * _fs * x / _w;
+  for (int x = 0; x < _w + kPad; x++) _px_off[x] = _aw * x / _w;
 }
 
 // Without colour: each pixel the luma between the two samples either side, then to bytes. The interpolation and

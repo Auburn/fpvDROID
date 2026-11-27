@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "test_card.h"
+#include "video.h"
 #include "video_renderer.h"
 
 namespace {
@@ -49,7 +50,7 @@ int main(int argc, char **argv) {
   }
   const std::string out = argv[1];
   std::string in;
-  int fw = 720, fh = 484, vw = 2400, vh = 1080;
+  int fw = kp::DecoderOpts{}.width, fh = kp::kNtsc.window.frame_lines(), vw = 2400, vh = 1080;  // an NTSC frame
   bool feed = true;
   kp::ViewOpts o;
   kp::Scene sc;

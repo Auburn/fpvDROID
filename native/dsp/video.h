@@ -12,21 +12,11 @@
 #include <functional>
 #include <vector>
 
+#include "video_std.h"
+
 namespace kp {
 
 using cf = std::complex<float>;
-
-struct VideoStd {
-  double T_us;   // line period
-  // The part of the signal that is drawn (video.cpp: the picture, with a sliver of blanking round it):
-  double a0_us;  // its start after the hsync leading edge ...
-  double aw_us;  // ... and its width
-  int active;    // lines drawn per field ...
-  int skip;      // ... from this many lines after the line of the field's first broad pulse
-  int field_lines;  // whole lines in an odd field; an even one has one more
-  const char *name;
-};
-extern const VideoStd kNtsc, kPal;
 
 // When the lines of a picture, or of a part of one, were taken: for telling how old they are on screen. On the
 // steady clock, in seconds: when the adapter took the sample that was the decoder's newest as a line was drawn,
@@ -44,8 +34,7 @@ struct LineTimes {
 // the picture (finished()); until then the lines from y1 down are still the picture before's.
 struct Frame {
   const uint8_t *data;  // the whole picture, line 0 first
-  int width, height;    // 720 x 484 (NTSC) / 720 x 576 (PAL)
-  const VideoStd *std;
+  int width, height;    // DecoderOpts::width x PictureWindow::frame_lines(): 720 x 484 (NTSC) / 720 x 576 (PAL)
   int y0, y1;           // the lines that are new with this frame ...
   LineTimes times{};    // ... and when they were taken
   bool finished() const { return y1 >= height; }

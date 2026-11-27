@@ -7,14 +7,14 @@
 
 #include "rings.h"
 #include "sync_levels.h"
-#include "video.h"
+#include "video_std.h"
 
 namespace kp {
 
 // A line of video between the decoder's sync tracking and the picture: where it is and what was measured on it.
 struct LineInfo {
   double ls = -1;      // its start (the hsync's leading edge), in samples
-  int64_t k = -1;      // its row in the field's picture; outside 0..active-1 it is not picture
+  int64_t k = -1;      // its row in the field's picture; outside 0 .. PictureWindow::lines - 1 it is not picture
   int field = -1;
   bool col = false;    // drawn in colour
   bool pal_v = false;  // PAL: this line's V is switched

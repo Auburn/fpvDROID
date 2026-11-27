@@ -479,15 +479,16 @@ void PictureFilters::filter_comb(SampleRings &R, const float *d, const uint8_t *
   _chroma_quiet = st.quiet;
 }
 
-void PictureFilters::redo_without_comb(SampleRings &R, double pic0, double aw, bool whole) {
+void PictureFilters::redo_without_comb(SampleRings &R, double pic0, double aw, double end, bool whole) {
   // The whole line: from the first good point SparkleRepair::patch_line may take (8 samples ahead of the
-  // picture) to its last one in luma (20 after it; those of its chroma patches further on lie in blanking, where
-  // there is no colour either way). The left half: to the middle, the last kBlend samples blended into what the
-  // comb made. The filters start kWarm samples ahead, in the sync pulse, and have settled long before the
-  // picture.
+  // picture) to its last one in luma (20 after it, and short of `end`; those of its chroma patches further on lie
+  // in blanking, where there is no colour either way). The left half: to the middle, the last kBlend samples
+  // blended into what the comb made. The filters start kWarm samples ahead, in the sync pulse, and have settled
+  // long before the picture.
   constexpr int kWarm = 128, kBlend = 32;
   const int64_t s0 = static_cast<int64_t>(pic0) - 8;
-  const int64_t s1 = whole ? static_cast<int64_t>(pic0 + aw) + 21 : static_cast<int64_t>(pic0 + 0.5 * aw);
+  const int64_t s1 = whole ? std::min(static_cast<int64_t>(pic0 + aw) + 21, static_cast<int64_t>(end))
+                           : static_cast<int64_t>(pic0 + 0.5 * aw);
   const int64_t back = static_cast<int64_t>(R.n) - (s0 - kWarm);
   if (!R.has(s0 - kWarm, s1, 32)) return;
   const auto fresh = [](Biquad b) {

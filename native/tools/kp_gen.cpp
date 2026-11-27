@@ -51,8 +51,8 @@ struct Std {
   double setup;       // black level (IRE)
   bool pal;
 };
-// NTSC: field = 262.5 lines. Broad pulses start at half-line 6 (line 3); fpvDROID's skip of 18 lines puts
-// the first active line at line 21 (half-line 42). PAL: broad pulses at half-line 0, first active line 22+.
+// NTSC: field = 262.5 lines. Broad pulses start at half-line 6 (line 3); fpvDROID's window, from 18 lines after
+// that (PictureWindow::first_line), has the first active line at line 21 (half-line 42). PAL: broad pulses at half-line 0, first active line 22+.
 const Std kNtsc{1e6 / (4.5e6 / 286), 1050, 6, 6, 42, 240, 9.4, 52.6, 315e6 / 88, 7.5, false};
 const Std kPal{64.0, 1250, 5, 5, 44, 288, 10.5, 52.0, 4433618.75, 0, true};
 

@@ -59,11 +59,14 @@ public:
   // spread) becomes a straight line between the points either side, in the filtered luma and chroma. Chroma is
   // patched further on than luma: its low-pass is narrower, and a patch that ends inside the click's own
   // response there draws a ramp to a wrong colour and leaves the rest as a coloured streak.
+  // end: no luma at or past it is read or written, so that no patch ramps onto the next line's sync, whose front
+  // porch SyncLevels reads up to there. A luma patch whose good point lies past it ends on the sample before
+  // instead. (Chroma patches may run on into the sync, where there is no colour to spoil.)
   // T: the line period in samples. luma_comb: the comb's look at the line before (R.comb) is patched too.
   // colour_fades: the adaptive comb is fading colour in the filter (it is on, without the 3-line comb).
   // Returns true when the line is still badly hit (over 8 % of it lost, or a run too long to patch): pass that
   // to mend_rows().
-  bool patch_line(SampleRings &R, double pic0, double aw, double T, bool luma_comb, bool colour_fades);
+  bool patch_line(SampleRings &R, double pic0, double aw, double end, double T, bool luma_comb, bool colour_fades);
   // Row k of a field (field: its rows of `width` RGBX pixels) has been drawn; hit: patch_line's answer for it.
   // Up to 3 badly hit rows in a row are redrawn from the good rows above and below them in the same field
   // (blended by distance), once the row below is in. Nothing older is used, so there is no tearing in motion; a

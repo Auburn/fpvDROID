@@ -33,8 +33,9 @@ public:
   // With the luma comb: the picture [pic0, pic0 + aw) of a line already in the rings worked out again the way
   // the notch chain does it, from what the comb's ring holds of it: brightness through the notch, colour
   // straight from the signal, not faded. whole: all of it; else its left half, blended into the comb's at the
-  // middle. For the top line of the picture, which has blanking above it (Decoder::top_line).
-  void redo_without_comb(SampleRings &R, double pic0, double aw, bool whole);
+  // middle. Luma at or past `end` is left as it is (SparkleRepair::patch_line's end). For the top line of the
+  // picture, which has blanking above it (Decoder::top_line).
+  void redo_without_comb(SampleRings &R, double pic0, double aw, double end, bool whole);
 
   bool luma_comb() const { return _luma_comb; }
   // the adaptive comb is fading colour in the chain ...

@@ -306,7 +306,7 @@ static void gate_hides_the_frames_after_a_gap() {
   int shown = 0;
   FrameGate g([&](const Frame &) { shown++; });
   const FrameSink in = g.sink();
-  const Frame f{nullptr, 0, 0, nullptr, 0, 0};
+  const Frame f{nullptr, 0, 0, 0, 0};
   in(f);
   in(f);
   CHECK(shown == 2 && g.hidden() == 0);
@@ -320,7 +320,7 @@ static void gate_hides_the_frames_after_a_gap() {
 static void gate_hides_at_most_so_often() {
   int shown = 0;
   FrameGate g([&](const Frame &) { shown++; });
-  const Frame f{nullptr, 0, 0, nullptr, 0, 0};
+  const Frame f{nullptr, 0, 0, 0, 0};
   g.gap(1000);
   g.frame(f);
   // more gaps close behind: the frames already marked go, no new ones are
@@ -337,7 +337,7 @@ static void gate_hides_at_most_so_often() {
 static void gate_switched_off_and_reset() {
   int shown = 0;
   FrameGate g([&](const Frame &) { shown++; });
-  const Frame f{nullptr, 0, 0, nullptr, 0, 0};
+  const Frame f{nullptr, 0, 0, 0, 0};
   g.set_enabled(false);
   g.gap(1000);
   g.frame(f);
@@ -358,7 +358,7 @@ static void gate_hides_the_strips_of_hidden_frames() {
   int strips = 0, finished = 0;
   FrameGate g([&](const Frame &f) { (f.finished() ? finished : strips)++; });
   const FrameSink in = g.sink();
-  const Frame top{nullptr, 720, 480, nullptr, 0, 64}, bottom{nullptr, 720, 480, nullptr, 448, 480};
+  const Frame top{nullptr, 720, 480, 0, 64}, bottom{nullptr, 720, 480, 448, 480};
   in(top);
   g.gap(1000);  // in the middle of a picture
   in(top);

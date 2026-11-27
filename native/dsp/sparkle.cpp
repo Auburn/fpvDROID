@@ -44,9 +44,12 @@ void SparkleRepair::mend_rows(uint8_t *buf, int width, uint64_t field_no, int wh
   _bad_from = -1;
 }
 
-bool SparkleRepair::patch_line(SampleRings &R, double pic0, double aw, double T, bool luma_comb, bool colour_fades) {
+bool SparkleRepair::patch_line(SampleRings &R, double pic0, double aw, double end, double T, bool luma_comb,
+                               bool colour_fades) {
   const int64_t s0 = static_cast<int64_t>(pic0) - 4, s1 = static_cast<int64_t>(pic0 + aw) + 4;
   constexpr int kBack = 3, kFwd = 8, kMaxRun = 64;  // luma: filter spread (samples) either side; longest patch
+  // the furthest luma sample a patch may end on (be read at): one whose good point lies past it ends there instead
+  const int64_t luma_last = static_cast<int64_t>(end) - 1;
   // a run may end kFwd past s1, and the furthest patch ends on the sample its own spread after that
   const int reach = kFwd + std::max({kFwd, _fwd_c, _fwd_low, _fwd_wide});
   if (!R.has(s0, s1 + reach, 32)) return false;
@@ -123,7 +126,7 @@ bool SparkleRepair::patch_line(SampleRings &R, double pic0, double aw, double T,
         (fits(e) ? luma_end : luma_solo) = e;
       }
       luma_fits = fits(luma_end);
-      if (luma_fits) ramp(R.luma, i - kBack, luma_end + kFwd);
+      if (luma_fits) ramp(R.luma, i - kBack, std::min(luma_end + kFwd, luma_last));
     }
     if (i >= chroma_end) {
       chroma_end = j;
