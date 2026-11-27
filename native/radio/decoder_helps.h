@@ -22,6 +22,7 @@ inline constexpr DecoderHelp kDecoderHelps[] = {
     {"KP_LEVELS", &DecoderOpts::follow_levels},
     {"KP_FLYWHEEL", &DecoderOpts::flywheel},
     {"KP_HOLD", &DecoderOpts::hold},
+    {"KP_COAST", &DecoderOpts::coast},
     {"KP_FILTER", &DecoderOpts::channel_filter},
 };
 

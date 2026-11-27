@@ -86,6 +86,13 @@ struct DecoderOpts {
   // The line grid is held through a signal too weak for its lines' hsyncs to be found, by the fold of many
   // lines; such a signal's fields are found by what their half lines are, and it is acquired by that fold.
   bool hold = true;
+  // ... and through a dropout, with nothing of the hsync left even in that fold, the lines and the fields run on
+  // as they were, and nothing found in the noise moves either: for as long as the lock had lasted, coast_s
+  // seconds at most, before it is given up and looked for again. A signal back inside that time has its picture
+  // back at once, in its place; one that is not leaves snow on the screen for that long, as an analogue receiver
+  // does. Off: the lock is given up after half a second without the pulse. (It is part of the hold.)
+  bool coast = true;
+  double coast_s = 5.0;
   // A channel filter ahead of the discriminator while the sync is noisy (channel_filter.h): less of the noise
   // reaches it, and a weak signal's picture has fewer sparkles and less snow. (It goes by the hold's measure of
   // the sync's noise: without the hold there is no filter either.)

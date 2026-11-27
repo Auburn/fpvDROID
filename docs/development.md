@@ -253,6 +253,9 @@ each by itself (from the next channel or rate watched; they are the rows of `kDe
 - `KP_FLYWHEEL`: beginning a field where the fields before say when its vertical sync is not found.
 - `KP_HOLD`: holding the line grid through a signal too weak for its lines' hsyncs to be found (the status line
   then says `held`, and counts `holds`).
+- `KP_COAST`: coasting through a dropout (with the signal gone altogether the lines and the fields run on for as
+  long as the lock had lasted, 5 s at most, where without it the lock is given up after half a second; it is part
+  of the hold).
 - `KP_FILTER`: the channel filter that comes in ahead of the FM detector while the sync is noisy (the status line
   has the `sync snr` it goes by and how wide the filter is; it needs the hold).
 

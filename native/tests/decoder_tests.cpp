@@ -527,7 +527,8 @@ static Signal without_vertical_sync(Signal s, const std::function<int(int64_t)> 
 // hold as well, which keeps the lock through a jump of the levels too (a few lines later than following them does);
 // kNoHold: without the hold alone.
 static const DecoderOpts kNoFlywheel{.flywheel = false, .hold = false}, kNoLevels{.follow_levels = false, .hold = false},
-    kNeither{.follow_levels = false, .flywheel = false, .hold = false}, kNoHold{.hold = false};
+    kNeither{.follow_levels = false, .flywheel = false, .hold = false}, kNoHold{.hold = false},
+    kNoCoast{.coast = false};
 
 // back: only that many of the last pictures of each are compared (0: all of them, and as many of them). within: how
 // far a pixel's red, green or blue may differ (the same signal at other sample numbers is drawn the same to a
@@ -779,8 +780,8 @@ static void a_weak_signal_from_the_start() {
 }
 
 // No signal at all, only noise, for 0.2 s: the grid runs on at the line period, pictures of noise come out in
-// their places, and when the signal is back so are its pictures, to the pixel. For 0.8 s: the lock is given up
-// after half a second, and found again when the signal is back.
+// their places, and when the signal is back so are its pictures, to the pixel. For 0.8 s, after a lock of 0.6 s:
+// the lock is given up after as long as it had lasted, and found again when the signal is back.
 static void nothing_for_a_moment_and_for_long() {
   const Signal s = moving_stripes(1.8);
   const std::vector<Picture> whole = frames_of(s, PictureOpts{});
@@ -1007,6 +1008,30 @@ static void a_noisy_signal_gets_a_channel_filter() {
   }
 }
 
+// The signal gone altogether for a second, after 1.4 s of it, as when the transmitter is out of reach for a
+// moment: the lines and the fields coast through the noise (nothing found in it moves them), the lock is kept,
+// and when the signal is back so are its pictures, in their places, to the pixel. Without coasting the lock is
+// given up after half a second and found again only after the signal is back: pictures are missing.
+static void a_dropout_is_coasted_through() {
+  const Signal s = moving_stripes(2.8);
+  const std::vector<Picture> whole = frames_of(s, PictureOpts{});
+  const Signal f = faded(s, 1.4, 2.4, 0.f, 6.f);
+  const std::vector<Picture> got = frames_of(f, PictureOpts{}, nullptr, DecoderOpts{}, 18);
+  const DecoderStats st = decode(f), bare = decode(f, kNoCoast);
+  const size_t placed = in_place(whole, got);
+  const bool same = same_pictures(whole, got, 8, 3);
+  const bool ok = st.losses == 0 && st.acquisitions == 1 && st.rephases == 0 && got.size() == whole.size() &&
+                  placed == got.size() && same && bare.losses == 1 && bare.acquisitions == 2 &&
+                  bare.frames + 5 <= whole.size();
+  CHECK(ok);
+  if (shown(ok))
+    std::fprintf(stderr, "  gone for 1 s: %zu pictures of %zu, %zu in place, the last 8 the same %d; %llu losses, %llu "
+                 "re-phases, %llu coasted; without coasting %llu pictures, %llu losses, %llu acquisitions\n", got.size(),
+                 whole.size(), placed, same, (unsigned long long)st.losses, (unsigned long long)st.rephases,
+                 (unsigned long long)st.fields_coasted, (unsigned long long)bare.frames,
+                 (unsigned long long)bare.losses, (unsigned long long)bare.acquisitions);
+}
+
 int main() {
   if (std::getenv("KP_TEST_DEBUG")) set_log_debug(true);
   locks_on_a_clean_signal();
@@ -1029,6 +1054,7 @@ int main() {
   the_grid_is_held_through_a_fade();
   a_weak_signal_from_the_start();
   nothing_for_a_moment_and_for_long();
+  a_dropout_is_coasted_through();
   a_block_missing_from_a_weak_signal();
   a_noisy_signal_keeps_its_colour();
   a_noisy_signal_gets_a_channel_filter();
