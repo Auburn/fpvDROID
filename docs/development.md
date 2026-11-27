@@ -244,15 +244,21 @@ off the chip's own recovery from the adapter's USB 3 lock-up (it frees itself wi
 line counts that as `unwedged`), so that each lock-up shows in the log as a stream fault. The app's own, under the same
 extra: `KP_CONCEAL=0` shows the frames torn by a stream restart (at once), and `KP_FAST_CPUS=0` lets Android put
 the two processing threads on any core (from the next open; by default they are kept off the phone's slowest
-cores, where they fall behind). `KP_LEVELS=0`, `KP_FLYWHEEL=0`, `KP_HOLD=0`, `KP_COAST=0` and `KP_FILTER=0` turn
-off the things the decoder does to keep its picture, to see each by itself (from the next channel or rate watched):
-following a signal whose sync levels jump (a light flashing in the picture does that to some transmitters),
-beginning a field where the fields before say when its vertical sync is not found, holding the line grid through a
-signal too weak for its lines' hsyncs to be found (the status line then says `held`, and counts `holds`), coasting
-through a dropout (with the signal gone altogether the lines and the fields run on for as long as the lock had
-lasted, 5 s at most, where without it the lock is given up after half a second; it is part of the hold), and the
-channel filter that comes in ahead of the FM detector while the sync is noisy (the status line has the `sync snr`
-it goes by and how wide the filter is; it needs the hold).
+cores, where they fall behind). The things the decoder does to keep its picture each turn off with `=0`, to see
+each by itself (from the next channel or rate watched; they are the rows of `kDecoderHelps` in
+`native/radio/decoder_helps.h`):
+
+- `KP_LEVELS`: following a signal whose sync levels jump (a light flashing in the picture does that to some
+  transmitters).
+- `KP_FLYWHEEL`: beginning a field where the fields before say when its vertical sync is not found.
+- `KP_HOLD`: holding the line grid through a signal too weak for its lines' hsyncs to be found (the status line
+  then says `held`, and counts `holds`).
+- `KP_COAST`: coasting through a dropout (with the signal gone altogether the lines and the fields run on for as
+  long as the lock had lasted, 5 s at most, where without it the lock is given up after half a second; it is part
+  of the hold).
+- `KP_FILTER`: the channel filter that comes in ahead of the FM detector while the sync is noisy (the status line
+  has the `sync snr` it goes by and how wide the filter is; it needs the hold).
+
 The screen's, at once: `KP_FRONT_BUFFER=0` keeps Vsync off from drawing straight
 into the buffer the display shows (the log says whether the phone can), so that the strips go through the
 compositor; `KP_PRESENT_ALIGN=0` then puts each strip up as it comes (by default they go up once a refresh,

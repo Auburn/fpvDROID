@@ -5,10 +5,12 @@
 #include <cstdint>
 #include <cstdio>
 #include <random>
+#include <string_view>
 #include <vector>
 
 #include "combine.h"
 #include "decode_queue.h"
+#include "decoder_helps.h"
 #include "fallback_policy.h"
 #include "frame_gate.h"
 #include "steps.h"
@@ -624,7 +626,59 @@ static void combiner_first_verdict_is_not_held_to_the_start() {
   CHECK(c.take_stats().lag == -1);
 }
 
+// ------------------------------------------------------------------------------------------ DecoderHelps
+// The table itself: no two rows with one name or one flag.
+static void decoder_helps_one_row_each() {
+  for (const DecoderHelp &a : kDecoderHelps)
+    for (const DecoderHelp &b : kDecoderHelps)
+      if (&a != &b) CHECK(std::string_view(a.name) != b.name && a.flag != b.flag);
+}
+
+// All on to begin with (as DecoderOpts has them), whatever the options they are filled into had.
+static void decoder_helps_start_on() {
+  const DecoderHelps h;
+  DecoderOpts o;
+  for (const DecoderHelp &r : kDecoderHelps) o.*r.flag = false;
+  h.fill(o);
+  for (const DecoderHelp &r : kDecoderHelps) CHECK(o.*r.flag && DecoderOpts{}.*r.flag);
+}
+
+// Each name turns its own flag off and on again, and no other; fill() leaves the options that are not helps alone.
+static void decoder_helps_by_name() {
+  for (const DecoderHelp &r : kDecoderHelps) {
+    DecoderHelps h;
+    CHECK(DecoderHelps::known(r.name));
+    CHECK(h.set(r.name, false));
+    DecoderOpts o;
+    o.width = 360;
+    o.colour = false;
+    h.fill(o);
+    for (const DecoderHelp &other : kDecoderHelps) CHECK(o.*other.flag == (&other != &r));
+    CHECK(o.width == 360 && !o.colour);
+    CHECK(h.set(r.name, true));
+    h.fill(o);
+    for (const DecoderHelp &other : kDecoderHelps) CHECK(o.*other.flag);
+  }
+}
+
+// The radio's other switches and near misses are not helps, and setting one changes nothing.
+static void decoder_helps_not_by_other_names() {
+  for (const char *name : {"KP_CONCEAL", "KP_FAST_CPUS", "KP_FRONT_BUFFER", "WSDR_WEDGE_US", "", "KP_LEVEL",
+                           "KP_LEVELSX", "kp_levels", " KP_HOLD"}) {
+    DecoderHelps h;
+    CHECK(!DecoderHelps::known(name));
+    CHECK(!h.set(name, false));
+    DecoderOpts o;
+    h.fill(o);
+    for (const DecoderHelp &r : kDecoderHelps) CHECK(o.*r.flag);
+  }
+}
+
 int main() {
+  decoder_helps_one_row_each();
+  decoder_helps_start_on();
+  decoder_helps_by_name();
+  decoder_helps_not_by_other_names();
   combiner_starts_with_no_offset();
   combiner_measures_the_offset();
   combiner_flat_picture_keeps_what_it_has();
