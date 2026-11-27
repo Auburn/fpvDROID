@@ -203,8 +203,9 @@ static void a_block_missing_from_a_weak_signal() {
     // vertical sync found: the picture in hand at the jump comes out a field late)
     const std::vector<Picture> whole = frames_of(c.s, PictureOpts{}, nullptr, DecoderOpts{}, 300);
     const Signal f = faded(c.s, 0, 1.6, 0.5f, 6.f);
-    const std::vector<Picture> got = frames_of(f, PictureOpts{}, nullptr, DecoderOpts{}, 18);
-    const DecoderStats st = decode(f);
+    const Watched w = watched(f, PictureOpts{}, nullptr, DecoderOpts{}, 18);
+    const std::vector<Picture> &got = w.pics;
+    const DecoderStats &st = w.st;
     // (when they began, without their pixels)
     const auto from = [](const std::vector<Picture> &v, double t0, double t1) {
       std::vector<Picture> out;
@@ -275,8 +276,9 @@ static void a_noisy_signal_keeps_its_colour() {
     int i = 0;
     for (const float sd : {1.5f, 3.f}) {
       const Signal f = faded(s, 0, 1.0, 0.5f, sd);
-      const std::vector<Picture> got = frames_of(f, PictureOpts{}, nullptr, DecoderOpts{}, 18);
-      const DecoderStats st = decode(f);
+      const Watched w = watched(f, PictureOpts{}, nullptr, DecoderOpts{}, 18);
+      const std::vector<Picture> &got = w.pics;
+      const DecoderStats &st = w.st;
       const auto [r1, b1] = tint(got, 16);
       const double turn = std::fabs(std::remainder(std::atan2(b1, r1) - std::atan2(b0, r0), 2 * M_PI));
       left[i] = std::hypot(r1, b1) / std::max(size0, 1e-9);
