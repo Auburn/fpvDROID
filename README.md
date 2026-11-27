@@ -7,7 +7,7 @@ the camera's picture in colour (NTSC and PAL).
 It is a fork of [kepyur](https://github.com/gilankpam/kepyur) with a new menu, a spectrum analyser, more picture
 processing and lower latency. [What changed since kepyur](#what-changed-since-kepyur) lists all of it.
 
-![The Channel tab, with the live picture in the preview at the bottom left](docs/screenshots/channel.png)
+![The Channel tab, with the live picture in the preview at the bottom left](https://github.com/user-attachments/assets/cc0854fc-a584-41cc-8557-2596b854e0a5)
 
 ## What you need
 
@@ -46,13 +46,13 @@ uninstall it first. An older kepyur build is a separate app and stays installed 
 To get the menu back, press Back, or tap the picture and then the MENU button that shows for three seconds.
 The app remembers your channel for next time.
 
-![The picture full screen, with the menu closed](docs/screenshots/watching.jpg)
+![The picture full screen, with the menu closed](https://github.com/user-attachments/assets/28cd3f45-ae23-4ec9-ac07-b7fb460637e5)
 
 ## Features
 
 ### Spectrum
 
-![The Spectrum tab during a sweep, with a DJI signal, an analog one and two Wi-Fi networks](docs/screenshots/spectrum.png)
+![The Spectrum tab during a sweep, with a DJI signal, an analog one and two Wi-Fi networks](https://github.com/user-attachments/assets/75744b8d-fa79-4152-b092-8f783b886e94)
 
 - A spectrum analyser that sweeps 5635 to 5955 MHz (5340 to 5640 MHz for Lowband) about every two seconds.
 - The channels of the chosen band sit under the graph. Those with a signal are lit and listed, and tapping an
@@ -67,7 +67,7 @@ The app remembers your channel for next time.
 
 ### View
 
-![Goggles mode: the picture twice, side by side](docs/screenshots/goggles.jpg)
+![Goggles mode: the picture twice, side by side](https://github.com/user-attachments/assets/1ad18927-f2cb-4136-98bc-c92292cdff04)
 
 - Aspect ratio: 4:3, or 16:9 for a widescreen camera.
 - Scaling: fit the whole picture with black bars, stretch it to the screen, or crop it to fill the screen.
@@ -82,7 +82,7 @@ picture.
 
 ### Picture
 
-![The Picture tab](docs/screenshots/picture.png)
+![The Picture tab](https://github.com/user-attachments/assets/c7535d96-0799-4dd8-b872-f7562868b1b9)
 
 | Setting | What it does | Default |
 |---|---|---|
@@ -116,7 +116,7 @@ Tested using a 240fps recording, glass to screen latency using a flashing LED
 
 ### Signal
 
-![The Signal tab with diversity on](docs/screenshots/signal.png)
+![The Signal tab with diversity on](https://github.com/user-attachments/assets/6f0a17e9-bf18-470c-b22b-f7a6ea7efb9b)
 
 - Sample rate: 40 MS/s hears more of the channel, 20 MS/s is easier on the USB link. The app switches to 20 by
   itself when 40 keeps dropping out.
