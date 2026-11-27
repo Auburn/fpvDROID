@@ -3,6 +3,7 @@
 //
 //   kp_gen OUT [--mhz 5769] [--centre MHZ (default --mhz)] [--frames 30] [--dev 8] [--cnr 25] [--pal] [--label R4]
 //              [--copy MHZ DB] [--mirror DB]
+//   kp_gen OUT --digital KIND [--mhz 5769] [--centre MHZ] [--snr 20] [--width MHZ] [--seconds 0.25]
 //
 // Writes OUT.cs16 (int16 I,Q at 40 MS/s, 12-bit values << 4, like wsdr_probe) and OUT.json (sample_rate,
 // centre_hz, and what is on the air), which kp_replay and the simulated receiver (kp_sim, KP_SIM_FILE) read.
@@ -10,6 +11,11 @@
 // --copy adds the same picture at MHZ, DB under the transmitter: the copy a strong analog VTX shows beside itself
 // (radio/pilots.h). --mirror adds its mirror image about the centre, DB under it, as a receiver's IQ imbalance makes
 // one. The transmitter keeps the CNR asked for, and the sum stays inside the 12-bit range.
+//
+// --digital: a digital transmitter in place of analog video, for the Spectrum tab's telling them apart
+// (tools/digital_tx.h: models, not captures). KIND: hdzero (continuous OFDM, 27 MHz), narrow (HDZero's 17 MHz mode),
+// dji (18 MHz in DJI's TDD frame with video), dji_idle (the frame with no goggles linked), wifi (16.25 MHz in bursts,
+// 30 % of the time) or ofdm (continuous, --width wide). --snr: its density over the noise's (dB).
 //
 // Picture: 75 % colour bars (top two thirds), a grey ramp, and a white box that moves across the bottom band
 // once per loop, so a frozen picture is obvious; --label puts big text over the bars. Composite levels in IRE
@@ -22,6 +28,8 @@
 #include <random>
 #include <string>
 #include <vector>
+
+#include "digital_tx.h"
 
 namespace {
 
@@ -86,12 +94,78 @@ bool label_lit(const std::string &text, double x, double y) {
   return (glyph(text[ci])[row] >> (4 - col)) & 1;
 }
 
+// int16 as wsdr_probe writes them: 12-bit values << 4
+int16_t q12(double v) { return static_cast<int16_t>(std::lround(std::max(-2047.0, std::min(2047.0, v))) * 16); }
+
+// A recording as kp_replay and kp_sim read it: OUT.cs16 from n samples at 40 MS/s, sample(i) giving each in turn from
+// i = 0 (in 12-bit counts), and OUT.json with the sample rate, the centre, the transmitter's frequency and json_extra
+// (more "key": value pairs). 0 once written.
+template <class F>
+int write_recording(const std::string &out, size_t n, double centre_mhz, double vtx_mhz, const std::string &json_extra,
+                    F sample) {
+  FILE *f = std::fopen((out + ".cs16").c_str(), "wb");
+  if (!f) { std::fprintf(stderr, "cannot write %s.cs16\n", out.c_str()); return 1; }
+  std::vector<int16_t> buf;
+  buf.reserve(1 << 20);
+  for (size_t i = 0; i < n; i++) {
+    const std::complex<double> v = sample(i);
+    buf.push_back(q12(v.real()));
+    buf.push_back(q12(v.imag()));
+    if (buf.size() >= (1 << 20)) {
+      std::fwrite(buf.data(), 2, buf.size(), f);
+      buf.clear();
+    }
+  }
+  std::fwrite(buf.data(), 2, buf.size(), f);
+  std::fclose(f);
+  if (FILE *j = std::fopen((out + ".json").c_str(), "w")) {
+    std::fprintf(j, "{\"sample_rate\": %.0f, \"centre_hz\": %.0f, \"vtx_hz\": %.0f, %s, \"synthetic\": true}\n",
+                 kp::tx::kFs, centre_mhz * 1e6, vtx_mhz * 1e6, json_extra.c_str());
+    std::fclose(j);
+  }
+  return 0;
+}
+
+// --digital: the recording of a digital transmitter (digital_tx.h) with noise of 20 counts per I and Q, as the
+// digital tests have it. A whole number of DJI frames (2.5 ms) long, so that the frame goes on unbroken where kp_sim
+// loops the recording.
+int write_digital(const std::string &out, const std::string &kind, double vtx_mhz, double centre_mhz, double snr_db,
+                  double width_mhz, double seconds) {
+  constexpr double kNoise = 20;
+  kp::tx::Ofdm o;
+  o.offset_hz = (vtx_mhz - centre_mhz) * 1e6;
+  o.snr_db = snr_db;
+  if (kind == "hdzero") o.width_hz = 27e6;
+  else if (kind == "narrow") o.width_hz = 17e6;
+  else if (kind == "dji") { o.width_hz = 18e6; o.dji = 1; }
+  else if (kind == "dji_idle") { o.width_hz = 18e6; o.dji = 2; }
+  else if (kind == "wifi") { o.width_hz = 16.25e6; o.duty = 0.3; }
+  else if (kind != "ofdm") { std::fprintf(stderr, "unknown --digital %s\n", kind.c_str()); return 2; }
+  if (width_mhz > 0) o.width_hz = width_mhz * 1e6;
+  const size_t frame = static_cast<size_t>(2.5e-3 * kp::tx::kFs);
+  const size_t n = std::max<size_t>(1, static_cast<size_t>(std::llround(seconds / 2.5e-3))) * frame;
+  std::mt19937 rng(1);
+  std::normal_distribution<float> nd(0, static_cast<float>(kNoise));
+  std::vector<kp::cf> x(n);
+  for (auto &v : x) v = kp::cf(nd(rng), nd(rng));
+  kp::tx::add_ofdm(x, o, kNoise, rng);
+  char extra[96];
+  std::snprintf(extra, sizeof extra, "\"digital\": \"%s\", \"width_hz\": %.0f", kind.c_str(), o.width_hz);
+  if (const int e = write_recording(out, n, centre_mhz, vtx_mhz, extra, [&](size_t i) { return std::complex<double>(x[i]); }))
+    return e;
+  std::fprintf(stderr, "wrote %s.cs16: %zu samples (%.3f s), %s %.1f MHz wide at %.1f MHz, centre %.1f MHz, %.0f dB\n",
+               out.c_str(), n, n / kp::tx::kFs, kind.c_str(), o.width_hz / 1e6, vtx_mhz, centre_mhz, snr_db);
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char **argv) {
   if (argc < 2) {
     std::fprintf(stderr, "usage: kp_gen OUT [--mhz F] [--centre F] [--frames N] [--dev MHZ] [--cnr DB] [--pal] [--label TEXT]"
-                         " [--copy MHZ DB] [--mirror DB]\n");
+                         " [--copy MHZ DB] [--mirror DB]\n"
+                         "       kp_gen OUT --digital hdzero|narrow|dji|dji_idle|wifi|ofdm [--mhz F] [--centre F] [--snr DB]"
+                         " [--width MHZ] [--seconds S]\n");
     return 2;
   }
   const std::string out = argv[1];
@@ -100,6 +174,8 @@ int main(int argc, char **argv) {
   int frames = 30;
   bool pal = false;
   std::string label;  // big text over the bars (a channel name), so feeds are easy to tell apart
+  std::string digital;  // --digital: a digital transmitter instead
+  double snr_db = 20, width_mhz = 0, seconds = 0.25;
   for (int i = 2; i < argc; i++) {
     const std::string k = argv[i];
     auto v = [&] { return i + 1 < argc ? std::atof(argv[++i]) : (std::fprintf(stderr, "missing value\n"), std::exit(2), 0.0); };
@@ -112,9 +188,14 @@ int main(int argc, char **argv) {
     else if (k == "--label" && i + 1 < argc) label = argv[++i];
     else if (k == "--copy") { copy_mhz = v(); copy_db = v(); }
     else if (k == "--mirror") mirror_db = v();
+    else if (k == "--digital" && i + 1 < argc) digital = argv[++i];
+    else if (k == "--snr") snr_db = v();
+    else if (k == "--width") width_mhz = v();
+    else if (k == "--seconds") seconds = v();
     else { std::fprintf(stderr, "unknown option %s\n", k.c_str()); return 2; }
   }
   if (std::isnan(centre_mhz)) centre_mhz = vtx_mhz;  // the recording centred on its transmitter
+  if (!digital.empty()) return write_digital(out, digital, vtx_mhz, centre_mhz, snr_db, width_mhz, seconds);
   if (std::fabs(copy_mhz - centre_mhz) >= 20) {  // false for NAN: no copy
     std::fprintf(stderr, "--copy %.1f: outside the recording (%.1f MHz +-20)\n", copy_mhz, centre_mhz);
     return 2;
@@ -131,9 +212,6 @@ int main(int argc, char **argv) {
   const double bars[8][3] = {{.75, .75, .75}, {.75, .75, 0}, {0, .75, .75}, {0, .75, 0},
                              {.75, 0, .75}, {.75, 0, 0}, {0, 0, .75}, {0, 0, 0}};
 
-  FILE *f = std::fopen((out + ".cs16").c_str(), "wb");
-  if (!f) { std::fprintf(stderr, "cannot write %s.cs16\n", out.c_str()); return 1; }
-
   // 12-bit full scale is 2047; with a copy or a mirror, the first transmitter gives up enough for the sum not to clip
   const double copy_gain = std::isnan(copy_db) ? 0 : std::pow(10, -copy_db / 20);
   const double mirror_gain = std::isnan(mirror_db) ? 0 : std::pow(10, -mirror_db / 20);
@@ -143,11 +221,20 @@ int main(int argc, char **argv) {
   std::mt19937 rng(1);
   std::normal_distribution<double> nd(0, std::sqrt(noise_pow / 2));
 
-  std::vector<int16_t> buf;
-  buf.reserve(1 << 20);
   double phase = 0;
   const double w_sc = 2 * M_PI * S.fsc;
-  for (size_t i = 0; i < n; i++) {
+  std::string extra = std::string("\"std\": \"") + (pal ? "PAL" : "NTSC") + "\"";
+  char more[160];
+  if (copy_gain > 0) {
+    std::snprintf(more, sizeof more, ", \"copy_hz\": %.0f, \"copy_db\": %g", copy_mhz * 1e6, copy_db);
+    extra += more;
+  }
+  if (mirror_gain > 0) {
+    std::snprintf(more, sizeof more, ", \"mirror_hz\": %.0f, \"mirror_db\": %g", (2 * centre_mhz - vtx_mhz) * 1e6,
+                  mirror_db);
+    extra += more;
+  }
+  const int e = write_recording(out, n, centre_mhz, vtx_mhz, extra, [&](size_t i) {
     const double t = i / fs;
     const double tf = std::fmod(t, frame_s);
     const int frame_no = static_cast<int>(t / frame_s);
@@ -227,25 +314,9 @@ int main(int argc, char **argv) {
       y -= mirror_gain * sp;
     }
     const double re = amp * x + nd(rng), im = amp * y + nd(rng);
-    auto q = [](double v) { return static_cast<int16_t>(std::lround(std::max(-2047.0, std::min(2047.0, v))) * 16); };
-    buf.push_back(q(re));
-    buf.push_back(q(im));
-    if (buf.size() >= (1 << 20)) {
-      std::fwrite(buf.data(), 2, buf.size(), f);
-      buf.clear();
-    }
-  }
-  std::fwrite(buf.data(), 2, buf.size(), f);
-  std::fclose(f);
-  if (FILE *j = std::fopen((out + ".json").c_str(), "w")) {
-    std::fprintf(j, "{\"sample_rate\": %.0f, \"centre_hz\": %.0f, \"vtx_hz\": %.0f, \"std\": \"%s\", \"synthetic\": true",
-                 fs, centre_mhz * 1e6, vtx_mhz * 1e6, pal ? "PAL" : "NTSC");
-    if (copy_gain > 0) std::fprintf(j, ", \"copy_hz\": %.0f, \"copy_db\": %g", copy_mhz * 1e6, copy_db);
-    if (mirror_gain > 0)
-      std::fprintf(j, ", \"mirror_hz\": %.0f, \"mirror_db\": %g", (2 * centre_mhz - vtx_mhz) * 1e6, mirror_db);
-    std::fprintf(j, "}\n");
-    std::fclose(j);
-  }
+    return std::complex<double>(re, im);
+  });
+  if (e) return e;
   std::fprintf(stderr, "wrote %s.cs16: %zu samples (%.3f s, %d %s frames), VTX %.1f MHz, centre %.1f MHz, CNR %.0f dB\n",
                out.c_str(), n, n / fs, frames, pal ? "PAL" : "NTSC", vtx_mhz, centre_mhz, cnr_db);
   if (copy_gain > 0) std::fprintf(stderr, "  a copy at %.1f MHz, %.1f dB under it\n", copy_mhz, copy_db);

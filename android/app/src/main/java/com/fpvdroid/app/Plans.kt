@@ -13,12 +13,13 @@ data class Marker(val name: String, val mhz: Double, val wide: Boolean = false, 
 /**
  * Where the Spectrum tab puts a frequency: on [plan][Plan]'s channel [marker], and on the analog [channel] it would
  * tune. Its [name] is what it is shown as, and what picking it tunes is that same channel (or the frequency
- * itself, on none), unless it is [digital].
+ * itself, on none), unless it is [digital]. [kind]: what the radio recognised the signal there to be ([Carrier.kind]),
+ * said before the channel's name ("DJI CH3", "HDZero R4").
  */
-data class Spot(val mhz: Double, val marker: Marker?, val channel: Channel?) {
-    val name: String get() = marker?.name ?: channel?.name ?: "${mhz.roundToInt()}"
-    /** On a digital system's channel: only analog video can be watched. */
-    val digital: Boolean get() = marker != null && channel == null
+data class Spot(val mhz: Double, val marker: Marker?, val channel: Channel?, val kind: SignalKind? = null) {
+    val name: String get() = (marker?.name ?: channel?.name ?: "${mhz.roundToInt()}").let { if (kind != null) "${kind.label} $it" else it }
+    /** On a digital system's channel, or a signal the radio judged digital: only analog video can be watched. */
+    val digital: Boolean get() = kind != null || (marker != null && channel == null)
 }
 
 /** Whose channels the Spectrum tab marks: an analog band's, DJI's (one of its models) or HDZero's. */

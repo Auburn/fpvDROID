@@ -9,6 +9,29 @@
 
 namespace kp {
 
+// A forward radix-2 FFT of one size (a power of two), its bit-reversed order and its twiddles worked out once: for
+// the many FFTs of one size a sweep step takes (Psd's ~940 of 1024 points, StepGrid's 1875 of 256).
+class Fft {
+public:
+  explicit Fft(int n);
+  int size() const { return _n; }
+  void run(cf *x) const;  // in place
+  // out = the FFT of in[i] * win[i] (n of each), the window put on as the samples are put in bit-reversed order
+  void run(const cf *in, const float *win, cf *out) const;
+
+private:
+  void butterflies(cf *x) const;
+  int _n;
+  std::vector<int> _rev;
+  std::vector<cf> _tw;  // stage by stage: a stage of span 2h has its h twiddles exp(-2 pi i k / 2h) from _tw[h - 1]
+};
+
+// An FFT now and then (the tools' transmitters): Fft(n).run(x), its plan made for the one call.
+void fft_inplace(cf *x, int n);
+
+// The Hann window of n points (periodic: 0.5 - 0.5 cos(2 pi i / n)), as every spectrum here takes it.
+std::vector<float> hann(int n);
+
 // Averaged power spectrum, fftshifted (bin 0 = -fs/2), in dB. Hann window, 50 % overlap.
 class Psd {
 public:
@@ -21,6 +44,7 @@ public:
 
 private:
   int _n;
+  Fft _fft;
   std::vector<float> _win;
   std::vector<cf> _buf, _tmp;
   std::vector<double> _acc;
@@ -28,7 +52,15 @@ private:
   int _frames = 0;
 };
 
-void fft_inplace(cf *x, int n);  // radix-2, n a power of two, forward
+// The chip's DC filter digs a notch this wide either side of a retune's centre: left out of what is measured there.
+constexpr double kDcNotchHz = 0.75e6;
+
+// A spectrum (Psd::db(), bins of bin_hz) median-smoothed over +-0.3 MHz: the DC line and narrow spurs taken out. What
+// every measure of a retune's spectrum reads: a sweep step smooths its spectrum once for all of them.
+std::vector<float> smooth_db(const std::vector<float> &db, double bin_hz);
+
+// The median of v (the upper one of an even count); 0 for none.
+float median_of(std::vector<float> v);
 
 // A hump in the spectrum that looks like an FM video carrier: kHumpMinHz..kHumpMaxHz wide at floor + 6 dB (a VTX
 // next to the phone is about 16 MHz wide).
@@ -73,10 +105,10 @@ public:
   static constexpr float kNone = -1000.f;
 
   BandMap(double lo_hz, double hi_hz, double bin_hz);
-  // One retune's spectrum (Psd::db(): fftshifted, fs wide, centred on the hardware centre centre_hz). Its bins
-  // within +-use_hz of the centre go in, all but the DC point's (the chip's DC filter digs a notch there). A bin
-  // already seen in the last few seconds is averaged with the new value, so a burst of Wi-Fi does not flicker.
-  void add(const std::vector<float> &db, double fs, double centre_hz, double use_hz, int64_t now_ms);
+  // One retune's spectrum through smooth_db (Psd::db(): fftshifted, fs wide, centred on the hardware centre
+  // centre_hz). Its bins within +-use_hz of the centre go in, all but the DC point's (kDcNotchHz). A bin already seen
+  // in the last few seconds is averaged with the new value, so a burst of Wi-Fi does not flicker.
+  void add(const std::vector<float> &smoothed, double fs, double centre_hz, double use_hz, int64_t now_ms);
   // Bins in lo..hi last seen before older_than_ms are forgotten.
   void forget(double lo_hz, double hi_hz, int64_t older_than_ms);
   // lo..hi on the grid (first bin at *first_hz): dB over the floor, kNone where nothing has been seen. A gap of up

@@ -22,7 +22,8 @@ target_compile_definitions(wsdrcore PRIVATE WSDR_JS_BULKIN)
 
 add_library(fpvdroid_dsp STATIC ${ROOT}/native/dsp/video.cpp ${ROOT}/native/dsp/deinterlace.cpp
             ${ROOT}/native/dsp/line_draw.cpp ${ROOT}/native/dsp/picture_filters.cpp ${ROOT}/native/dsp/sparkle.cpp
-            ${ROOT}/native/dsp/spectrum.cpp ${ROOT}/native/dsp/log.cpp)
+            ${ROOT}/native/dsp/spectrum.cpp ${ROOT}/native/dsp/step_grid.cpp ${ROOT}/native/dsp/digital.cpp
+            ${ROOT}/native/dsp/log.cpp)
 target_include_directories(fpvdroid_dsp PUBLIC ${ROOT}/native/dsp)
 target_compile_options(fpvdroid_dsp PRIVATE -O3 -ffast-math)
 

@@ -5,31 +5,59 @@
 
 namespace kp {
 
-void fft_inplace(cf *x, int n) {
-  for (int i = 1, j = 0; i < n; i++) {
-    int bit = n >> 1;
+Fft::Fft(int n) : _n(n), _rev(n), _tw(std::max(1, n - 1)) {
+  for (int i = 0, j = 0; i < n; i++) {
+    _rev[i] = j;
+    int bit = n >> 1;  // j: i with its bits the other way round, counted up from the top bit
     for (; j & bit; bit >>= 1) j ^= bit;
     j ^= bit;
-    if (i < j) std::swap(x[i], x[j]);
   }
-  for (int len = 2; len <= n; len <<= 1) {
-    const double a = -2 * M_PI / len;
-    const cf wl(static_cast<float>(std::cos(a)), static_cast<float>(std::sin(a)));
-    for (int i = 0; i < n; i += len) {
-      cf w(1, 0);
-      for (int k = 0; k < len / 2; k++) {
-        const cf u = x[i + k], v = x[i + k + len / 2] * w;
-        x[i + k] = u + v;
-        x[i + k + len / 2] = u - v;
-        w *= wl;
-      }
+  // each from its own angle, in double: none carries the rounding of the one before
+  for (int h = 1; h < n; h <<= 1)
+    for (int k = 0; k < h; k++) {
+      const double a = -M_PI * k / h;
+      _tw[h - 1 + k] = cf(static_cast<float>(std::cos(a)), static_cast<float>(std::sin(a)));
     }
+}
+
+void Fft::butterflies(cf *x) const {
+  // the first stage's twiddle is 1
+  for (int i = 0; i + 1 < _n; i += 2) {
+    const cf u = x[i], v = x[i + 1];
+    x[i] = u + v;
+    x[i + 1] = u - v;
+  }
+  for (int h = 2; h < _n; h <<= 1) {
+    const cf *w = &_tw[h - 1];
+    for (int i = 0; i < _n; i += 2 * h)
+      for (int k = 0; k < h; k++) {
+        const cf u = x[i + k], v = x[i + k + h] * w[k];
+        x[i + k] = u + v;
+        x[i + k + h] = u - v;
+      }
   }
 }
 
-Psd::Psd(int n) : _n(n), _win(n), _buf(n), _tmp(n), _acc(n, 0.0) {
-  for (int i = 0; i < n; i++) _win[i] = static_cast<float>(0.5 - 0.5 * std::cos(2 * M_PI * i / n));
+void Fft::run(cf *x) const {
+  for (int i = 0; i < _n; i++)
+    if (i < _rev[i]) std::swap(x[i], x[_rev[i]]);
+  butterflies(x);
 }
+
+void Fft::run(const cf *in, const float *win, cf *out) const {
+  for (int i = 0; i < _n; i++) out[_rev[i]] = in[i] * win[i];
+  butterflies(out);
+}
+
+void fft_inplace(cf *x, int n) { Fft(n).run(x); }
+
+std::vector<float> hann(int n) {
+  std::vector<float> w(n);
+  for (int i = 0; i < n; i++) w[i] = static_cast<float>(0.5 - 0.5 * std::cos(2 * M_PI * i / n));
+  return w;
+}
+
+Psd::Psd(int n) : _n(n), _fft(n), _win(hann(n)), _buf(n), _tmp(n), _acc(n, 0.0) {}
 
 void Psd::reset() {
   std::fill(_acc.begin(), _acc.end(), 0.0);
@@ -38,16 +66,20 @@ void Psd::reset() {
 }
 
 void Psd::add(const cf *x, size_t count) {
-  for (size_t i = 0; i < count; i++) {
-    _buf[_fill++] = x[i];
-    if (_fill < static_cast<size_t>(_n)) continue;
-    for (int k = 0; k < _n; k++) _tmp[k] = _buf[k] * _win[k];
-    fft_inplace(_tmp.data(), _n);
-    for (int k = 0; k < _n; k++) _acc[k] += std::norm(_tmp[k]);
+  const size_t n = static_cast<size_t>(_n);
+  while (count > 0) {
+    const size_t take = std::min(count, n - _fill);
+    std::copy(x, x + take, _buf.begin() + static_cast<long>(_fill));
+    x += take;
+    count -= take;
+    _fill += take;
+    if (_fill < n) return;
+    _fft.run(_buf.data(), _win.data(), _tmp.data());
+    for (size_t k = 0; k < n; k++) _acc[k] += std::norm(_tmp[k]);
     _frames++;
     // 50 % overlap
     std::copy(_buf.begin() + _n / 2, _buf.end(), _buf.begin());
-    _fill = _n / 2;
+    _fill = n / 2;
   }
 }
 
@@ -61,11 +93,9 @@ std::vector<float> Psd::db() const {
   return out;
 }
 
-namespace {
-// Median-smoothed spectrum: kills the DC line and narrow carriers (~0.6 MHz window).
-std::vector<float> smooth_db(const std::vector<float> &db, double bin) {
+std::vector<float> smooth_db(const std::vector<float> &db, double bin_hz) {
   const int n = static_cast<int>(db.size());
-  const int hw = std::max(2, static_cast<int>(0.3e6 / bin));
+  const int hw = std::max(2, static_cast<int>(0.3e6 / bin_hz));
   std::vector<float> sm(n), win;
   for (int i = 0; i < n; i++) {
     win.clear();
@@ -75,7 +105,12 @@ std::vector<float> smooth_db(const std::vector<float> &db, double bin) {
   }
   return sm;
 }
-}  // namespace
+
+float median_of(std::vector<float> v) {
+  if (v.empty()) return 0;
+  std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+  return v[v.size() / 2];
+}
 
 StepSignals find_step_signals(const std::vector<float> &db, double fs, double edge_hz) {
   const int n = static_cast<int>(db.size());
@@ -151,7 +186,6 @@ float carrier_snr(const std::vector<float> &db, double fs, double span_hz, doubl
 }
 
 namespace {
-constexpr double kDcHz = 0.75e6;      // the DC notch, left out of a retune's spectrum
 constexpr int64_t kAverageMs = 5000;  // a bin seen this recently is averaged with the new value
 constexpr double kBridgeHz = 3e6;     // the widest gap get() fills in
 constexpr size_t kAnchorBins = 4;     // overlap with fresh bins needed to carry their floor over (2 MHz)
@@ -162,11 +196,10 @@ BandMap::BandMap(double lo_hz, double hi_hz, double bin_hz)
     : _lo(lo_hz), _bin(bin_hz),
       _db(static_cast<size_t>(std::max(1L, std::lround((hi_hz - lo_hz) / bin_hz) + 1)), kNone), _t(_db.size(), 0) {}
 
-void BandMap::add(const std::vector<float> &db, double fs, double centre_hz, double use_hz, int64_t now_ms) {
-  const int n = static_cast<int>(db.size());
+void BandMap::add(const std::vector<float> &sm, double fs, double centre_hz, double use_hz, int64_t now_ms) {
+  const int n = static_cast<int>(sm.size());
   if (n < 16 || fs <= 0) return;
   const double bin = fs / n;
-  const std::vector<float> sm = smooth_db(db, bin);
   // the floor: the lower quartile of the part that is used (the RX filter's roll-off beyond it would pull it down)
   std::vector<float> in;
   for (int i = 0; i < n; i++)
@@ -183,7 +216,7 @@ void BandMap::add(const std::vector<float> &db, double fs, double centre_hz, dou
   std::vector<float> level(static_cast<size_t>(j1 - j0 + 1), kNone);
   for (int j = j0; j <= j1; j++) {
     const double off = _lo + j * _bin - centre_hz;
-    if (std::fabs(off) < kDcHz) continue;
+    if (std::fabs(off) < kDcNotchHz) continue;
     int i0 = static_cast<int>(std::ceil((off - _bin / 2) / bin)) + n / 2;
     int i1 = static_cast<int>(std::floor((off + _bin / 2) / bin)) + n / 2;
     if (i1 < i0) i0 = i1 = static_cast<int>(std::lround(off / bin)) + n / 2;

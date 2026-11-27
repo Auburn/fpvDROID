@@ -71,9 +71,12 @@ class SpectrumView(ctx: Context) : View(ctx) {
         describe()
     }
 
-    /** The spectrum, the plan or the band changed: what is on the air is put on the plan's channels again. */
+    /**
+     * The spectrum, the plan or the band changed: what is on the air is put on the plan's channels again, each with
+     * what the radio recognised it to be.
+     */
     private fun place() {
-        onAir = spectrum?.carriers.orEmpty().sortedBy { it.mhz }.map { OnAir(it, plan.spot(it.mhz, it.widthMhz, band)) }
+        onAir = spectrum?.carriers.orEmpty().sortedBy { it.mhz }.map { OnAir(it, plan.spot(it.mhz, it.widthMhz, band).copy(kind = it.kind)) }
         names = null
         describe()
         invalidate()

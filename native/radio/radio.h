@@ -62,7 +62,9 @@ public:
   void watch(double hz);
   void stream_test(int rate_sel, double seconds);
   // Sweep lo..hi at 40 MS/s until the next mode call (sweep.h: a retune every 30 MHz), each step's spectrum into the
-  // band picture (spectrum_json). One pass over 300 MHz is 11 or 12 retunes. Scans add their steps to it too.
+  // band picture (spectrum_json). One pass over 300 MHz is 11 or 12 retunes. Scans add their steps to it too. Each
+  // sweep step's capture also says what it recognises on the air (sweep.h: StepAnalysers), such as which signals are
+  // DJI, HDZero or another digital system (digital.h); scans do not judge that.
   void sweep(double lo_hz, double hi_hz);
   void idle();
   // The three setters below only take effect at the next watch() (the next tune). Each returns true when it
@@ -106,8 +108,15 @@ public:
   std::string status_json();   // for the UI (polled); its "pilots" are the scan under way's, or the last one's
   // The band picture over lo..hi, for the spectrum page (polled while it is shown):
   //   {"first_mhz", "bin_mhz", "db": [dB over the noise floor, null where nothing has been seen],
-  //    "carriers": [{"mhz", "width", "snr"}], "at_mhz": the step being taken now (0: not sweeping or scanning),
-  //    "at_width_mhz", "sweeps": passes finished since sweep() (0 while the first is under way)}
+  //    "carriers": [{"mhz", "width", "snr", "kind"}], "at_mhz": the step being taken now (0: not sweeping or scanning),
+  //    "at_width_mhz", "sweeps": passes finished since sweep() (0 while the first is under way),
+  //    "signals": [{"lo_mhz", "hi_mhz", "kind", "label", "active"}]}
+  // "signals": what sweeps have recognised on the air reaching into lo..hi, each a span of the band, by its "kind":
+  //   "dji", "hdzero", "hdzero_narrow" or "digital": digital video (digital.h), the edges of its block as measured.
+  //   "label" is the system ("DJI", "HDZero", "HDZero narrow", "Digital"), "active" true (a video link sends all the
+  //   time it is on). Kept until the sweeps over it have not found it for 8 s, and after the sweep stops.
+  // Other kinds may join the list (a reader skips one it does not know): "active" says in use, false on the air but
+  // idle. A carrier on a signal has that signal's "kind"; one with none is not recognised (analog, or not judged).
   std::string spectrum_json(double lo_hz, double hi_hz);
 
 private:
@@ -181,8 +190,8 @@ private:
   uint64_t _rec_left = 0, _rec_samples = 0;
   double _rec_fs = 0, _rec_centre = 0, _rec_shift = 0;
   Pilots _pilots;  // what the scan under way, or the last one, found (begin_scan empties it)
-  BandMap _band;  // what scans and sweeps have seen (Sweep::kBandLo..kBandHi)
-  Sweep _sweep;   // the span and the passes of the sweep asked for last
+  BandPicture _band;  // what scans and sweeps have seen, and what sweeps have recognised in it (sweep.h)
+  Sweep _sweep;       // the span and the passes of the sweep asked for last
   bool _superspeed = false, _open = false;
   std::string _chip;
 
@@ -235,6 +244,7 @@ private:
   // back to the start by scan() for the status to show until that thread takes the new scan up.
   std::atomic<size_t> _step{0}, _plan_n{0};
   std::vector<Hump> _humps;  // this step's candidates (from the first kPsdSpan of the capture)
+  StepAnalysers _analysers;  // what each sweep step's capture is measured for (sweep.h)
   double _resume_hz = 0;
   // test
   uint64_t _test_banks = 0, _test_gaps = 0, _test_last_seq = 0, _test_runs = 0;
