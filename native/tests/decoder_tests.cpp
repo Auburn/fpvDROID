@@ -7,8 +7,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <optional>
 #include <vector>
 
+#include "field_rhythm.h"
 #include "video.h"
 
 using namespace kp;
@@ -22,6 +24,9 @@ static int g_checks = 0, g_failed = 0;
       std::fprintf(stderr, "%s:%d: CHECK failed: %s\n", __FILE__, __LINE__, #c);  \
     }                                                                             \
   } while (0)
+
+// A case's numbers are printed when it failed, or for all cases with KP_TEST_VERBOSE set.
+static bool shown(bool ok) { return !ok || std::getenv("KP_TEST_VERBOSE"); }
 
 // ---------------------------------------------------------------------------------------- the signal
 // A grey NTSC picture as the decoder gets it: discriminator output in MHz at 20 MS/s, sync at the low end.
@@ -160,8 +165,9 @@ constexpr double kT0 = 1000.0;  // when sample 0 was taken, as the decoder is to
 // The signal through a decoder with the switches p, in blocks of 4096, each with the time its last sample was
 // taken: its finished pictures. Checks as it goes that a picture's frames (several with strips) run down the picture
 // without gaps or overlaps, and come out a strip's worth at a time as the lines are decoded.
-// (late: how many lines after its newest line a frame may come out. A field whose vertical sync does not show is
-// waited on for two lines more.)
+// (late: how many lines after its newest line a frame may come out. kLateCoasted: where a field's vertical sync
+// does not show, the field is waited on for two lines more, and a start that is found waits a line itself.)
+static constexpr double kLateCoasted = 13;
 static std::vector<Picture> frames_of(const Signal &s, PictureOpts p, int *strips_per_frame = nullptr,
                                       const DecoderOpts &o = DecoderOpts{}, double late = 10) {
   std::vector<Picture> out;
@@ -287,7 +293,7 @@ static void the_levels_jump_with_a_flashing_light() {
                       missed <= kJumpsASecond * 8 &&
                       (tau > 0 || st.level_jumps == kJumpsASecond);  // (a slow move is partly followed without)
       CHECK(ok);
-      if (!ok || std::getenv("KP_TEST_VERBOSE"))
+      if (shown(ok))
         std::fprintf(stderr, "  %+.1f depths over %.1f ms: %llu acquisitions, %llu losses, %llu re-phases, %llu fields "
                      "(steady: %llu), %lld lines without their hsync, %llu level jumps\n", depths, tau * 1e3,
                      (unsigned long long)st.acquisitions, (unsigned long long)st.losses,
@@ -321,13 +327,60 @@ static void the_picture_keeps_its_grey_through_a_jump() {
     // it over one more either side
     const bool ok = f.size() == steady.size() && off <= kJumpsASecond * 4;
     CHECK(ok);
-    if (!ok || std::getenv("KP_TEST_VERBOSE"))
+    if (shown(ok))
       std::fprintf(stderr, "  %+.1f depths: %zu frames (steady: %zu), %d rows off their grey\n", depths, f.size(),
                           steady.size(), off);
   }
 }
 
 // ---------------------------------------------------------------------------------------- the vertical flywheel
+
+// The rhythm by itself (field_rhythm.h), on line numbers alone: where a field begins for the starts found, or for
+// none found. NTSC: an odd field (kind 0) of 262 lines, then an even one (kind 1) of 263.
+static void the_rhythm_on_line_numbers() {
+  using Start = std::optional<FieldStart>;
+  const int64_t lines = 262;
+  const FieldStart none{-1, 0}, odd{0, 100}, even{1, 362}, next_odd{0, 625};
+  {
+    FieldRhythm r;
+    CHECK(r.overdue(none, 5000) == std::nullopt);  // no rhythm before the first start
+    // the standard's rhythm is taken as read from the first start found
+    CHECK(r.found(none, odd, lines) == Start(odd));
+    CHECK(r.overdue(odd, even.line + 1) == std::nullopt);  // a start may yet be found a line late
+    CHECK(r.overdue(odd, even.line + 2) == Start(even));   // none two lines on: the field begins where it was due
+    CHECK(r.found(odd, even, lines) == Start(even));
+    // a start a line or two off, or on its line as the other kind, is put where it was due
+    CHECK(r.found(even, FieldStart{0, 626}, lines) == Start(next_odd));
+    CHECK(r.found(even, FieldStart{0, 627}, lines) == Start(next_odd));
+    CHECK(r.found(even, FieldStart{1, 625}, lines) == Start(next_odd));
+    CHECK(r.found(even, FieldStart{0, 624}, lines) == Start(next_odd));
+    CHECK(r.found(even, next_odd, lines) == Start(next_odd));
+    // far off: passed over. The third in a row is where the field begins, and the standard's rhythm is forgotten
+    CHECK(r.found(even, FieldStart{0, 500}, lines) == std::nullopt);
+    CHECK(r.found(even, FieldStart{0, 501}, lines) == std::nullopt);
+    CHECK(r.found(even, FieldStart{0, 502}, lines) == Start(FieldStart{0, 502}));
+    CHECK(r.overdue(FieldStart{0, 502}, 5000) == std::nullopt);
+    // the source's own is learnt once it is seen twice running: here fields that are all alike, 262 lines each,
+    // the first of them found three fields on
+    CHECK(r.found(FieldStart{0, 502}, FieldStart{0, 1288}, lines) == Start(FieldStart{0, 1288}));
+    CHECK(r.overdue(FieldStart{0, 1288}, 5000) == std::nullopt);
+    CHECK(r.found(FieldStart{0, 1288}, FieldStart{0, 1550}, lines) == Start(FieldStart{0, 1550}));
+    CHECK(r.overdue(FieldStart{0, 1550}, 1812 + 2) == Start(FieldStart{0, 1812}));
+    // ... and the standard's again when it leads from one start found to the next
+    r.forget();
+    CHECK(r.found(FieldStart{0, 1550}, FieldStart{1, 1812}, lines) == Start(FieldStart{1, 1812}));
+    CHECK(r.overdue(FieldStart{1, 1812}, 2075 + 2) == Start(FieldStart{0, 2075}));
+  }
+  {
+    // a jump in the stream loses the count of lines: nothing is due, and the next start found is taken as it is
+    FieldRhythm r;
+    CHECK(r.found(none, odd, lines) == Start(odd));
+    r.forget();
+    CHECK(r.overdue(odd, 5000) == std::nullopt);
+    CHECK(r.found(odd, FieldStart{1, 437}, lines) == Start(FieldStart{1, 437}));
+    CHECK(r.overdue(FieldStart{1, 437}, 700 + 2) == Start(FieldStart{0, 700}));
+  }
+}
 
 // The signal with the vertical sync of some fields damaged: of its 6 half lines of broad pulses, the first
 // gone(field) are blanked. 6: the field has no vertical sync; 2 or 3: it shows a line late; 1: it shows as the
@@ -342,13 +395,9 @@ static Signal without_vertical_sync(Signal s, const std::function<int(int64_t)> 
   return s;
 }
 
-// The decoder without its following of level jumps, without its flywheel
-static DecoderOpts without(bool levels, bool flywheel) {
-  DecoderOpts o;
-  o.follow_levels = !levels;
-  o.flywheel = !flywheel;
-  return o;
-}
+// The decoder without its vertical flywheel, without its following of level jumps, with neither
+static const DecoderOpts kNoFlywheel{.flywheel = false}, kNoLevels{.follow_levels = false},
+    kNeither{.follow_levels = false, .flywheel = false};
 
 // back: only that many of the last pictures of each are compared (0: all of them, and as many of them). within: how
 // far a pixel's red, green or blue may differ (the same signal at other sample numbers is drawn the same to a
@@ -378,21 +427,22 @@ static void fields_coast_through_a_missing_vertical_sync() {
     const auto two_of_three = [](int64_t f0) { return [f0](int64_t f) { return f >= f0 && f % 3 != 0 ? 6 : 0; }; };
     const Signal hit = without_vertical_sync(s, two_of_three(from), per_field);
     const std::vector<Picture> whole = frames_of(s, PictureOpts{});
-    const std::vector<Picture> coasted = frames_of(hit, PictureOpts{}, nullptr, DecoderOpts{}, 13);
+    const std::vector<Picture> coasted = frames_of(hit, PictureOpts{}, nullptr, DecoderOpts{}, kLateCoasted);
     // ... and gone from the very start: the rhythm is had from the fields that are found, a few fields apart
     const DecoderStats sparse = decode(without_vertical_sync(s, two_of_three(0), per_field));
-    CHECK(sparse.frames + 30 >= whole.size() && sparse.losses == 0);
-    if (sparse.frames + 30 < whole.size() || std::getenv("KP_TEST_VERBOSE"))
+    const bool sparse_ok = sparse.frames + 30 >= whole.size() && sparse.losses == 0;
+    CHECK(sparse_ok);
+    if (shown(sparse_ok))
       std::fprintf(stderr, "  %d half lines a field, two vertical syncs in three gone from the start: %llu pictures of "
                    "%zu (%llu coasted)\n", per_field, (unsigned long long)sparse.frames, whole.size(),
                    (unsigned long long)sparse.fields_coasted);
-    const DecoderStats st = decode(hit), bare = decode(hit, without(false, true));
-    const bool learnt = same_pictures(whole, frames_of(s, PictureOpts{}, nullptr, without(false, true)), 40);
+    const DecoderStats st = decode(hit), bare = decode(hit, kNoFlywheel);
+    const bool learnt = same_pictures(whole, frames_of(s, PictureOpts{}, nullptr, kNoFlywheel), 40);
     const bool ok = whole.size() >= 50 && same_pictures(whole, coasted) && learnt && st.fields_coasted >= 20 &&
                     st.acquisitions == 1 && st.losses == 0 && bare.frames + 20 <= whole.size() &&
                     bare.fields_coasted == 0;
     CHECK(ok);
-    if (!ok || std::getenv("KP_TEST_VERBOSE"))
+    if (shown(ok))
       std::fprintf(stderr, "  %d half lines a field: %zu pictures (the last 40 as without the flywheel: %d), %zu with "
                    "two vertical syncs in three gone (%llu coasted), %llu without the flywheel\n", per_field,
                    whole.size(), learnt, coasted.size(), (unsigned long long)st.fields_coasted,
@@ -408,12 +458,12 @@ static void a_field_start_found_off_is_put_right() {
   const std::vector<Picture> whole = frames_of(s, PictureOpts{});
   for (const int gone : {1, 2, 3}) {
     const Signal hit = without_vertical_sync(s, [gone](int64_t f) { return f >= 8 && f % 3 != 0 ? gone : 0; });
-    const bool same = same_pictures(whole, frames_of(hit, PictureOpts{}, nullptr, DecoderOpts{}, 13));
-    const bool bare = same_pictures(whole, frames_of(hit, PictureOpts{}, nullptr, without(false, true), 13));
+    const bool same = same_pictures(whole, frames_of(hit, PictureOpts{}, nullptr, DecoderOpts{}, kLateCoasted));
+    const bool bare = same_pictures(whole, frames_of(hit, PictureOpts{}, nullptr, kNoFlywheel, kLateCoasted));
     const DecoderStats st = decode(hit);
     const bool ok = same && !bare && st.starts_put_right + st.fields_coasted >= 15 && st.losses == 0;
     CHECK(ok);
-    if (!ok || std::getenv("KP_TEST_VERBOSE"))
+    if (shown(ok))
       std::fprintf(stderr, "  %d half lines of the vertical sync gone: pictures the same %d (without the flywheel %d), "
                    "%llu starts put right, %llu fields coasted\n", gone, same, bare,
                    (unsigned long long)st.starts_put_right, (unsigned long long)st.fields_coasted);
@@ -430,11 +480,11 @@ static void a_new_rhythm_is_believed() {
   moved_on.d.assign(s.d.begin(), s.d.begin() + at);
   moved_on.d.insert(moved_on.d.end(), s.d.begin() + at + cut, s.d.end());
   const std::vector<Picture> whole = frames_of(s, PictureOpts{});
-  const std::vector<Picture> after = frames_of(moved_on, PictureOpts{}, nullptr, DecoderOpts{}, 13);
+  const std::vector<Picture> after = frames_of(moved_on, PictureOpts{}, nullptr, DecoderOpts{}, kLateCoasted);
   const DecoderStats st = decode(moved_on);
   const bool same = same_pictures(whole, after, 30, 3), ok = same && after.size() + 6 >= whole.size() && st.losses == 0;
   CHECK(ok);
-  if (!ok || std::getenv("KP_TEST_VERBOSE"))
+  if (shown(ok))
     std::fprintf(stderr, "  125 lines cut out: %zu pictures (whole: %zu), the last 30 the same %d, %llu coasted\n",
                  after.size(), whole.size(), same, (unsigned long long)st.fields_coasted);
 }
@@ -447,13 +497,13 @@ static void levels_and_flywheel_together_and_apart() {
   const DecoderStats steady = decode(plain);
   for (const double depths : {1.3, -1.3, -2.0}) {
     const Signal s = moved(plain, flashing(depths * (kBlank - kTip), 0.5e-3));
-    const DecoderStats both = decode(s), levels = decode(s, without(false, true)),
-                       fly = decode(s, without(true, false)), neither = decode(s, without(true, true));
+    const DecoderStats both = decode(s), levels = decode(s, kNoFlywheel),
+                       fly = decode(s, kNoLevels), neither = decode(s, kNeither);
     const bool ok = both.losses == 0 && both.fields == steady.fields && levels.losses == 0 &&
                     levels.fields + 1 >= steady.fields && fly.losses >= 5 && neither.losses >= 5 &&
                     fly.frames + 20 < both.frames;
     CHECK(ok);
-    if (!ok || std::getenv("KP_TEST_VERBOSE"))
+    if (shown(ok))
       std::fprintf(stderr, "  %+.1f depths: fields / losses with both %llu / %llu, levels alone %llu / %llu, flywheel "
                    "alone %llu / %llu, neither %llu / %llu (steady: %llu)\n", depths,
                    (unsigned long long)both.fields, (unsigned long long)both.losses,
@@ -473,6 +523,7 @@ int main() {
   frames_say_when_their_lines_were_taken();
   the_levels_jump_with_a_flashing_light();
   the_picture_keeps_its_grey_through_a_jump();
+  the_rhythm_on_line_numbers();
   fields_coast_through_a_missing_vertical_sync();
   a_field_start_found_off_is_put_right();
   a_new_rhythm_is_believed();

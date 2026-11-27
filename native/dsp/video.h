@@ -22,6 +22,7 @@ struct VideoStd {
   double aw_us;  // active video width
   int active;    // active lines per field
   int skip;      // lines from the field's first broad pulse to the first active line
+  int field_lines;  // whole lines in an odd field; an even one has one more
   const char *name;
 };
 extern const VideoStd kNtsc, kPal;

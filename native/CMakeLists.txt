@@ -9,8 +9,8 @@ set(FPVDROID_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
 option(FPVDROID_RADIO "Build the radio (wifi-sdr + devourer + libusb)" ON)
 
 # ---- DSP: no hardware, shared by the app and the desktop tools ----
-add_library(fpvdroid_dsp STATIC dsp/video.cpp dsp/deinterlace.cpp dsp/line_draw.cpp dsp/picture_filters.cpp
-            dsp/sparkle.cpp dsp/spectrum.cpp dsp/log.cpp)
+add_library(fpvdroid_dsp STATIC dsp/video.cpp dsp/deinterlace.cpp dsp/field_rhythm.cpp dsp/line_draw.cpp
+            dsp/picture_filters.cpp dsp/sparkle.cpp dsp/spectrum.cpp dsp/sync_levels.cpp dsp/log.cpp)
 target_include_directories(fpvdroid_dsp PUBLIC dsp)
 target_compile_options(fpvdroid_dsp PRIVATE -O3 -ffast-math -Wall -Wextra)
 if(ANDROID)

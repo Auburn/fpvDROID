@@ -1,8 +1,9 @@
 // kp_replay: run fpvDROID's scanner DSP and video decoder over a recording (.cs16 + .json from wsdr_probe,
 // or .sigmf-data + .sigmf-meta) and print lock numbers. The bench for lock robustness.
 //
-//   kp_replay REC.cs16 [--offset HZ] [--start S] [--seconds S] [--cnr DB] [--fs HZ] [--mix HZ] [--as20]
-//             [--frames] [--woven] [--comb] [--luma-comb] [--adaptive] [--smooth] [--repair] [-v]
+//   kp_replay REC.cs16 [--offset HZ] [--start S] [--seconds S] [--cnr DB] [--fs HZ] [--mix HZ] [--flash MHZ]
+//             [--as20] [--frames] [--woven] [--comb] [--luma-comb] [--adaptive] [--smooth] [--repair]
+//             [--no-levels] [--no-flywheel] [-v]
 //   --comb: the 3-line colour comb. --luma-comb, --adaptive, --smooth, --repair: the picture switches of video.h
 //   (comb filter, clean OSD edges, smooth lines, sparkle repair). --as20: as the adapter delivers it at 20 MS/s.
 //   --mix HZ: the recording shifted by HZ first (scanner edge tests). --fs HZ: for a recording without a .json.
@@ -37,8 +38,9 @@ static double json_number(const std::string &txt, const char *key) {
 int main(int argc, char **argv) {
   std::string file;
   double offset = NAN, start = 0, seconds = 0, cnr = 0, fs = 40e6, mix = 0, flash = 0;
-  bool frames = false, woven = false, as20 = false, no_levels = false, no_flywheel = false;
+  bool frames = false, as20 = false;
   PictureOpts pic;
+  DecoderOpts dec;
   for (int i = 1; i < argc; i++) {
     const std::string k = argv[i];
     auto v = [&] { return i + 1 < argc ? argv[++i] : (std::fprintf(stderr, "missing value\n"), std::exit(2), ""); };
@@ -49,11 +51,11 @@ int main(int argc, char **argv) {
     else if (k == "--fs") fs = std::atof(v());
     else if (k == "--mix") mix = std::atof(v());
     else if (k == "--flash") flash = std::atof(v());
-    else if (k == "--no-levels") no_levels = true;
-    else if (k == "--no-flywheel") no_flywheel = true;
+    else if (k == "--no-levels") dec.follow_levels = false;
+    else if (k == "--no-flywheel") dec.flywheel = false;
     else if (k == "--as20") as20 = true;  // emulate the adapter at 20 MS/s: ~18.4 MHz filter, decimate by 2
     else if (k == "--frames") frames = true;
-    else if (k == "--woven") woven = true;
+    else if (k == "--woven") dec.fields = false;
     else if (k == "--comb") pic.chroma_comb = true;
     else if (k == "--luma-comb") pic.luma_comb = true;
     else if (k == "--adaptive") pic.adaptive_comb = true;
@@ -63,7 +65,8 @@ int main(int argc, char **argv) {
     else if (k[0] != '-') file = k;
     else {
       std::fprintf(stderr, "usage: kp_replay REC.cs16 [--offset HZ] [--start S] [--seconds S] [--cnr DB] [--fs HZ] [--mix HZ] [--flash MHZ]\n"
-                           "       [--as20] [--frames] [--woven] [--comb] [--luma-comb] [--adaptive] [--smooth] [--repair] [-v]\n");
+                           "       [--as20] [--frames] [--woven] [--comb] [--luma-comb] [--adaptive] [--smooth] [--repair]\n"
+                           "       [--no-levels] [--no-flywheel] [-v]\n");
       return 2;
     }
   }
@@ -163,16 +166,12 @@ int main(int argc, char **argv) {
     return o;
   };
   const double fs_dec = as20 ? fs / 2 : fs;
-  DecoderOpts o;
-  o.fields = !woven;
-  o.follow_levels = !no_levels;
-  o.flywheel = !no_flywheel;
   int fw = 0, fh = 0;
   FrontEnd fe(fs_dec, offset, [&](const Frame &fr) {
     fw = fr.width;
     fh = fr.height;
     if (frames) std::fwrite(fr.data, 1, static_cast<size_t>(fr.width) * fr.height * 4, stdout);
-  }, o, pic);
+  }, dec, pic);
   std::mt19937 rng(1);
   std::normal_distribution<float> nd(0.f, 1.f);
   float noise_sd = 0;
