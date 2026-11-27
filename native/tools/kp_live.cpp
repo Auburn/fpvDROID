@@ -6,7 +6,7 @@
 //   options: --offset-tune (hardware centre beside the pilot), --diversity (antennas A + B combined; their numbers
 //   printed every second), --msps 20 (watch at 20 MS/s instead of 40), --repair (sparkle repair), --luma-comb,
 //   --adaptive (comb), --smooth (lines), --comb (the 3-line colour comb)
-//   ... --frames | ffplay -f rawvideo -pixel_format rgb0 -video_size 720x480 -framerate 60 -fflags nobuffer -i -
+//   ... --frames | ffplay -f rawvideo -pixel_format rgb0 -video_size 720x484 -framerate 60 -fflags nobuffer -i -
 #include <atomic>
 #include <chrono>
 #include <csignal>

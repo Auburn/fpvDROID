@@ -73,13 +73,14 @@ public:
   // where the levels were ends the run at once, lines that cannot say (the vertical interval's) after a few.
   LineLevels look(const SampleRings &R, double ls);
 
-private:
-  static constexpr uint64_t kSettle = 64;  // gated lines
-  static constexpr int kJumpLines = 3, kFastLines = 128;
   // Where a line's sync is read, in us from its hsync's leading edge: the tip inside the pulse (4.7 us long) and
   // the back porch behind it (the burst averages out), each with its middle for look()'s two halves, and the
   // front porch ahead of the edge.
   static constexpr double kTipUs[3] = {1.2, 2.4, 3.6}, kPorchUs[3] = {5.8, 7.3, 8.8}, kFrontUs[2] = {1.1, 0.4};
+
+private:
+  static constexpr uint64_t kSettle = 64;  // gated lines
+  static constexpr int kJumpLines = 3, kFastLines = 128;
 
   bool from_hist(uint32_t total, float &tip_o, float &blank_o);
 

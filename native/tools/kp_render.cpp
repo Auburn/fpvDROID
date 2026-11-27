@@ -1,7 +1,7 @@
 // kp_render: the app's video renderer (native/render) off screen, for looking at what a view setting does
 // without a phone. Needs EGL + OpenGL ES 3 (Mesa's software renderer will do).
 //
-//   kp_render OUT.ppm [--in FRAME.rgbx --size 720x480] [--view 2400x1080] [--aspect 4:3|16:9]
+//   kp_render OUT.ppm [--in FRAME.rgbx --size 720x484] [--view 2400x1080] [--aspect 4:3|16:9]
 //             [--fit fit|stretch|crop] [--scale 1.0] [--stereo [--eye 0.0] [--offset 0.0,0.0]] [--gain 1]
 //             [--nofeed] [--label R8] [--inset 0..1 --box X,Y,W,H --radius R]
 //
@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "test_card.h"
+#include "video.h"
 #include "video_renderer.h"
 
 namespace {
@@ -49,7 +50,7 @@ int main(int argc, char **argv) {
   }
   const std::string out = argv[1];
   std::string in;
-  int fw = 720, fh = 480, vw = 2400, vh = 1080;
+  int fw = kp::DecoderOpts{}.width, fh = kp::kNtsc.window.frame_lines(), vw = 2400, vh = 1080;  // an NTSC frame
   bool feed = true;
   kp::ViewOpts o;
   kp::Scene sc;

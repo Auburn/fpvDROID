@@ -37,7 +37,7 @@ void main() {
 }
 )";
 
-// The picture (or the NO SIGNAL card). Bicubic (Catmull-Rom) where it is enlarged: a 480-line frame is enlarged
+// The picture (or the NO SIGNAL card). Bicubic (Catmull-Rom) where it is enlarged: a 484-line frame is enlarged
 // 2-3 times on a phone, and plain bilinear filtering turns that into soft blocks. 9 taps: each pair of inner
 // weights shares one bilinear fetch, all from the full-size level (the card has smaller ones, for the preview).
 // Its window may have round corners (the menu's preview): outside them nothing, along them a pixel's blend.

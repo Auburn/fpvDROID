@@ -13,6 +13,9 @@
 #include "field_rhythm.h"
 #include "fold.h"
 #include "log.h"
+#include "rings.h"
+#include "sparkle.h"
+#include "sync_levels.h"
 #include "sync_noise.h"
 #include "video.h"
 
@@ -244,7 +247,7 @@ static void strips_add_up_to_the_frames() {
     }
     CHECK(same);
     CHECK(same_times);
-    // NTSC: 240 field lines, 32 to a strip (a strip may wait 3 lines for sparkle repair, one for smooth lines)
+    // NTSC: 242 field lines, 32 to a strip (a strip may wait 3 lines for sparkle repair, one for smooth lines)
     CHECK(per_frame >= 7 && per_frame <= 9);
     if (!same || per_frame < 7 || per_frame > 9)
       std::fprintf(stderr, "  smooth %d repair %d comb %d: %zu / %zu frames, %d strips a frame\n", p.smooth_lines,
@@ -260,7 +263,7 @@ static void frames_say_when_their_lines_were_taken() {
   CHECK(f.size() >= 8);
   for (size_t i = 2; i < f.size(); i++) {
     const double lines = (f[i].times.t_last - f[i].times.t_first) * kFs / kT;
-    CHECK(lines > 235 && lines < 245);  // first row to last row: 239 lines apart
+    CHECK(lines > 235 && lines < 245);  // first row to last row: 241 lines apart
     if (i > 2) CHECK(f[i].times.t_first > f[i - 1].times.t_last);
   }
   int frames = 0, timed = 0;
@@ -270,6 +273,88 @@ static void frames_say_when_their_lines_were_taken() {
   });
   fe.decode(s.d, {});
   CHECK(frames >= 8 && timed == 0);
+}
+
+// ---------------------------------------------------------------------------------------- the picture window
+
+// A camera sends more than the standard's active picture. On a lit NTSC recording its picture ran 8.85-62.3 us after
+// the hsync, on lines 19-258 or 20-259 (by field) after the line of the field's first broad pulse (video_std.h).
+// All of that is in the frame, with blanking either side: each field's 240 lines, and each line its whole width.
+static void the_window_keeps_the_whole_picture() {
+  constexpr float kWhite = 4.f;  // 0.8 of black to white
+  constexpr int kLit = 140, kDark = 40;
+  const Signal s = video(0.3, on_the_grid, [](Signal &s, int64_t line, double start) {
+    s.put(start + 9.4 * kUs, start + 62.0 * kUs, kBlank);
+    // the line's number after the line of its field's first broad pulse (the field's half line 6)
+    const int64_t field = 2 * line / kHalfLinesPerField, broad = (field * kHalfLinesPerField + 6) / 2;
+    const int64_t top = field % 2 ? 20 : 19, n = line - broad;
+    if (n >= top && n < top + 240) s.put(start + 8.85 * kUs, start + 62.3 * kUs, kWhite);
+  });
+  const std::vector<Picture> f = frames_of(s, PictureOpts{});
+  CHECK(f.size() >= 12);
+  // a field's row (each is two lines of the frame) at x: its red
+  const auto px = [](const Picture &p, int row, int x) { return p.px[(static_cast<size_t>(2 * row) * 720 + x) * 4]; };
+  int tops[2] = {}, left = 720, right = -1;
+  bool ok = f.size() >= 12;
+  for (size_t i = 4; i < f.size(); i++) {
+    int first = -1, last = -1, lit = 0;
+    for (int r = 0; r < kNtsc.window.lines; r++) {
+      if (px(f[i], r, 360) <= kLit) continue;
+      lit++;
+      if (first < 0) first = r;
+      last = r;
+      // across: one lit run, with dark columns at both ends
+      int x0 = 0, x1 = 719;
+      while (x0 < 720 && px(f[i], r, x0) <= kLit) x0++;
+      while (x1 > x0 && px(f[i], r, x1) <= kLit) x1--;
+      for (int x = x0; x <= x1; x++) ok &= px(f[i], r, x) > kLit;
+      ok &= px(f[i], r, 0) < kDark && px(f[i], r, 719) < kDark;
+      left = std::min(left, x0);
+      right = std::max(right, x1);
+    }
+    ok &= lit == 240 && last - first == 239 && px(f[i], 0, 360) < kDark;
+    if (first == 1 || first == 2) tops[first - 1]++;
+    else ok = false;
+  }
+  ok &= tops[0] > 0 && tops[1] > 0;  // both fields: the one with its picture a line lower reaches the last row
+  CHECK(ok);
+  if (shown(ok))
+    std::fprintf(stderr, "  %zu frames: picture from row 1 in %d, from row 2 in %d; lit columns %d..%d\n", f.size(), tops[0],
+                 tops[1], left, right);
+}
+
+// Sparkle repair keeps off the next line's sync. The window ends close to the next hsync, and a patch for a click
+// at its very end would ramp onto that hsync's edge, where the next line's front porch is read. Every click that
+// begins in the picture is still patched, but no luma from `end` on is touched.
+static void a_click_at_the_end_of_the_picture() {
+  const double ls = 1000, pic0 = ls + kNtsc.window.start_us * kUs, aw = kNtsc.window.width_us * kUs;
+  const double end = ls + kT - SyncLevels::kFrontUs[1] * kUs;
+  const int64_t hsync = static_cast<int64_t>(std::ceil(ls + kT)), e = static_cast<int64_t>(end), n = 4000;
+  SparkleRepair spark(kFs);
+  int patched = 0, left = 0;
+  bool clear = true, all_in_picture = true;
+  for (int64_t at = e - 40; at < e; at++) {
+    SampleRings R;
+    // a front porch with a ripple on it (a patch's straight line would show), then the hsync
+    for (int64_t i = 0; i < n; i++)
+      R.luma[i & R.mask] = i >= hsync && i < hsync + 94 ? kTip : kBlank + 0.05f * std::sin(0.7f * static_cast<float>(i));
+    for (int64_t i = at; i < at + 8; i++) {  // a click: a run of 8 marked samples
+      R.luma[i & R.mask] = kGrey + 3;
+      R.bad[i & R.mask] = 1;
+    }
+    R.n = n;
+    const std::vector<float> was = R.luma;
+    spark.patch_line(R, pic0, aw, end, kT, false, false);
+    for (int64_t i = e; i < n; i++) clear &= R.luma[i & R.mask] == was[i & R.mask];
+    const bool done = R.luma[at & R.mask] != was[at & R.mask];
+    (done ? patched : left)++;
+    if (at < pic0 + aw) all_in_picture &= done;
+  }
+  const bool ok = clear && all_in_picture && patched > 0;
+  CHECK(ok);
+  if (shown(ok))
+    std::fprintf(stderr, "  clicks in the last 2 us before end: %d patched, %d left (those in the picture: %s); luma from "
+                 "end on %s\n", patched, left, all_in_picture ? "all patched" : "NOT ALL", clear ? "untouched" : "CHANGED");
 }
 
 // ---------------------------------------------------------------------------------------- level jumps
@@ -930,6 +1015,8 @@ int main() {
   a_step_in_the_line_timing();
   strips_add_up_to_the_frames();
   frames_say_when_their_lines_were_taken();
+  the_window_keeps_the_whole_picture();
+  a_click_at_the_end_of_the_picture();
   the_levels_jump_with_a_flashing_light();
   the_picture_keeps_its_grey_through_a_jump();
   the_rhythm_on_line_numbers();

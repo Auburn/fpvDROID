@@ -27,9 +27,6 @@
 
 namespace kp {
 
-const VideoStd kNtsc{63.5556, 9.4, 52.6, 240, 18, 262, "NTSC"};
-const VideoStd kPal{64.0, 10.5, 52.0, 288, 22, 312, "PAL"};
-
 // ---- the decoder: discriminator output (MHz) in, frames out ---------------------------------------------
 // It finds the sync pulses (a line PLL that freewheels and re-phases, the field starts by the broad pulses' run),
 // which is its own; for the rest it runs the modules: acquisition (acquire.h); the levels the pulses are found by
@@ -348,10 +345,10 @@ private:
     rhythm.reset();
     T = s.T_us * 1e-6 * fs;
     hold.set_std(T);
-    fieldA.assign(static_cast<size_t>(o.width) * s.active * 4, 0);
+    fieldA.assign(static_cast<size_t>(o.width) * s.window.lines * 4, 0);
     fieldB = fieldA;
-    frame.assign(static_cast<size_t>(o.width) * s.active * 2 * 4, 0);
-    row_t.assign(s.active, 0);
+    frame.assign(static_cast<size_t>(o.width) * s.window.frame_lines() * 4, 0);
+    row_t.assign(s.window.lines, 0);
     part_y = 0;
     filt.set_std(s);
     refresh_switches();
@@ -490,7 +487,7 @@ private:
             got.parts, kAcqParts, levels.tip, levels.blank, T / fs * 1e6, std_->name);
   }
 
-  bool in_picture(int64_t k) const { return k >= 0 && k < std_->active; }
+  bool in_picture(int64_t k) const { return k >= 0 && k < std_->window.lines; }
 
   // The line that has just ended (ls: its start; k: its row; locked: its hsync was found; own: the levels of its
   // sync, where they are not the kept ones), ready to be drawn: levels measured on it, then its picture put right
@@ -521,7 +518,7 @@ private:
   // A line has ended: it is drawn, or with the 3-line comb the one before it is.
   void render_line(double ls, bool locked, const std::optional<LevelPair> &own) {
     if (cur_field < 0) return;
-    const LineInfo cur = measure(ls, line_idx - field_line0 - std_->skip, locked, own);
+    const LineInfo cur = measure(ls, line_idx - field_line0 - std_->window.first_line, locked, own);
     if (comb) {
       comb_line(cur);
     } else if (in_picture(cur.k)) {
@@ -579,7 +576,7 @@ private:
   static constexpr float kTopPicture = 0.25f, kTopBlank = 0.10f;
   void top_line(double ls, int64_t k) {
     if (k > kTopRows) return;
-    const double a0 = std_->a0_us * 1e-6 * fs, aw = std_->aw_us * 1e-6 * fs;
+    const double a0 = std_->window.start_us * 1e-6 * fs, aw = std_->window.width_us * 1e-6 * fs;
     // no picture over the part [x0, x1) of the width of the line that starts at l?
     const auto blanking = [&](double l, double x0, double x1, float limit = kTopBlank) {
       float m;
@@ -590,15 +587,20 @@ private:
       if (!blanking(ls - static_cast<double>(up) * T, 0, 1)) return;
     const bool whole = blanking(ls - T, 0, 1);
     if (!whole && (k > 0 || !blanking(ls - T, 0, 0.4))) return;
-    filt.redo_without_comb(R, ls + a0, aw, whole);
+    filt.redo_without_comb(R, ls + a0, aw, fix_end(ls), whole);
   }
 
   // Sparkle repair (sparkle.h): the picture of the line that starts at ls patched in the rings, before it is
   // drawn; true when it is still badly hit, which mend_rows is told once the row (k) is drawn.
   bool patch_line(double ls) {
-    const double a0 = std_->a0_us * 1e-6 * fs, aw = std_->aw_us * 1e-6 * fs;
-    return spark.patch_line(R, ls + a0, aw, T, filt.luma_comb(), filt.colour_fades());
+    const double a0 = std_->window.start_us * 1e-6 * fs, aw = std_->window.width_us * 1e-6 * fs;
+    return spark.patch_line(R, ls + a0, aw, fix_end(ls), T, filt.luma_comb(), filt.colour_fades());
   }
+
+  // How far the picture's fixes (top_line's redo, sparkle repair) may change the luma of the line that starts at
+  // ls: short of the next line's sync, by as much as SyncLevels stops reading that line's front porch ahead of
+  // its hsync. The window ends close to that hsync, and a patch that ramped onto its edge would tilt the reading.
+  double fix_end(double ls) const { return ls + T - SyncLevels::kFrontUs[1] * 1e-6 * fs; }
   void mend_rows(int64_t k, bool hit) {
     spark.mend_rows((cur_field == 0 ? fieldA : fieldB).data(), o.width, fields_seen, cur_field, k, hit);
   }
@@ -620,8 +622,8 @@ private:
   // Frame lines [part_y, y1) of the field being drawn into the frame, interpolated (smooth lines) or each of the
   // field's lines twice (DecoderOpts::fields), and the frame to the sink with those lines new.
   void put_part(int y1) {
-    const int W = o.width, A = std_->active;
-    y1 = std::min(y1, 2 * A);
+    const int W = o.width, A = std_->window.lines;
+    y1 = std::min(y1, std_->window.frame_lines());
     if (y1 <= part_y) return;
     const bool upper = cur_field == 1;
     const uint8_t *f = (upper ? fieldB : fieldA).data();
@@ -635,7 +637,7 @@ private:
   // When the field rows in frame lines [y0, y1) were taken (LineTimes: of the first and the last of them drawn)
   LineTimes times_of(int y0, int y1) const {
     LineTimes t;
-    const int r0 = std::max(y0 >> 1, 0), r1 = std::min((y1 - 1) >> 1, std_->active - 1);
+    const int r0 = std::max(y0 >> 1, 0), r1 = std::min((y1 - 1) >> 1, std_->window.lines - 1);
     for (int r = r0; r <= r1 && t.t_first <= 0; r++) t.t_first = row_t[r];
     for (int r = r1; r >= r0 && t.t_last <= 0; r--) t.t_last = row_t[r];
     return t;
@@ -650,17 +652,17 @@ private:
 
   // The field being drawn has ended (DecoderOpts::fields): what is not out yet of its frame goes out. All of it, or
   // with strips the last one.
-  void field_done() { put_part(2 * std_->active); }
+  void field_done() { put_part(std_->window.frame_lines()); }
   // A frame woven from two fields (not DecoderOpts::fields)
   void emit(const std::vector<uint8_t> &a, const std::vector<uint8_t> &b) {
-    weave(a.data(), b.data(), o.width, std_->active, frame.data());
-    emit_frame(0, 2 * std_->active, {});
+    weave(a.data(), b.data(), o.width, std_->window.lines, frame.data());
+    emit_frame(0, std_->window.frame_lines(), {});
   }
   // The frame to the sink, its lines [y0, y1) new
   void emit_frame(int y0, int y1, const LineTimes &t) {
-    const int H = 2 * std_->active;
+    const int H = std_->window.frame_lines();
     if (y1 >= H) frames_out++;
-    if (sink) sink(Frame{frame.data(), o.width, H, std_, y0, y1, t});
+    if (sink) sink(Frame{frame.data(), o.width, H, y0, y1, t});
   }
 
   // The line in hand is closed, and the next begins at next_start. moved: its sync was at other levels than the

@@ -19,7 +19,7 @@ code { font: 12px ui-monospace, "Cascadia Mono", Consolas, monospace; background
 [hidden] { display: none !important; }
 
 #stage { position: fixed; inset: 0; background: #000; user-select: none; }
-/* The picture is 4:3 whatever the frame's pixel size (720x480 NTSC, 720x576 PAL: non-square pixels). */
+/* The picture is 4:3 whatever the frame's pixel size (720x484 NTSC, 720x576 PAL: non-square pixels). */
 #video {
   position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
   width: min(100vw, calc(100vh * 4 / 3)); height: min(100vh, calc(100vw * 3 / 4));
