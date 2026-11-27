@@ -416,16 +416,18 @@ void Radio::dsp_loop() {
       _load_t0_ms = t;
       if (++_status_ticks % 5 == 0 && _mode == Mode::Watch)
         KP_LOGI("status: watch %.1f MHz, cpu demod %.0f%% decode %.0f%%, dropped stream %llu usb %llu decode %llu, "
-                "restarts %llu, unwedged %llu, %s %s lock %.2f fps %.0f, acq %llu lost %llu rephase %llu, "
-                "level jumps %llu, fields coasted %llu put right %llu, torn frames hidden %llu",
+                "restarts %llu, unwedged %llu, %s %s%s lock %.2f fps %.0f, acq %llu lost %llu rephase %llu, "
+                "level jumps %llu, fields coasted %llu put right %llu, holds %llu, sync snr %.1f, channel filter "
+                "%.0f MHz, torn frames hidden %llu",
                 _watch_hz / 1e6,
                 _load * 100, _dload * 100, (unsigned long long)rs.mid_drops,
                 (unsigned long long)_dropped.load(), (unsigned long long)_decq.dropped(),
                 (unsigned long long)rs.restarts, (unsigned long long)rs.unwedged, _vstats.std_name,
-                _vstats.colour ? "colour" : "grey", _vstats.lock_recent, _fps,
+                _vstats.colour ? "colour" : "grey", _vstats.holding ? " held" : "", _vstats.lock_recent, _fps,
                 (unsigned long long)_vstats.acquisitions, (unsigned long long)_vstats.losses,
                 (unsigned long long)_vstats.rephases, (unsigned long long)_vstats.level_jumps,
                 (unsigned long long)_vstats.fields_coasted, (unsigned long long)_vstats.starts_put_right,
+                (unsigned long long)_vstats.holds, _vstats.sync_snr, _vstats.filter_mhz,
                 (unsigned long long)_gate.hidden());
     }
   }
@@ -507,6 +509,8 @@ void Radio::new_front_end(const Bank &b) {
   DecoderOpts o;
   o.follow_levels = _follow_levels.load(std::memory_order_relaxed);
   o.flywheel = _flywheel.load(std::memory_order_relaxed);
+  o.hold = _hold.load(std::memory_order_relaxed);
+  o.channel_filter = _channel_filter.load(std::memory_order_relaxed);
   _fe = std::make_shared<FrontEnd>(b.fs, b.shift_hz, _gate.sink(), o, _picture.load());
   _fe_fs = b.fs;
   _fe_shift = b.shift_hz;
@@ -941,7 +945,11 @@ std::string Radio::status_json() {
     << ",\"offset_tuning\":" << (_offset ? "true" : "false") << ",\"centre_hz\":" << num(rs.centre_hz);
   if (_mode == Mode::Watch && _snr_db >= 0) o << ",\"snr_db\":" << num(_snr_db);
   if (_mode == Mode::Scan) o << ",\"scan_step\":" << _step.load() << ",\"scan_steps\":" << _plan_n.load();
-  o << ",\"video\":{\"locked\":" << (!_vstats.acquiring && _vstats.lock_recent > 0.5f ? "true" : "false")
+  // locked: there is a picture. Most lines find their hsync, or the signal is too weak for that and the decoder
+  // holds its grid by the fold of the lines (holding; lock is then the few lines that still find theirs).
+  o << ",\"video\":{\"locked\":"
+    << (!_vstats.acquiring && (_vstats.lock_recent > 0.5f || _vstats.holding) ? "true" : "false")
+    << ",\"holding\":" << (_vstats.holding ? "true" : "false")
     << ",\"lock\":" << num(_vstats.lock_recent) << ",\"std\":" << jstr(_vstats.std_name) << ",\"fps\":" << num(_fps)
     << ",\"acquisitions\":" << _vstats.acquisitions << ",\"losses\":" << _vstats.losses
     << ",\"rephases\":" << _vstats.rephases << ",\"clicks_repaired\":" << _vstats.clicks_repaired

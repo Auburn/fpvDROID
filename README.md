@@ -240,10 +240,13 @@ off the chip's own recovery from the adapter's USB 3 lock-up (it frees itself wi
 line counts that as `unwedged`), so that each lock-up shows in the log as a stream fault. The app's own, under the same
 extra: `KP_CONCEAL=0` shows the frames torn by a stream restart (at once), and `KP_FAST_CPUS=0` lets Android put
 the two processing threads on any core (from the next open; by default they are kept off the phone's slowest
-cores, where they fall behind). `KP_LEVELS=0` and `KP_FLYWHEEL=0` turn off the two things the decoder does to
-keep its picture, to see each by itself (from the next channel or rate watched): following a signal whose sync
-levels jump (a light flashing in the picture does that to some transmitters), and beginning a field where the
-fields before say when its vertical sync is not found (a weak signal).
+cores, where they fall behind). `KP_LEVELS=0`, `KP_FLYWHEEL=0`, `KP_HOLD=0` and `KP_FILTER=0` turn off the
+things the decoder does to keep its picture, to see each by itself (from the next channel or rate watched):
+following a signal whose sync levels jump (a light flashing in the picture does that to some transmitters),
+beginning a field where the fields before say when its vertical sync is not found, holding the line grid through a
+signal too weak for its lines' hsyncs to be found (the status line then says `held`, and counts `holds`), and the
+channel filter that comes in ahead of the FM detector while the sync is noisy (the status line has the `sync snr`
+it goes by and how wide the filter is; it needs the hold).
 The screen's, at once: `KP_FRONT_BUFFER=0` keeps Vsync off from drawing straight
 into the buffer the display shows (the log says whether the phone can), so that the strips go through the
 compositor; `KP_PRESENT_ALIGN=0` then puts each strip up as it comes (by default they go up once a refresh,

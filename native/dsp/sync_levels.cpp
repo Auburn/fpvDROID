@@ -40,6 +40,13 @@ void SyncLevels::acquired(float sgn, float tip_a, float blank_a) {
   thr = 0.5f * (tip + blank);
 }
 
+void SyncLevels::set(float tip_m, float blank_m) {
+  tip = tip_m;
+  blank = blank_m;
+  thr = 0.5f * (tip + blank);
+  _gated = std::max(_gated, kSettle);
+}
+
 void SyncLevels::restart() {
   _gated = 0;
   _run = _gap = _fast = 0;

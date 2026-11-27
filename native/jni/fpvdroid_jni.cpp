@@ -339,10 +339,14 @@ JNIEXPORT void JNICALL Java_com_fpvdroid_app_Native_setDebugEnv(JNIEnv *env, jcl
     if (g_radio) g_radio->set_conceal(on);
   } else if (k == "KP_FAST_CPUS") {
     if (g_radio) g_radio->set_fast_cores(on);
-  } else if (k == "KP_LEVELS") {  // the decoder's following of level jumps, and its vertical flywheel
+  } else if (k == "KP_LEVELS") {  // the decoder's following of level jumps, its vertical flywheel, its hold
     if (g_radio) g_radio->set_follow_levels(on);
   } else if (k == "KP_FLYWHEEL") {
     if (g_radio) g_radio->set_flywheel(on);
+  } else if (k == "KP_HOLD") {
+    if (g_radio) g_radio->set_hold(on);
+  } else if (k == "KP_FILTER") {  // the front end's channel filter for a noisy signal
+    if (g_radio) g_radio->set_channel_filter(on);
   } else if (k == "KP_FRONT_BUFFER") {  // "0": no front-buffer drawing with Vsync off (Screen::allow_front_buffer)
     if (g_screen) g_screen->allow_front_buffer(on);
   } else if (k == "KP_PRESENT_ALIGN") {  // how strips go up (Screen::set_present_align, set_present_margin_us)

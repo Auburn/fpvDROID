@@ -24,6 +24,9 @@ struct LineInfo {
   uint64_t epoch = 0;  // which stretch of unbroken stream it is in (lines across a jump don't comb)
   double phase = 0;    // the burst's reference phase and amplitude after this line's burst
   float mag = 0;
+  // A noisy signal's colour (the decoder's faint_burst): above 0, U and V are smoothed along the line and down
+  // the field, and this is the share of the line's own in what is drawn (LineDrawer::draw_colour_calm)
+  float calm = 0;
   // Its sync was at other levels than the decoder's (the signal has jumped: SyncLevels::look): it is drawn
   // against these, its own
   std::optional<LevelPair> own;
@@ -57,9 +60,13 @@ private:
   void draw_grey(uint32_t *row, const SampleRings &R, double base, float yscale, int x0, int x1, const DrawParams &p);
   void draw_colour(uint32_t *row, const SampleRings &R, double base, float yscale, std::complex<float> rot, float k_uv,
                    bool comb_on, bool pal_v, int x0, int x1, const DrawParams &p);
+  void draw_colour_calm(uint32_t *row, const SampleRings &R, double base, float yscale, std::complex<float> rot,
+                        float k_uv, float calm, int x0, int x1, const DrawParams &p);
 
   static constexpr float kCombFull = 0.08f, kCombNone = 0.25f;  // luma mismatch, of black-to-white
   static constexpr int kPad = 3;  // entries past the row's end in what the draw loops read per pixel (set_std)
+  // draw_colour_calm: U and V at every so many pixels (a cell), each the mean over so many cells either side
+  static constexpr int kCalmStep = 4, kCalmCells = 3;
   int _w;
   double _fs;
   double _a0 = 0, _aw = 0;  // the picture's start after the line's, and its width, in samples
@@ -71,6 +78,9 @@ private:
   std::vector<float> _comb_m;  // the comb on every other pixel: chroma becomes c * (1 - _comb_m) - _comb_o
   std::vector<std::complex<float>> _comb_o;
   std::vector<float> _px_cm, _px_cr, _px_ci;  // ... and for each pixel (chroma * _px_cm - _px_c{r,i})
+  std::vector<float> _sum_u, _sum_v;  // draw_colour_calm: the line's U and V summed up to each cell
+  int64_t _calm_k = -2;  // ... and the last line drawn that way: its row and field
+  int _calm_field = -1;
 };
 
 }  // namespace kp

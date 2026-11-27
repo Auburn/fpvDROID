@@ -51,6 +51,10 @@ public:
   bool survey(const std::vector<float> &buf, size_t cnt, float sgn, float &tip_o, float &blank_o);
   // ... and what acquisition settled on.
   void acquired(float sgn, float tip_a, float blank_a);
+  // The levels as measured another way (in the fold of many lines, with which the decoder holds a weak signal:
+  // video.cpp). They are the kept ones now, and the sync-gated measurement counts as settled: no more of the
+  // histogram's.
+  void set(float tip_m, float blank_m);
   // The lock is lost: the sync-gated measurement starts over, and a jump half seen is forgotten.
   void restart();
 
