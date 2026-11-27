@@ -437,6 +437,52 @@ static void the_picture_keeps_its_grey_through_a_jump() {
   }
 }
 
+// The same AC coupling under a bright sky over dark ground: the levels slide down through the upper part of every
+// field and up again through the lower, by most of a sync depth (one camera: 0.85 depths, a hundredth of the
+// depth a line). Followed line by line there is nothing to jump to: the lock holds, no jump is counted, and the
+// picture keeps its grey all the way down. Without the following (follow_levels off) the kept levels are a
+// quarter of the depth behind before anything is done about it, and rows are off their grey by the hundred.
+static std::function<double(double)> sliding(double mhz) {
+  return [=](double t) {
+    const double ph = t * 59.94 - std::floor(t * 59.94);  // 0..1 through a field
+    return -mhz * (ph < 0.45 ? ph / 0.45 : (1 - ph) / 0.55);
+  };
+}
+static void the_levels_slide_down_every_field() {
+  const Signal plain = video(1.0, on_the_grid, nullptr);
+  const DecoderStats steady = decode(plain);
+  const auto mid = [](const Picture &p, int row) { return p.px.data() + (static_cast<size_t>(row) * 720 + 360) * 4; };
+  const std::vector<Picture> still = frames_of(plain, PictureOpts{});
+  CHECK(still.size() >= 50);
+  if (still.size() < 50) return;
+  const uint8_t grey[3] = {mid(still[20], 240)[0], mid(still[20], 240)[1], mid(still[20], 240)[2]};
+  const auto off_rows = [&](const std::vector<Picture> &f) {
+    int off = 0;
+    for (size_t i = 4; i < f.size(); i++)
+      for (int row = 16; row < 464; row++)
+        for (int c = 0; c < 3; c++)
+          if (std::abs(mid(f[i], row)[c] - grey[c]) > 8) { off++; break; }
+    return off;
+  };
+  for (const double depths : {0.5, 0.85, 1.2}) {
+    const Signal s = moved(plain, sliding(depths * (kBlank - kTip)));
+    const DecoderStats st = decode(s);
+    const std::vector<Picture> f = frames_of(s, PictureOpts{}), bare = frames_of(s, PictureOpts{}, nullptr, DecoderOpts{.follow_levels = false, .hold = false});
+    const int off = off_rows(f), off_bare = off_rows(bare);
+    const long long missed = static_cast<long long>(steady.lines_locked) - static_cast<long long>(st.lines_locked);
+    const bool ok = st.acquisitions == 1 && st.losses == 0 && st.rephases == 0 && st.fields == steady.fields &&
+                    st.level_jumps <= 1 && missed <= 64 && f.size() == still.size() && off == 0 &&
+                    (depths < 0.8 || off_bare > 2000 || bare.size() + 10 < still.size());
+    CHECK(ok);
+    if (shown(ok))
+      std::fprintf(stderr, "  %.2f depths down and up a field: %llu losses, %llu re-phases, %llu fields (steady: %llu), "
+                   "%lld lines without their hsync, %llu level jumps, %zu pictures (steady: %zu), %d rows off their "
+                   "grey (without the following: %d, in %zu pictures)\n", depths, (unsigned long long)st.losses,
+                   (unsigned long long)st.rephases, (unsigned long long)st.fields, (unsigned long long)steady.fields,
+                   missed, (unsigned long long)st.level_jumps, f.size(), still.size(), off, off_bare, bare.size());
+  }
+}
+
 // ---------------------------------------------------------------------------------------- the vertical flywheel
 
 // The rhythm by itself (field_rhythm.h), on line numbers alone: where a field begins for the starts found, or for
@@ -1019,6 +1065,7 @@ int main() {
   a_click_at_the_end_of_the_picture();
   the_levels_jump_with_a_flashing_light();
   the_picture_keeps_its_grey_through_a_jump();
+  the_levels_slide_down_every_field();
   the_rhythm_on_line_numbers();
   fields_coast_through_a_missing_vertical_sync();
   a_field_start_found_off_is_put_right();

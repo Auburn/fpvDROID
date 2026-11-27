@@ -501,7 +501,7 @@ private:
     l.epoch = comb_epoch;
     l.own = own;
     if (!in_picture(k)) return l;
-    if (locked && !own && !hold.holding()) levels.measure(R, ls);
+    if (locked && !own && !hold.holding()) levels.measure(R, ls, o.follow_levels);
     if (filt.luma_comb()) top_line(ls, k);
     l.hit = pic.repair && patch_line(ls);
     // (in colour: a line whose hsync was found, or one the hold has the start of, for a noisy signal's colour)

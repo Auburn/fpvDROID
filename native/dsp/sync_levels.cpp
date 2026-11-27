@@ -50,6 +50,7 @@ void SyncLevels::set(float tip_m, float blank_m) {
 void SyncLevels::restart() {
   _gated = 0;
   _run = _gap = _fast = 0;
+  _drift = _scatter = 0;
 }
 
 void SyncLevels::track(float m) {
@@ -127,18 +128,31 @@ bool SyncLevels::from_hist(uint32_t total, float &tip_o, float &blank_o) {
   return false;
 }
 
-void SyncLevels::measure(const SampleRings &R, double ls) {
+// The lines lately were off the kept levels one way: by more than three times what their scatter makes of an
+// average over 8 lines (its variance a 15th of theirs), and by more than a hundredth of the sync depth. And they
+// agree with each other to a tenth of the depth: in heavy noise, with clicks in the sync, two lines off the same
+// way are not a slide, and levels that followed them a quarter of the way would wander.
+bool SyncLevels::sliding() const {
+  const float d = std::fabs(_drift), depth = blank - tip;
+  return d > 0.01f * depth && d * d > 9.f / 15 * _scatter && _scatter < 0.01f * depth * depth;
+}
+
+void SyncLevels::measure(const SampleRings &R, double ls, bool slides) {
   const double us = 1e-6 * _fs;
   float t, b;
   if (!mean(R, ls + kTipUs[0] * us, ls + kTipUs[2] * us, t)) return;
   if (!mean(R, ls + kPorchUs[0] * us, ls + kPorchUs[2] * us, b)) return;
   if (b - t < 0.05f) return;
-  const float a = !settled() ? 0.1f : _fast > 0 ? 0.25f : 1.f / 64;
+  const float et = t - tip, eb = b - blank, e = 0.5f * (et + eb);
+  const float a = !settled() ? 0.1f : _fast > 0 || (slides && sliding()) ? 0.25f : 1.f / 64;
   if (_fast > 0) _fast--;
-  tip += a * (t - tip);
-  blank += a * (b - blank);
+  tip += a * et;
+  blank += a * eb;
   thr = 0.5f * (tip + blank);
   _gated++;
+  // this line into what the next ones go by
+  _scatter += ((e - _drift) * (e - _drift) - _scatter) / 32;
+  _drift += (e - _drift) / 8;
 }
 
 LineLevels SyncLevels::look(const SampleRings &R, double ls) {
@@ -176,6 +190,7 @@ LineLevels SyncLevels::look(const SampleRings &R, double ls) {
     thr = 0.5f * (tip + blank);
     _run = 0;
     _fast = kFastLines;
+    _drift = 0;
     jumps++;
     line.jumped = true;
   }
