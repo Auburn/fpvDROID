@@ -726,7 +726,7 @@ private:
     start_field(*at);
   }
 
-  // How clean the sync is (DecoderStats::sync_snr): its depth over the noise on the back porch (sync_noise.h); 0
+  // How clean the sync is (DecoderStats::sync_snr): its depth over the noise on its tip and porch (sync_noise.h); 0
   // while that is not known. (settled: the levels are measured ones, on locked lines or in the fold, not the
   // histogram's)
   float sync_snr() const { return !acquiring && levels.settled() ? noise.snr(levels.blank - levels.tip) : 0; }
@@ -735,7 +735,7 @@ private:
   // line into the fold, which steers when the signal is weak (line_hold.h). Returns where the next line begins.
   double held_line(double next, bool broad) {
     const SyncSamples s = sync_now();
-    if (noise.line(s, line_start, fs)) {
+    if (noise.line(s, line_start, fs, std_ == &kPal ? 4.43361875e6 : 3.579545e6)) {
       const float depth = levels.blank - levels.tip;
       if (noise.round())
         if (const float snr = noise.snr(depth); snr > 0) burst.sync_snr(snr);  // (colour goes by it)

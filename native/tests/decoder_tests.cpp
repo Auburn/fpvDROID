@@ -930,6 +930,34 @@ static std::pair<double, double> tint(const std::vector<Picture> &v, size_t back
 // picture's colour is the clean signal's: the same hue, and the paler the larger the noise (a tenth of the clean
 // signal's saturation where the noise through the colour path is some three times the burst). A noisy signal
 // without a burst gets no colour from its noise.
+// How noisy the sync is, is read where a line is flat. A clean signal in colour reads clean: its burst does not
+// count (read on the porch alone it got through the sync path's low-pass enough to pass for noise: never more than
+// 36 depths of sync to one of noise), and neither does a picture that begins bright 8.7 us after the sync's edge,
+// as one camera's does, nor a sync tip that is not flat on a quarter of the lines. The front end's channel filter
+// and the colour go by this number.
+static void a_clean_signal_reads_clean() {
+  const Signal plain = coloured(1.0, 1.0);
+  Signal early = plain;  // the picture from 8.7 us on, bright
+  Signal bent = plain;   // a ripple on the sync tip of a quarter of the lines
+  const double depth = kBlank - kTip;
+  for (int64_t line = 0; static_cast<double>(line + 1) * kT < static_cast<double>(plain.d.size()); line++) {
+    const double start = static_cast<double>(line) * kT;
+    const int64_t in_field = line % 262;
+    if (in_field < 24) continue;
+    early.put(start + 8.7 * kUs, start + 9.4 * kUs, kGrey + 1.5f);
+    if (in_field % 4 == 0)
+      for (int64_t i = std::llround(start + 0.5 * kUs); i < std::llround(start + 4.2 * kUs); i++)
+        bent.d[static_cast<size_t>(i)] += static_cast<float>(0.15 * depth * std::sin(2 * M_PI * 0.9e6 / kFs * static_cast<double>(i)));
+  }
+  const DecoderStats a = decode(plain), b = decode(early), c = decode(bent);
+  const bool ok = a.sync_snr > 60 && b.sync_snr > 60 && c.sync_snr > 60 && a.losses + b.losses + c.losses == 0 &&
+                  a.colour && b.colour && c.colour;
+  CHECK(ok);
+  if (shown(ok))
+    std::fprintf(stderr, "  sync snr of a clean signal in colour %.0f, with a bright picture from 8.7 us %.0f, with a "
+                 "ripple on a quarter of the sync tips %.0f\n", a.sync_snr, b.sync_snr, c.sync_snr);
+}
+
 static void a_noisy_signal_keeps_its_colour() {
   for (const double hue : {0.6, 2.4, 4.4}) {
     const Signal s = coloured(1.0, hue);
@@ -1077,6 +1105,7 @@ int main() {
   a_weak_signal_from_the_start();
   nothing_for_a_moment_and_for_long();
   a_block_missing_from_a_weak_signal();
+  a_clean_signal_reads_clean();
   a_noisy_signal_keeps_its_colour();
   a_noisy_signal_gets_a_channel_filter();
   std::printf("%d checks, %d failed\n", g_checks, g_failed);
