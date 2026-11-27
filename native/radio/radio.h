@@ -108,6 +108,7 @@ public:
   void set_follow_levels(bool on) { _follow_levels.store(on, std::memory_order_relaxed); }
   void set_flywheel(bool on) { _flywheel.store(on, std::memory_order_relaxed); }
   void set_hold(bool on) { _hold.store(on, std::memory_order_relaxed); }
+  void set_coast(bool on) { _coast.store(on, std::memory_order_relaxed); }
   void set_channel_filter(bool on) { _channel_filter.store(on, std::memory_order_relaxed); }
   // Debug: save the next `seconds` of watched IQ as PREFIX.cs16 + PREFIX.json (kp_replay reads them), and path B
   // as PREFIX_b.cs16.
@@ -219,8 +220,8 @@ private:
   std::atomic<bool> _started{false};  // open() has the receiver started: only then can it be found stopped
 
   std::atomic<bool> _fast_cores{true};  // set_fast_cores()
-  // set_follow_levels(), set_flywheel(), set_hold(), set_channel_filter()
-  std::atomic<bool> _follow_levels{true}, _flywheel{true}, _hold{true}, _channel_filter{true};
+  // set_follow_levels(), set_flywheel(), set_hold(), set_coast(), set_channel_filter()
+  std::atomic<bool> _follow_levels{true}, _flywheel{true}, _hold{true}, _coast{true}, _channel_filter{true};
 
   // decode thread: watch mode runs demod on the DSP thread and the video decoder here (two cores)
   FrameGate _gate;  // between the decoders and the frame sink: the frames torn by a hole in the stream stop here

@@ -3,16 +3,17 @@
 //
 //   kp_replay REC.cs16 [--offset HZ] [--start S] [--seconds S] [--cnr DB] [--fs HZ] [--mix HZ] [--flash MHZ]
 //             [--as20] [--frames] [--woven] [--comb] [--luma-comb] [--adaptive] [--smooth] [--repair]
-//             [--no-levels] [--no-flywheel] [--no-hold] [--no-filter] [--grid FILE] [-v]
+//             [--no-levels] [--no-flywheel] [--no-hold] [--no-coast] [--coast-s S] [--no-filter] [--grid FILE] [-v]
 //             [--loop N] [--fade T:DB,T:DB,...] [--fade-every S] [--drop T:N,T:N,...]
 //   --comb: the 3-line colour comb. --luma-comb, --adaptive, --smooth, --repair: the picture switches of video.h
 //   (comb filter, clean OSD edges, smooth lines, sparkle repair). --as20: as the adapter delivers it at 20 MS/s.
 //   --mix HZ: the recording shifted by HZ first (scanner edge tests). --fs HZ: for a recording without a .json.
 //   --flash MHZ: the transmitter's frequency down by MHZ for half of every 1/7 s, as when its sync levels jump with
 //   a light flashing in the picture (an AC-coupled video input): the lock should hold through it.
-//   --no-levels, --no-flywheel, --no-hold, --no-filter: without the decoder's following of such jumps, without its
-//   vertical flywheel, without its holding of the grid through a weak signal, without the front end's channel filter
-//   for a noisy one (DecoderOpts), to see what each does by itself.
+//   --no-levels, --no-flywheel, --no-hold, --no-coast, --no-filter: without the decoder's following of such jumps,
+//   without its vertical flywheel, without its holding of the grid through a weak signal, without its coasting
+//   through a dropout, without the front end's channel filter for a noisy one (DecoderOpts), to see what each does
+//   by itself. --coast-s S: coast for S seconds at most (5).
 //   --grid FILE: where the decoder has its line grid and its field, a row for every block of 65536 samples: samples
 //   done, acquiring, the line's start (samples), line period (us), field, the field's start (samples), tip, blank,
 //   lock, frames, held, sync snr, channel filter (MHz), --fade's ratio now (dB; 0 without), the sync depth of better
@@ -83,6 +84,8 @@ int main(int argc, char **argv) {
     else if (k == "--no-levels") dec.follow_levels = false;
     else if (k == "--no-flywheel") dec.flywheel = false;
     else if (k == "--no-hold") dec.hold = false;
+    else if (k == "--no-coast") dec.coast = false;
+    else if (k == "--coast-s") dec.coast_s = std::atof(v());
     else if (k == "--no-filter") dec.channel_filter = false;
     else if (k == "--grid") grid_file = v();
     else if (k == "--loop") loop = static_cast<size_t>(std::atof(v()));
@@ -102,7 +105,8 @@ int main(int argc, char **argv) {
     else {
       std::fprintf(stderr, "usage: kp_replay REC.cs16 [--offset HZ] [--start S] [--seconds S] [--cnr DB] [--fs HZ] [--mix HZ] [--flash MHZ]\n"
                            "       [--as20] [--frames] [--woven] [--comb] [--luma-comb] [--adaptive] [--smooth] [--repair]\n"
-                           "       [--no-levels] [--no-flywheel] [--no-hold] [--no-filter] [--grid FILE] [-v]\n"
+                           "       [--no-levels] [--no-flywheel] [--no-hold] [--no-coast] [--coast-s S] [--no-filter]\n"
+                           "       [--grid FILE] [-v]\n"
                            "       [--loop N] [--fade T:DB,T:DB,...] [--fade-every S] [--drop T:N,T:N,...]\n");
       return 2;
     }

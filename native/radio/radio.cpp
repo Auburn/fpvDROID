@@ -510,6 +510,7 @@ void Radio::new_front_end(const Bank &b) {
   o.follow_levels = _follow_levels.load(std::memory_order_relaxed);
   o.flywheel = _flywheel.load(std::memory_order_relaxed);
   o.hold = _hold.load(std::memory_order_relaxed);
+  o.coast = _coast.load(std::memory_order_relaxed);
   o.channel_filter = _channel_filter.load(std::memory_order_relaxed);
   _fe = std::make_shared<FrontEnd>(b.fs, b.shift_hz, _gate.sink(), o, _picture.load());
   _fe_fs = b.fs;

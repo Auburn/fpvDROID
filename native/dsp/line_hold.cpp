@@ -84,7 +84,8 @@ LineHold::Verdict LineHold::line(const SyncSamples &s, const Line &l) {
     }
     return v;
   }
-  if (found64() >= kStrong) {
+  // (not on pulses of noise: in a dropout, or with the sync's noise too large for a line to find its own)
+  if (found64() >= kStrong && !coasting() && single_lines_can(l)) {
     KP_LOGD("video: the lines find their hsync again, after %d lines held by the fold (tip %.2f blank %.2f, noise %.2f)",
             _weak_lines, l.levels.tip, l.levels.blank, std::sqrt(_fold_var));
     _weak = false;
