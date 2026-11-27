@@ -41,7 +41,7 @@ public:
   // picture: the switches, which whoever owns the decoder may change at any time (FrontEnd::set_picture)
   Decoder(double fs, FrameSink sink, const DecoderOpts &o, const std::atomic<PictureOpts> &picture)
       : fs(fs), sink(std::move(sink)), o(o), picture(picture), levels(fs), drawer(o.width, fs), burst(fs, o.hold), filt(fs, o.colour),
-        spark(fs), hold(fs) {
+        spark(fs), hold(fs, o.coast ? o.coast_s : 0) {
     lp_sync.design(1.0e6, fs);
     acq.resize(static_cast<size_t>(fs * 0.06));  // 60 ms
     set_std(o.std_force == 2 ? kPal : kNtsc);
@@ -213,6 +213,7 @@ private:
   LineHold hold;
   VertSync vert;
   SyncNoise noise;
+  float snr_now = 0;  // the sync's snr as noise last judged it (every SyncNoise::kLines lines; 0: not known)
   // The sync depth of better times, while nearly every line finds its hsync: a weak signal does not show it (the
   // discriminator is then captured by the noise part of the time, and tip and blanking both shrink towards the
   // middle of the band). For the front end's channel filter (sync).
@@ -387,11 +388,11 @@ private:
 
   // fpvDROID: lost when fewer than 40 % of the last ~2 fields' lines found their hsync (a healthy picture
   // locks ~90 %: only the vertical interval freewheels). The spike used the ratio since acquisition. With the
-  // hold, which takes such a signal over long before: when the fold has not shown the hsync for half a second
-  // (LineHold::lost).
+  // hold, which takes such a signal over long before: when the fold has not shown the hsync for half a second,
+  // or coasting for as long as the lock had lasted (LineHold::lost).
   void check_lost() {
     if (hold.holding()) {  // the fold has the say
-      if (hold.lost(T)) {
+      if (hold.lost(T, lines)) {
         losses++;
         KP_LOGI("video: lost lock (no hsync in the fold for %.1f s), re-acquiring", hold.silent_s(T));
         restart_acquisition();
@@ -428,6 +429,7 @@ private:
     hold.restart();
     vert.reset();
     noise.restart();
+    snr_now = 0;
   }
 
   // acquisition: pick polarity + levels + line period from a 60 ms buffer
@@ -675,9 +677,16 @@ private:
     // another of its lines, and while lines say the levels have moved: when they have (end_line), it is dropped.
     const bool vs = line_low > 0.5 * T;
     if (o.hold) {  // the vertical sync by what its half lines are, which shows in noise
-      if (const std::optional<FieldStart> s = vert.line(sync_now(), line_start, T, fs, levels.sign, {levels.tip, levels.blank},
-                                                        std_ == &kPal, line_idx))
+      // (not in a dropout: its half lines are noise, and the fields go by their rhythm, where there is one to go
+      // by: the flywheel's, with a field in hand. Reset, it also calls none of the dropout's lines one of broad
+      // pulses (broad, below), so all of them go into the fold: left running on the noise it kept some out, and
+      // after a gap the lines and the fields were right a little less of the time.)
+      if (hold.coasting() && rhythm.knows(cur_field)) {
+        vert.reset();
+      } else if (const std::optional<FieldStart> s = vert.line(sync_now(), line_start, T, fs, levels.sign,
+                                                               {levels.tip, levels.blank}, std_ == &kPal, line_idx)) {
         found_start(*s, StartBy::halves);
+      }
     }
     if (hold.holding()) {
       pending_start.reset();  // (a run under the threshold says nothing in such noise)
@@ -738,13 +747,15 @@ private:
     const SyncSamples s = sync_now();
     if (noise.line(s, line_start, fs, std_ == &kPal ? 4.43361875e6 : 3.579545e6)) {
       const float depth = levels.blank - levels.tip;
-      if (noise.round())
-        if (const float snr = noise.snr(depth); snr > 0) burst.sync_snr(snr);  // (colour goes by it)
+      if (noise.round()) {
+        snr_now = noise.snr(depth);
+        if (snr_now > 0) burst.sync_snr(snr_now);  // (colour goes by it)
+      }
       // (lines >= 128: the first 64 lines after an acquisition count as found before they are)
       if (hold.clean() && lines >= 128 && depth > 0.2f) depth_ref += (depth_ref > 0 ? 1.f / 16 : 1.f) * (depth - depth_ref);
     }
     const LineHold::Verdict v = hold.line(s, {line_start, next, line_idx, line_in_field(), lines, broad, T, levels.sign,
-                                              {levels.tip, levels.blank}});
+                                              {levels.tip, levels.blank}, snr_now});
     T = v.T;
     if (v.levels) levels.set(v.levels->tip, v.levels->blank);
     if (v.rephased) {  // the signal had moved, and the grid is on it again

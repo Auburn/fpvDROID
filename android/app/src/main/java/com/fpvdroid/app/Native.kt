@@ -75,7 +75,7 @@ interface Engine {
     /** Debug: a moving test picture in place of video (no adapter needed), for looking at the screen side alone. */
     fun testCard(on: Boolean) {}
     /**
-     * Debug: a switch by name. KP_CONCEAL, KP_FAST_CPUS, KP_LEVELS, KP_FLYWHEEL, KP_HOLD and KP_FILTER are the radio's
+     * Debug: a switch by name. KP_CONCEAL, KP_FAST_CPUS, KP_LEVELS, KP_FLYWHEEL, KP_HOLD, KP_COAST and KP_FILTER are the radio's
      * own ("0" turns one off); KP_FRONT_BUFFER ("0": no front-buffer drawing), KP_PRESENT_ALIGN and KP_PRESENT_MARGIN_US (how
      * strips go up without it) the screen's (native/render/screen.h). Any other is an environment variable for
      * wifi-sdr / devourer, in place from the next open ("" removes it).
